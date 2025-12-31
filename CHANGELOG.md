@@ -38,6 +38,7 @@ This project didn’t previously have a formal changelog. The entries below were
 ### Fixed
 
 - Server crash on missing ship data ("Invalid access to property 'ships' on Nil") by introducing shared ship logic and tightening types.
+- Server exits cleanly if the listen port is already in use.
 - Map editor keybind conflicts where `Ctrl+S` / `Ctrl+O` could also trigger movement.
 - Tile palette tileset scanning compatibility by using `TileSet.get_source_count()` + `get_source_id(i)` (instead of `get_source_ids()`).
 - Client-side map load logging and collision-layer parsing (aligning with LevelIO return values).

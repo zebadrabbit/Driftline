@@ -83,6 +83,8 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Server runs an authoritative fixed tick.
 - Client sends input commands; server broadcasts snapshots.
 - Core simulation logic lives in `shared/` so both sides agree on movement/collisions.
+- Server spawn locations can come from map `entities` with `type="spawn"`.
+- Wall-bounce sound is triggered from shared collision events (client-side audio).
 
 ## License
 
