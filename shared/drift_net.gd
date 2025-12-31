@@ -121,12 +121,24 @@ static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Ve
 	return buffer.data_array
 
 
-static func pack_welcome_packet(ship_id: int) -> PackedByteArray:
+static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray()) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
 
 	buffer.put_u8(PKT_WELCOME)
 	buffer.put_32(ship_id)
+	# Optional: deterministic map checksum for handshake verification.
+	# Layout extension:
+	#   u8 checksum_len (0 or N)
+	#   u8[N] checksum
+	var checksum_len: int = map_checksum.size()
+	if checksum_len < 0:
+		checksum_len = 0
+	if checksum_len > 255:
+		checksum_len = 255
+	buffer.put_u8(checksum_len)
+	if checksum_len > 0:
+		buffer.put_data(map_checksum.slice(0, checksum_len))
 
 	return buffer.data_array
 
@@ -146,9 +158,16 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 		return {}
 
 	var ship_id: int = buffer.get_32()
+	var checksum: PackedByteArray = PackedByteArray()
+	# Backward compatible: checksum field may be absent.
+	if bytes.size() >= (1 + 4 + 1):
+		var checksum_len: int = int(buffer.get_u8())
+		if checksum_len > 0 and bytes.size() >= (1 + 4 + 1 + checksum_len):
+			checksum = buffer.get_data(checksum_len)
 	return {
 		"type": pkt_type,
 		"ship_id": ship_id,
+		"map_checksum": checksum,
 	}
 
 

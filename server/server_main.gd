@@ -15,6 +15,7 @@ const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
+const DriftMap = preload("res://shared/drift_map.gd")
 
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
@@ -43,6 +44,8 @@ var latest_snapshot: DriftTypes.DriftWorldSnapshot
 
 var enet_peer: ENetMultiplayerPeer
 var next_ship_id: int = 1
+
+var map_checksum: PackedByteArray = PackedByteArray()
 
 var quit_flag_path: String = QUIT_FLAG_PATH
 var quit_after_seconds: float = -1.0
@@ -187,22 +190,28 @@ func _load_map(path: String) -> void:
 		return
 	
 	var data: Dictionary = json.data
-	if not data.has("meta") or not data.has("layers"):
-		push_error("Invalid map format: " + path)
-		return
-	
-	var meta: Dictionary = data["meta"]
-	var layers: Dictionary = data["layers"]
-	
-	# Load solid tiles
-	if layers.has("solid"):
-		var solid_layer: Array = layers["solid"]
-		world.set_solid_tiles(solid_layer)
-	
-	# Add boundary
-	if meta.has("w") and meta.has("h"):
-		world.add_boundary_tiles(meta["w"], meta["h"])
-		print("Loaded map: ", meta["w"], "x", meta["h"], " tiles, ", world.solid_tiles.size(), " solid tiles")
+	var validated := DriftMap.validate_and_canonicalize(data)
+	if not bool(validated.get("ok", false)):
+		push_error("Map validation failed: " + path)
+		for e in (validated.get("errors", []) as Array):
+			push_error(" - " + String(e))
+	# Warnings are non-fatal but should be visible.
+	for w in (validated.get("warnings", []) as Array):
+		print("[MAP] warning: ", String(w))
+
+	var canonical: Dictionary = validated.get("map", {})
+	var meta: Dictionary = canonical.get("meta", {})
+	var layers: Dictionary = canonical.get("layers", {})
+	var w_tiles: int = int(meta.get("w", 64))
+	var h_tiles: int = int(meta.get("h", 64))
+
+	# Load solid tiles (canonical list)
+	world.set_solid_tiles(layers.get("solid", []))
+	world.add_boundary_tiles(w_tiles, h_tiles)
+
+	map_checksum = DriftMap.checksum_sha256(canonical)
+	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")
+	print("Map checksum (sha256): ", DriftMap.bytes_to_hex(map_checksum))
 
 
 func _on_peer_connected(peer_id: int) -> void:
@@ -383,7 +392,7 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 
 
 func _send_welcome(peer_id: int, ship_id: int) -> void:
-	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id)
+	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum)
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
 	enet_peer.set_target_peer(peer_id)

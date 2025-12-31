@@ -17,6 +17,7 @@ const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
+const DriftMap = preload("res://shared/drift_map.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
@@ -43,6 +44,8 @@ var connection_status_message: String = "Not connected"
 var allow_offline_mode: bool = false
 
 var world: DriftWorld
+
+var client_map_checksum: PackedByteArray = PackedByteArray()
 var accumulator_seconds: float = 0.0
 
 # Camera2D reference
@@ -144,6 +147,8 @@ func _load_client_map() -> void:
 
 	# Also read raw layers for collision data (sparse cells list).
 	var raw := LevelIO.read_map_data("res://client/maps/default.json")
+	client_map_checksum = DriftMap.checksum_sha256(raw)
+	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
 	var meta: Dictionary = raw.get("meta", meta_applied)
 	var layers: Dictionary = raw.get("layers", {})
 	
@@ -758,6 +763,21 @@ func _poll_network_packets() -> void:
 		if pkt_type == DriftNet.PKT_WELCOME:
 			var w: Dictionary = DriftNet.unpack_welcome_packet(bytes)
 			if not w.is_empty():
+				var server_checksum: PackedByteArray = w.get("map_checksum", PackedByteArray())
+				if server_checksum.size() > 0 and client_map_checksum.size() > 0 and server_checksum != client_map_checksum:
+					var server_hex := DriftMap.bytes_to_hex(server_checksum)
+					var client_hex := DriftMap.bytes_to_hex(client_map_checksum)
+					push_error("Map checksum mismatch. server=" + server_hex + " client=" + client_hex)
+					connection_status_message = "Map mismatch with server. Load the same map JSON." 
+					show_connect_ui = true
+					allow_offline_mode = false
+					is_connected = false
+					_update_ui_visibility()
+					if enet_peer != null:
+						enet_peer.close()
+						enet_peer = null
+					return
+
 				local_ship_id = w["ship_id"]
 				if DEBUG_NET:
 					print("[NET] assigned ship_id=", local_ship_id)
