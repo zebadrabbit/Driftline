@@ -526,14 +526,14 @@ func _remove_entity_at_cell(cell: Vector2i) -> void:
 
 
 func _paste_map_from_clipboard() -> void:
-	var s := DisplayServer.clipboard_get()
-	var parsed := LevelIO.parse_map_json(s)
+	var s = DisplayServer.clipboard_get()
+	var parsed = LevelIO.parse_map_json(s)
 	if not bool(parsed.get("ok", false)):
 		_set_status("Paste failed: " + String(parsed.get("error", "Unknown error")), true)
 		return
 
 	var raw: Dictionary = parsed.get("data", {})
-	var map := LevelIO.normalize_map_data(raw)
+	var map = LevelIO.normalize_map_data(raw)
 	var meta: Dictionary = map.get("meta", {})
 	var w_tiles: int = int(meta.get("w", 0))
 	var h_tiles: int = int(meta.get("h", 0))
@@ -550,7 +550,7 @@ func _paste_map_from_clipboard() -> void:
 	var entities_count: int = (map.get("entities", []) as Array).size()
 	var tiles_count: int = 0
 	for layer_name in ["bg", "solid", "fg"]:
-		var layer := (map.get("layers", {}) as Dictionary).get(layer_name, [])
+		var layer = (map.get("layers", {}) as Dictionary).get(layer_name, [])
 		if layer is Array:
 			tiles_count += (layer as Array).size()
 	print("Map pasted from clipboard: ", w_tiles, "x", h_tiles, ", ", tiles_count, " tiles, ", entities_count, " entities")

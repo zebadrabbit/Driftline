@@ -194,7 +194,7 @@ static func count_tiles(map_data: Dictionary) -> int:
 	var layers: Dictionary = norm.get("layers", {})
 	var count: int = 0
 	for layer_name in ["bg", "solid", "fg"]:
-		var arr := layers.get(layer_name, [])
+		var arr = layers.get(layer_name, [])
 		if arr is Array:
 			count += (arr as Array).size()
 	return count
