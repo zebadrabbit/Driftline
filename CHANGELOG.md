@@ -15,6 +15,7 @@ This project didn’t previously have a formal changelog. The entries below were
   - New Map dialog (`Ctrl+N`) with size presets and custom width/height.
   - Load Map picker (`Ctrl+O`) for selecting among many saved maps.
   - Save copies map JSON to clipboard for easy paste.
+  - Paste/import map JSON from clipboard (`Ctrl+V`) with safe validation and visible error messages.
   - Rectangle fill tool with preview; `Shift` for outline.
   - Mouse-only cursor selection and WASD camera navigation decoupled.
   - Translucent tile cursor rendering (auto texture fallback if missing).

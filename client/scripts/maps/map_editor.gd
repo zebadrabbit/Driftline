@@ -24,6 +24,10 @@ var map_height_tiles: int = 1024
 @onready var camera: Camera2D = $Camera2D
 @onready var cursor_sprite: Sprite2D = $Cursor
 @onready var ui_label: Label = $UI/Label
+@onready var ui_root: CanvasLayer = $UI
+
+var status_label: Label
+var status_timer: float = 0.0
 
 var cursor_cell := Vector2i(10, 10)
 # Camera navigation cell (WASD only). Mouse should not affect this.
@@ -89,6 +93,7 @@ func _ready() -> void:
 	_build_palette_ui()
 	_build_new_map_ui()
 	_build_load_map_ui()
+	_build_status_ui()
 
 	# Ensure the cursor is visible even if the Sprite2D has no texture set in the scene.
 	# (The scene sets a region_rect, but without a texture nothing is drawn.)
@@ -113,6 +118,10 @@ func _map_height_cells() -> int:
 
 
 func _process(_delta: float) -> void:
+	if status_timer > 0.0:
+		status_timer -= _delta
+		if status_timer <= 0.0 and status_label != null:
+			status_label.text = ""
 	_update_ui()
 	# While dragging, keep the preview responsive.
 	if dragging:
@@ -218,6 +227,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Ctrl shortcuts should not trigger movement.
 	if event is InputEventKey and event.pressed and event.ctrl_pressed:
+		if event.keycode == KEY_V:
+			_paste_map_from_clipboard()
+			get_viewport().set_input_as_handled()
+			return
 		if event.keycode == KEY_S:
 			_save_map()
 			get_viewport().set_input_as_handled()
@@ -383,7 +396,56 @@ func _update_cursor_position(move_camera: bool = true) -> void:
 func _update_ui() -> void:
 	var layer_display := current_layer.to_upper()
 	var atlas_str := "(%d,%d)" % [selected_atlas_coords.x, selected_atlas_coords.y]
-	ui_label.text = "Map: %d×%d | Cell: %s | Layer: %s | Tile: %s\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [Shift+Q/E] Favorites | [Ctrl+N] New | [Ctrl+S] Save | [Ctrl+O] Load… | [Ctrl+Shift+O] Load Latest | [Esc] Exit" % [map_width_tiles, map_height_tiles, cursor_cell, layer_display, atlas_str]
+	ui_label.text = "Map: %d×%d | Cell: %s | Layer: %s | Tile: %s\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [Shift+Q/E] Favorites | [Ctrl+N] New | [Ctrl+S] Save+Copy | [Ctrl+V] Paste | [Ctrl+O] Load… | [Ctrl+Shift+O] Load Latest | [Esc] Exit" % [map_width_tiles, map_height_tiles, cursor_cell, layer_display, atlas_str]
+
+
+func _build_status_ui() -> void:
+	if ui_root == null:
+		return
+	status_label = Label.new()
+	status_label.name = "Status"
+	status_label.position = Vector2(12, 72)
+	status_label.modulate = Color(1, 0.6, 0.6, 1)
+	ui_root.add_child(status_label)
+	status_label.text = ""
+
+
+func _set_status(msg: String, is_error: bool = false, seconds: float = 4.0) -> void:
+	if status_label == null:
+		return
+	status_label.text = msg
+	status_label.modulate = Color(1, 0.35, 0.35, 1) if is_error else Color(0.6, 1, 0.6, 1)
+	status_timer = seconds
+
+
+func _paste_map_from_clipboard() -> void:
+	var s := DisplayServer.clipboard_get()
+	var parsed := LevelIO.parse_map_json(s)
+	if not bool(parsed.get("ok", false)):
+		_set_status("Paste failed: " + String(parsed.get("error", "Unknown error")), true)
+		return
+
+	var raw: Dictionary = parsed.get("data", {})
+	var map := LevelIO.normalize_map_data(raw)
+	var meta: Dictionary = map.get("meta", {})
+	var w_tiles: int = int(meta.get("w", 0))
+	var h_tiles: int = int(meta.get("h", 0))
+	if w_tiles <= 0 or h_tiles <= 0:
+		_set_status("Paste failed: missing map size", true)
+		return
+
+	# Resize the editor map BEFORE applying tiles.
+	_create_new_map(w_tiles * LevelIO.TILE_SIZE, h_tiles * LevelIO.TILE_SIZE)
+	LevelIO.apply_map_data(map, _tilemaps)
+
+	var entities_count: int = (map.get("entities", []) as Array).size()
+	var tiles_count: int = 0
+	for layer_name in ["bg", "solid", "fg"]:
+		var layer := (map.get("layers", {}) as Dictionary).get(layer_name, [])
+		if layer is Array:
+			tiles_count += (layer as Array).size()
+	print("Map pasted from clipboard: ", w_tiles, "x", h_tiles, ", ", tiles_count, " tiles, ", entities_count, " entities")
+	_set_status("Map pasted: %dx%d" % [w_tiles, h_tiles], false)
 
 
 func _build_new_map_ui() -> void:

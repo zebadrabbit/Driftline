@@ -5,6 +5,132 @@ extends Node
 
 const TILE_SIZE := 16
 
+const DEFAULT_WIDTH_TILES: int = 64
+const DEFAULT_HEIGHT_TILES: int = 64
+
+
+## Safe JSON parse for map import (clipboard / network / file content).
+## Returns: { ok: bool, error: String, data: Dictionary }
+static func parse_map_json(json_string: String) -> Dictionary:
+	var result := {
+		"ok": false,
+		"error": "",
+		"data": {}
+	}
+	if json_string.strip_edges() == "":
+		result["error"] = "Clipboard is empty"
+		return result
+
+	var parsed = JSON.parse_string(json_string)
+	if parsed == null:
+		result["error"] = "Invalid JSON"
+		return result
+	if typeof(parsed) != TYPE_DICTIONARY:
+		result["error"] = "Map JSON must be an object"
+		return result
+
+	result["ok"] = true
+	result["data"] = parsed
+	return result
+
+
+## Normalize raw map data for backward/forward compatibility.
+## Ensures:
+## - meta exists and has w/h (tile counts)
+## - layers exists with bg/solid/fg arrays
+## - entities exists as an array
+## Returns a normalized Dictionary (map object).
+static func normalize_map_data(data: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+
+	# Preserve top-level fields.
+	for k in data.keys():
+		out[k] = data[k]
+
+	var meta: Dictionary = {}
+	if out.has("meta") and out["meta"] is Dictionary:
+		meta = out["meta"]
+	else:
+		meta = {}
+		out["meta"] = meta
+
+	# Determine width/height (tile counts). Accept legacy root width/height that may be pixels.
+	var w_tiles: int = int(meta.get("w", 0))
+	var h_tiles: int = int(meta.get("h", 0))
+	if w_tiles <= 0:
+		var w_raw: int = int(out.get("width", 0))
+		if w_raw > 0:
+			# Heuristic: if it looks like pixels (large and divisible), convert.
+			w_tiles = int(w_raw / TILE_SIZE) if (w_raw >= 256 and w_raw % TILE_SIZE == 0) else w_raw
+		else:
+			w_tiles = DEFAULT_WIDTH_TILES
+	if h_tiles <= 0:
+		var h_raw: int = int(out.get("height", 0))
+		if h_raw > 0:
+			h_tiles = int(h_raw / TILE_SIZE) if (h_raw >= 256 and h_raw % TILE_SIZE == 0) else h_raw
+		else:
+			h_tiles = DEFAULT_HEIGHT_TILES
+
+	meta["w"] = w_tiles
+	meta["h"] = h_tiles
+	meta["tile_size"] = int(meta.get("tile_size", TILE_SIZE))
+	# Keep root width/height present for tools that expect them (store pixels).
+	out["width"] = int(out.get("width", w_tiles * TILE_SIZE))
+	out["height"] = int(out.get("height", h_tiles * TILE_SIZE))
+
+	# Layers
+	var layers: Dictionary = {}
+	if out.has("layers") and out["layers"] is Dictionary:
+		layers = out["layers"]
+	else:
+		layers = {}
+		out["layers"] = layers
+
+	for layer_name in ["bg", "solid", "fg"]:
+		if not layers.has(layer_name) or not (layers[layer_name] is Array):
+			layers[layer_name] = []
+
+	# Entities (Part 2)
+	if not out.has("entities") or not (out["entities"] is Array):
+		out["entities"] = []
+
+	return out
+
+
+## Apply a pre-parsed map data Dictionary to TileMaps.
+## Returns normalized meta (contains w/h).
+static func apply_map_data(map_data: Dictionary, tilemaps: Dictionary) -> Dictionary:
+	var norm := normalize_map_data(map_data)
+	var meta: Dictionary = norm.get("meta", {})
+	var layers: Dictionary = norm.get("layers", {})
+	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
+	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
+
+	# Clear all layers
+	for layer_name in ["bg", "solid", "fg"]:
+		if tilemaps.has(layer_name) and tilemaps[layer_name] != null:
+			(tilemaps[layer_name] as TileMap).clear()
+
+	# Apply loaded tiles
+	for layer_name in ["bg", "solid", "fg"]:
+		if not layers.has(layer_name) or not tilemaps.has(layer_name) or tilemaps[layer_name] == null:
+			continue
+		var tilemap: TileMap = tilemaps[layer_name]
+		var cells: Array = layers[layer_name]
+		for cell_data in cells:
+			if cell_data is Array and cell_data.size() == 4:
+				var x: int = int(cell_data[0])
+				var y: int = int(cell_data[1])
+				var ax: int = int(cell_data[2])
+				var ay: int = int(cell_data[3])
+				tilemap.set_cell(0, Vector2i(x, y), 0, Vector2i(ax, ay))
+
+	# Apply boundary
+	if tilemaps.has("solid") and tilemaps["solid"] != null:
+		apply_boundary(tilemaps["solid"], w, h)
+
+	return meta
+
 ## Sparse save format: only stores placed tiles, not empty cells.
 ## Boundary tiles are NOT saved; they are generated on load.
 static func save_map_to_json(path: String, width: int, height: int, tileset_name: String, tilemaps: Dictionary) -> Error:
@@ -102,23 +228,12 @@ static func load_map_from_json(path: String, tilemaps: Dictionary) -> Dictionary
 	if not data.has("meta") or not data.has("layers"):
 		push_error("Invalid map format: " + path)
 		return {}
-	
-	var meta: Dictionary = data["meta"]
-	var layers: Dictionary = data["layers"]
-	# Backward compatible width/height lookup.
-	# Root width/height are pixels. meta.w/meta.h are tiles.
-	var w_px: int = int(data.get("width", int(meta.get("w", 64)) * TILE_SIZE))
-	var h_px: int = int(data.get("height", int(meta.get("h", 64)) * TILE_SIZE))
-	if w_px <= 0:
-		w_px = 1024
-	if h_px <= 0:
-		h_px = 1024
-	var w: int = int(meta.get("w", w_px / TILE_SIZE))
-	var h: int = int(meta.get("h", h_px / TILE_SIZE))
-	meta["w"] = w
-	meta["h"] = h
-	meta["width"] = w_px
-	meta["height"] = h_px
+
+	var norm := normalize_map_data(data)
+	var meta: Dictionary = norm["meta"]
+	var layers: Dictionary = norm["layers"]
+	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
+	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
 	
 	# Clear all layers
 	for layer_name in ["bg", "solid", "fg"]:
@@ -165,22 +280,10 @@ static func load_map_meta(path: String) -> Dictionary:
 		return {"width": 1024, "height": 1024, "w": 64, "h": 64}
 
 	var data: Dictionary = json.data
-	var meta: Dictionary = {}
-	if data.has("meta"):
-		meta = data["meta"]
-
-	var w_px: int = int(data.get("width", int(meta.get("w", 64)) * TILE_SIZE))
-	var h_px: int = int(data.get("height", int(meta.get("h", 64)) * TILE_SIZE))
-	if w_px <= 0:
-		w_px = 1024
-	if h_px <= 0:
-		h_px = 1024
-	var w: int = int(meta.get("w", w_px / TILE_SIZE))
-	var h: int = int(meta.get("h", h_px / TILE_SIZE))
-	meta["w"] = w
-	meta["h"] = h
-	meta["width"] = w_px
-	meta["height"] = h_px
+	var norm := normalize_map_data(data)
+	var meta: Dictionary = norm.get("meta", {})
+	meta["width"] = int(norm.get("width", int(meta.get("w", DEFAULT_WIDTH_TILES)) * TILE_SIZE))
+	meta["height"] = int(norm.get("height", int(meta.get("h", DEFAULT_HEIGHT_TILES)) * TILE_SIZE))
 	return meta
 
 
