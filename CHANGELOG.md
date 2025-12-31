@@ -24,6 +24,7 @@ This project didn’t previously have a formal changelog. The entries below were
 - Client connection UI (client does not silently run “solo”).
 - Reverse thrust input propagated through shared input types and packet serialization.
 - Deterministic map validation + canonical SHA-256 checksum (shared) and welcome-handshake verification.
+- Map format spec: `docs/map_format_v1.md`.
 
 ### Changed
 

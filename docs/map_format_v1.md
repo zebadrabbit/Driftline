@@ -1,0 +1,97 @@
+# Map Format v1 (JSON)
+
+This document describes the current on-disk / clipboard JSON map format used by driftline.
+
+## Overview
+
+- Format: JSON object
+- Coordinate system: **tile coordinates** (`x`,`y`) where each tile is `tile_size` pixels (currently 16).
+- Boundary: the outermost tile ring is **generated** (walls) and should not be stored.
+- Layers: stored sparsely (only used tiles are listed).
+- Entities: optional gameplay markers stored as tile coordinates.
+
+## Schema
+
+Top-level object:
+
+```json
+{
+  "v": 1,
+  "meta": {
+    "w": 64,
+    "h": 64,
+    "tile_size": 16,
+    "tileset": "subspace_base"
+  },
+  "layers": {
+    "bg":    [[x, y, ax, ay], ...],
+    "solid": [[x, y, ax, ay], ...],
+    "fg":    [[x, y, ax, ay], ...]
+  },
+  "entities": [
+    {"type": "spawn", "x": 10, "y": 10, "team": 0},
+    {"type": "flag",  "x": 32, "y": 32, "team": 0},
+    {"type": "base",  "x": 50, "y": 50, "team": 0}
+  ]
+}
+```
+
+### `meta`
+
+- `w` / `h` (required): map size in **tiles**.
+- `tile_size`: size of a tile in pixels (currently 16).
+- `tileset`: a hint for which tileset atlas the editor expects.
+
+### `layers.*` tile entries
+
+Each entry is a 4-element array:
+
+- `x`, `y`: tile coordinate (0-based)
+- `ax`, `ay`: atlas coordinate inside the tileset atlas
+
+Notes:
+
+- Tiles on the boundary (where `x==0 || y==0 || x==w-1 || y==h-1`) are ignored/invalid for storage.
+- Order is not semantically meaningful; canonicalization (below) defines a stable ordering for hashing.
+
+### `entities`
+
+Each entity is an object:
+
+- `type`: one of `"spawn" | "flag" | "base"`
+- `x`, `y`: tile coordinate
+- `team`: integer (currently used as a placeholder; default 0)
+
+## Backward compatibility / normalization
+
+Some older maps may contain top-level `width`/`height` (pixels) instead of `meta.w`/`meta.h` (tiles).
+
+Normalization rules:
+
+- If `meta.w`/`meta.h` are missing or invalid, they may be derived from `width`/`height`:
+  - If the value is large and divisible by 16, it is treated as pixels and converted to tiles.
+  - Otherwise it is treated as tiles.
+- Missing `layers.bg/solid/fg` are defaulted to empty arrays.
+- Missing `entities` is defaulted to an empty array.
+
+## Canonicalization and checksum
+
+To ensure client/server determinism, both sides compute a **canonical SHA-256 checksum** of a normalized map.
+
+Canonicalization rules (implemented in `shared/drift_map.gd`):
+
+- Only these fields contribute to the checksum:
+  - `v`, `meta.{w,h,tile_size,tileset}`, `layers.{bg,solid,fg}`, `entities`
+- Boundary tiles are excluded.
+- Invalid/out-of-bounds entries are rejected.
+- Duplicate tiles at the same `(x,y)` within a layer: **last wins**.
+- Duplicate entities at the same `(type,x,y)`: **last wins**.
+- Sorting:
+  - Each layer is sorted by `(x, y, ax, ay)`.
+  - Entities are sorted by `(type, x, y, team)`.
+- The canonical JSON string is emitted with a fixed key order and no extra whitespace.
+- The checksum is computed as `sha256(UTF8(canonical_json_string))`.
+
+## Network handshake
+
+On connect, the server sends its map checksum in the welcome packet. The client computes its own checksum from the currently loaded map and verifies it matches. If it does not match, the client disconnects and shows a "Map mismatch" message.
