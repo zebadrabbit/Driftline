@@ -46,6 +46,7 @@ var enet_peer: ENetMultiplayerPeer
 var next_ship_id: int = 1
 
 var map_checksum: PackedByteArray = PackedByteArray()
+var map_entities: Array = []
 
 var quit_flag_path: String = QUIT_FLAG_PATH
 var quit_after_seconds: float = -1.0
@@ -202,6 +203,7 @@ func _load_map(path: String) -> void:
 	var canonical: Dictionary = validated.get("map", {})
 	var meta: Dictionary = canonical.get("meta", {})
 	var layers: Dictionary = canonical.get("layers", {})
+	map_entities = canonical.get("entities", [])
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
 
@@ -212,6 +214,11 @@ func _load_map(path: String) -> void:
 	map_checksum = DriftMap.checksum_sha256(canonical)
 	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")
 	print("Map checksum (sha256): ", DriftMap.bytes_to_hex(map_checksum))
+	var spawn_count: int = 0
+	for e in map_entities:
+		if typeof(e) == TYPE_DICTIONARY and String((e as Dictionary).get("type", "")) == "spawn":
+			spawn_count += 1
+	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ")")
 
 
 func _on_peer_connected(peer_id: int) -> void:
@@ -400,10 +407,27 @@ func _send_welcome(peer_id: int, ship_id: int) -> void:
 
 
 func _spawn_for_ship_id(ship_id: int) -> Vector2:
-	# Spread spawns in a small deterministic grid.
+	# Prefer authored spawn entities if present.
+	# Deterministic choice: index by (ship_id-1) modulo spawn count.
+	var spawn_cells: Array = []
+	for e in map_entities:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		if String(d.get("type", "")) != "spawn":
+			continue
+		spawn_cells.append(Vector2i(int(d.get("x", 0)), int(d.get("y", 0))))
+
 	var index: int = ship_id - 1
 	var dx: float = float(index % 4) * 48.0
 	var dy: float = float(index / 4) * 48.0
+	if spawn_cells.size() > 0:
+		var c: Vector2i = spawn_cells[index % spawn_cells.size()]
+		# Place at tile center.
+		var base := Vector2(float(c.x) + 0.5, float(c.y) + 0.5) * float(DriftMap.TILE_SIZE)
+		return base + Vector2(dx, dy)
+
+	# Fallback: original deterministic grid around a fixed point.
 	return SPAWN_POSITION + Vector2(dx, dy)
 
 
