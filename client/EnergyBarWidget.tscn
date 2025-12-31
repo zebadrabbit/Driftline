@@ -1,0 +1,63 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://client/EnergyBarWidget.gd" id="1"]
+
+[node name="EnergyBarWidget" type="Control"]
+script = ExtResource("1")
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
+
+# Reserve a small area on the right for numeric readout.
+[node name="BarArea" type="Control" parent="."]
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 4.0
+offset_top = 4.0
+offset_right = -44.0
+offset_bottom = -4.0
+
+[node name="Fill" type="TextureRect" parent="BarArea"]
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 0.0
+anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
+expand_mode = 1
+stretch_mode = 0
+region_enabled = true
+
+[node name="Frame" type="TextureRect" parent="BarArea"]
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
+expand_mode = 1
+stretch_mode = 0
+
+[node name="ValueLabel" type="Label" parent="."]
+anchor_left = 1.0
+anchor_top = 0.5
+anchor_right = 1.0
+anchor_bottom = 0.5
+offset_left = -40.0
+offset_top = -10.0
+offset_right = -4.0
+offset_bottom = 10.0
+horizontal_alignment = 2
+vertical_alignment = 1
+text = "100"

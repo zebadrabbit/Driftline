@@ -1,0 +1,34 @@
+[gd_scene load_steps=5 format=3 uid="uid://g1imcdg7uheo"]
+
+[ext_resource type="Script" uid="uid://bjwl2w68e402h" path="res://client/client_main.gd" id="1"]
+[ext_resource type="PackedScene" path="res://client/Starfield.tscn" id="2_fnhm5"]
+[ext_resource type="PackedScene" path="res://client/HUD.tscn" id="3_hud"]
+[ext_resource type="TileSet" uid="uid://covf7445kc8ex" path="res://client/graphics/tilesets/subspace_base/tileset.tres" id="5_tileset"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1")
+
+[node name="Starfield" parent="." instance=ExtResource("2_fnhm5")]
+
+[node name="TileMapBG" type="TileMap" parent="."]
+tile_set = ExtResource("5_tileset")
+format = 2
+layer_0/name = "Background"
+layer_0/z_index = -100
+
+[node name="TileMapSolid" type="TileMap" parent="."]
+tile_set = ExtResource("5_tileset")
+format = 2
+layer_0/name = "Solid"
+
+[node name="TileMapFG" type="TileMap" parent="."]
+tile_set = ExtResource("5_tileset")
+format = 2
+layer_0/name = "Foreground"
+layer_0/z_index = 100
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position_smoothing_enabled = true
+position_smoothing_speed = 8.0
+
+[node name="HUD" parent="." instance=ExtResource("3_hud")]

@@ -1,0 +1,32 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Godot import artifacts (keeps repo clean; re-generated on import)
+.import/
+*.import
+
+# Exported builds
+export/
+build/
+dist/
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+*.swp
+
+# IDE/editor folders
+.vscode/
+.idea/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+._*
+
+# Crash dumps
+*.dmp
