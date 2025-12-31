@@ -45,6 +45,13 @@ Controls (editor):
 - `Ctrl+S`: save map JSON to `user://maps` and copy the JSON to clipboard (hold `Shift` to also print it)
 - `Ctrl+O`: load map (shows a picker if there are multiple)
 - `Ctrl+Shift+O`: load newest map directly
+- `F`: toggle tile vs entity edit mode
+- `1` / `2` / `3`: select entity type (`spawn` / `flag` / `base`)
+
+Entity mode:
+
+- `LMB` or `Space`: place an entity at cursor
+- `RMB` or `Backspace`: remove an entity at cursor
 
 Map sizes in the editor UI are in pixels (multiples of 16). Internally the map is stored in tiles.
 

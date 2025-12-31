@@ -29,6 +29,11 @@ var map_height_tiles: int = 1024
 var status_label: Label
 var status_timer: float = 0.0
 
+enum EditMode { TILE, ENTITY }
+var edit_mode: EditMode = EditMode.TILE
+var selected_entity_type: String = "spawn"
+var entities: Array = []
+
 var cursor_cell := Vector2i(10, 10)
 # Camera navigation cell (WASD only). Mouse should not affect this.
 var camera_cell := Vector2i(10, 10)
@@ -130,28 +135,56 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	# Editor-only rectangle preview when dragging.
-	if not dragging:
-		return
+	if dragging:
+		var a := drag_start_cell
+		var b := drag_end_cell
+		var min_x: int = mini(a.x, b.x)
+		var max_x: int = maxi(a.x, b.x)
+		var min_y: int = mini(a.y, b.y)
+		var max_y: int = maxi(a.y, b.y)
 
-	var a := drag_start_cell
-	var b := drag_end_cell
-	var min_x: int = mini(a.x, b.x)
-	var max_x: int = maxi(a.x, b.x)
-	var min_y: int = mini(a.y, b.y)
-	var max_y: int = maxi(a.y, b.y)
+		var tile_size: float = float(LevelIO.TILE_SIZE)
+		var top_left_world := Vector2(min_x, min_y) * tile_size
+		var size_world := Vector2(max_x - min_x + 1, max_y - min_y + 1) * tile_size
 
+		# Draw in this Node2D's local space.
+		var rect := Rect2(to_local(top_left_world), size_world)
+
+		var outline_only := Input.is_key_pressed(KEY_SHIFT)
+		if not outline_only:
+			draw_rect(rect, Color(0.2, 0.8, 1.0, 0.15), true)
+		# Border
+		draw_rect(rect, Color(0.2, 0.8, 1.0, 0.8), false, 2.0)
+
+	# Draw entities (simple shapes) in world-aligned tile space.
+	_draw_entities()
+
+
+func _draw_entities() -> void:
 	var tile_size: float = float(LevelIO.TILE_SIZE)
-	var top_left_world := Vector2(min_x, min_y) * tile_size
-	var size_world := Vector2(max_x - min_x + 1, max_y - min_y + 1) * tile_size
-
-	# Draw in this Node2D's local space.
-	var rect := Rect2(to_local(top_left_world), size_world)
-
-	var outline_only := Input.is_key_pressed(KEY_SHIFT)
-	if not outline_only:
-		draw_rect(rect, Color(0.2, 0.8, 1.0, 0.15), true)
-	# Border
-	draw_rect(rect, Color(0.2, 0.8, 1.0, 0.8), false, 2.0)
+	for e in entities:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		var t: String = String(d.get("type", ""))
+		var x: int = int(d.get("x", -1))
+		var y: int = int(d.get("y", -1))
+		if x < 0 or y < 0:
+			continue
+		var center_world := Vector2(x, y) * tile_size + Vector2.ONE * (tile_size / 2.0)
+		var p := to_local(center_world)
+		var r := tile_size * 0.28
+		if t == "spawn":
+			draw_circle(p, r, Color(0.2, 1.0, 0.2, 0.85))
+		elif t == "flag":
+			var tri := PackedVector2Array([
+				p + Vector2(0, -r),
+				p + Vector2(r, r),
+				p + Vector2(-r, r)
+			])
+			draw_polygon(tri, PackedColorArray([Color(1.0, 0.9, 0.2, 0.85)]))
+		elif t == "base":
+			draw_rect(Rect2(p - Vector2(r, r), Vector2(r * 2.0, r * 2.0)), Color(0.2, 0.6, 1.0, 0.85), true)
 
 
 func _get_active_tilemap() -> TileMap:
@@ -243,6 +276,27 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 
+	# Mode toggle / entity type selection
+	if event is InputEventKey and event.pressed and not event.echo and not event.ctrl_pressed:
+		if event.keycode == KEY_F:
+			edit_mode = EditMode.ENTITY if edit_mode == EditMode.TILE else EditMode.TILE
+			_set_status("Mode: %s" % ("ENTITY" if edit_mode == EditMode.ENTITY else "TILE"), false, 2.0)
+			get_viewport().set_input_as_handled()
+			queue_redraw()
+			return
+		if event.keycode == KEY_1:
+			selected_entity_type = "spawn"
+			get_viewport().set_input_as_handled()
+			return
+		elif event.keycode == KEY_2:
+			selected_entity_type = "flag"
+			get_viewport().set_input_as_handled()
+			return
+		elif event.keycode == KEY_3:
+			selected_entity_type = "base"
+			get_viewport().set_input_as_handled()
+			return
+
 	# Mouse hover updates the cursor cell.
 	if event is InputEventMouseMotion:
 		_set_cursor_cell(_get_cell_under_mouse())
@@ -255,6 +309,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Mouse buttons should act on the cell under the mouse.
 	if event is InputEventMouseButton:
 		_set_cursor_cell(_get_cell_under_mouse())
+		# Entity mode: LMB places entity; RMB removes.
+		if edit_mode == EditMode.ENTITY:
+			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+				_place_entity_at_cell(cursor_cell)
+				get_viewport().set_input_as_handled()
+				return
+			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+				_remove_entity_at_cell(cursor_cell)
+				get_viewport().set_input_as_handled()
+				return
 
 	# Movement
 	var move_delta := Vector2i.ZERO
@@ -284,9 +348,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	
 	# Place tile (Space) / Rectangle fill tool (LMB drag)
 	if event.is_action_pressed("ui_accept"):
-		_place_tile()
-		get_viewport().set_input_as_handled()
-	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if edit_mode == EditMode.TILE:
+			_place_tile()
+			get_viewport().set_input_as_handled()
+		else:
+			_place_entity_at_cell(cursor_cell)
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and edit_mode == EditMode.TILE:
 		if event.pressed:
 			dragging = true
 			drag_start_cell = cursor_cell
@@ -303,7 +371,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	
 	# Erase tile (Backspace or RMB)
 	if event.is_action_pressed("ui_cancel") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT):
-		_erase_tile()
+		if edit_mode == EditMode.TILE:
+			_erase_tile()
+		else:
+			_remove_entity_at_cell(cursor_cell)
 		get_viewport().set_input_as_handled()
 	
 	# Cycle layer (Tab)
@@ -396,7 +467,8 @@ func _update_cursor_position(move_camera: bool = true) -> void:
 func _update_ui() -> void:
 	var layer_display := current_layer.to_upper()
 	var atlas_str := "(%d,%d)" % [selected_atlas_coords.x, selected_atlas_coords.y]
-	ui_label.text = "Map: %d×%d | Cell: %s | Layer: %s | Tile: %s\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [Shift+Q/E] Favorites | [Ctrl+N] New | [Ctrl+S] Save+Copy | [Ctrl+V] Paste | [Ctrl+O] Load… | [Ctrl+Shift+O] Load Latest | [Esc] Exit" % [map_width_tiles, map_height_tiles, cursor_cell, layer_display, atlas_str]
+	var mode_str := "ENTITY(%s)" % selected_entity_type if edit_mode == EditMode.ENTITY else "TILE"
+	ui_label.text = "Map: %d×%d | Mode: %s | Cell: %s | Layer: %s | Tile: %s\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [F] Mode | [1/2/3] Entity | [Shift+Q/E] Favorites | [Ctrl+N] New | [Ctrl+S] Save+Copy | [Ctrl+V] Paste | [Ctrl+O] Load… | [Ctrl+Shift+O] Load Latest | [Esc] Exit" % [map_width_tiles, map_height_tiles, mode_str, cursor_cell, layer_display, atlas_str]
 
 
 func _build_status_ui() -> void:
@@ -418,6 +490,41 @@ func _set_status(msg: String, is_error: bool = false, seconds: float = 4.0) -> v
 	status_timer = seconds
 
 
+func _find_entity_index(t: String, cell: Vector2i) -> int:
+	for i in range(entities.size()):
+		var e = entities[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		if String(d.get("type", "")) == t and int(d.get("x", -999)) == cell.x and int(d.get("y", -999)) == cell.y:
+			return i
+	return -1
+
+
+func _place_entity_at_cell(cell: Vector2i) -> void:
+	if _is_boundary_cell(cell):
+		_set_status("Cannot place entities on boundary", true, 2.0)
+		return
+	var idx := _find_entity_index(selected_entity_type, cell)
+	if idx != -1:
+		return
+	entities.append({"type": selected_entity_type, "x": cell.x, "y": cell.y, "team": 0})
+	queue_redraw()
+
+
+func _remove_entity_at_cell(cell: Vector2i) -> void:
+	# Remove the first entity found at this cell.
+	for i in range(entities.size()):
+		var e = entities[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		if int(d.get("x", -999)) == cell.x and int(d.get("y", -999)) == cell.y:
+			entities.remove_at(i)
+			queue_redraw()
+			return
+
+
 func _paste_map_from_clipboard() -> void:
 	var s := DisplayServer.clipboard_get()
 	var parsed := LevelIO.parse_map_json(s)
@@ -437,6 +544,8 @@ func _paste_map_from_clipboard() -> void:
 	# Resize the editor map BEFORE applying tiles.
 	_create_new_map(w_tiles * LevelIO.TILE_SIZE, h_tiles * LevelIO.TILE_SIZE)
 	LevelIO.apply_map_data(map, _tilemaps)
+	entities = map.get("entities", [])
+	queue_redraw()
 
 	var entities_count: int = (map.get("entities", []) as Array).size()
 	var tiles_count: int = 0
@@ -575,6 +684,7 @@ func _create_new_map(width: int, height: int) -> void:
 
 	for tilemap in _tilemaps.values():
 		tilemap.clear()
+	entities = []
 	LevelIO.apply_boundary(tilemap_solid, _map_width_cells(), _map_height_cells())
 
 	var w_cells := _map_width_cells()
@@ -829,8 +939,8 @@ func _save_map() -> void:
 	var filename := "map_%s.json" % timestamp
 	var full_path := dir_path.path_join(filename)
 
-	var json_str := LevelIO.build_map_json_string(_map_width_cells(), _map_height_cells(), _tileset_name, _tilemaps)
-	var err := LevelIO.save_map_to_json(full_path, _map_width_cells(), _map_height_cells(), _tileset_name, _tilemaps)
+	var json_str := LevelIO.build_map_json_string(_map_width_cells(), _map_height_cells(), _tileset_name, _tilemaps, entities)
+	var err := LevelIO.save_map_to_json(full_path, _map_width_cells(), _map_height_cells(), _tileset_name, _tilemaps, entities)
 	if err == OK:
 		DisplayServer.clipboard_set(json_str)
 		print("Map saved: " + full_path)
@@ -874,6 +984,9 @@ func _load_map_from_path(full_path: String) -> void:
 	var h_px := int(meta0.get("height", 1024))
 	_create_new_map(w_px, h_px)
 
+	var raw := LevelIO.read_map_data(full_path)
+	var norm := LevelIO.normalize_map_data(raw)
+	entities = norm.get("entities", [])
 	var meta := LevelIO.load_map_from_json(full_path, _tilemaps)
 	if meta.has("w") and meta.has("h"):
 		print("Map loaded: " + full_path)

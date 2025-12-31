@@ -133,8 +133,8 @@ static func apply_map_data(map_data: Dictionary, tilemaps: Dictionary) -> Dictio
 
 ## Sparse save format: only stores placed tiles, not empty cells.
 ## Boundary tiles are NOT saved; they are generated on load.
-static func save_map_to_json(path: String, width: int, height: int, tileset_name: String, tilemaps: Dictionary) -> Error:
-	var json_str := build_map_json_string(width, height, tileset_name, tilemaps)
+static func save_map_to_json(path: String, width: int, height: int, tileset_name: String, tilemaps: Dictionary, entities: Array = []) -> Error:
+	var json_str := build_map_json_string(width, height, tileset_name, tilemaps, entities)
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if not file:
 		push_error("Failed to save map: " + path)
@@ -146,13 +146,13 @@ static func save_map_to_json(path: String, width: int, height: int, tileset_name
 
 
 ## Build the map JSON string (useful for clipboard/copy-paste).
-static func build_map_json_string(width: int, height: int, tileset_name: String, tilemaps: Dictionary) -> String:
-	var data := build_map_data(width, height, tileset_name, tilemaps)
+static func build_map_json_string(width: int, height: int, tileset_name: String, tilemaps: Dictionary, entities: Array = []) -> String:
+	var data := build_map_data(width, height, tileset_name, tilemaps, entities)
 	return JSON.stringify(data, "\t")
 
 
 ## Build the full map data dictionary (meta + layers).
-static func build_map_data(width: int, height: int, tileset_name: String, tilemaps: Dictionary) -> Dictionary:
+static func build_map_data(width: int, height: int, tileset_name: String, tilemaps: Dictionary, entities: Array = []) -> Dictionary:
 	var layers := {}
 
 	for layer_name in ["bg", "solid", "fg"]:
@@ -184,8 +184,38 @@ static func build_map_data(width: int, height: int, tileset_name: String, tilema
 			"tile_size": TILE_SIZE,
 			"tileset": tileset_name
 		},
-		"layers": layers
+		"layers": layers,
+		"entities": entities
 	}
+
+
+static func count_tiles(map_data: Dictionary) -> int:
+	var norm := normalize_map_data(map_data)
+	var layers: Dictionary = norm.get("layers", {})
+	var count: int = 0
+	for layer_name in ["bg", "solid", "fg"]:
+		var arr := layers.get(layer_name, [])
+		if arr is Array:
+			count += (arr as Array).size()
+	return count
+
+
+static func validate_entities(entities: Array, width: int, height: int) -> Array[String]:
+	var issues: Array[String] = []
+	for i in range(entities.size()):
+		var e = entities[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			issues.append("entities[%d] is not an object" % i)
+			continue
+		var d: Dictionary = e
+		var t: String = String(d.get("type", ""))
+		if t not in ["spawn", "flag", "base"]:
+			issues.append("entities[%d] has invalid type '%s'" % [i, t])
+		var x: int = int(d.get("x", -1))
+		var y: int = int(d.get("y", -1))
+		if x < 0 or y < 0 or x >= width or y >= height:
+			issues.append("entities[%d] out of bounds (%d,%d)" % [i, x, y])
+	return issues
 
 
 ## Read the raw map JSON as a Dictionary (meta + layers) without applying to TileMaps.

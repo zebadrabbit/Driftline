@@ -16,6 +16,7 @@ This project didn’t previously have a formal changelog. The entries below were
   - Load Map picker (`Ctrl+O`) for selecting among many saved maps.
   - Save copies map JSON to clipboard for easy paste.
   - Paste/import map JSON from clipboard (`Ctrl+V`) with safe validation and visible error messages.
+  - Entity layer editing mode (`F`) with basic entity placement/removal and persistence in map JSON.
   - Rectangle fill tool with preview; `Shift` for outline.
   - Mouse-only cursor selection and WASD camera navigation decoupled.
   - Translucent tile cursor rendering (auto texture fallback if missing).
