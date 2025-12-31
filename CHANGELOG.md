@@ -31,6 +31,7 @@ This project didn’t previously have a formal changelog. The entries below were
 
 - Default map content restored/created with boundary walls and basic obstacles, plus a safezone area.
 - Client scene wiring corrected so the intended main scene is used.
+- Server spawn selection now prefers map `entities` with `type="spawn"` when present.
 - Collision handling in the shared world simulation iterated to address wall-phasing and bounce feel.
 - UI polish: connection/menu screen centered and map visuals hidden underneath while the overlay is visible.
 
