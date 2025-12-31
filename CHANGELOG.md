@@ -41,3 +41,4 @@ This project didn’t previously have a formal changelog. The entries below were
 - Map editor keybind conflicts where `Ctrl+S` / `Ctrl+O` could also trigger movement.
 - Tile palette tileset scanning compatibility by using `TileSet.get_source_count()` + `get_source_id(i)` (instead of `get_source_ids()`).
 - Client-side map load logging and collision-layer parsing (aligning with LevelIO return values).
+- Wall bounce sound triggering again when collisions are resolved by the shared simulation.

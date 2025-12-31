@@ -48,6 +48,12 @@ var pause_menu_visible: bool = false
 var pause_menu_layer: CanvasLayer
 var pause_menu_panel: Panel
 
+# Wall-bounce audio (driven by shared simulation collision events)
+@export var bounce_sound_min_speed: float = 160.0
+@export var bounce_sound_cooldown: float = 0.10
+var _last_bounce_time_s: float = -999.0
+@onready var _bounce_audio: AudioStreamPlayer = get_node_or_null("BounceAudio")
+
 var world: DriftWorld
 
 var client_map_checksum: PackedByteArray = PackedByteArray()
@@ -250,9 +256,46 @@ func _latest_tick_step() -> void:
 	input_history[next_tick] = input_cmd
 	_send_input_for_tick(next_tick, input_cmd)
 	latest_snapshot = world.step_tick({ local_ship_id: input_cmd })
+	_play_local_collision_sounds()
 
 	if DEBUG_NET and world.tick != next_tick:
 		print("[NET] local tick mismatch after step: intended=", next_tick, " actual=", world.tick)
+
+
+func _play_local_collision_sounds() -> void:
+	if world == null:
+		return
+	if local_ship_id < 0:
+		return
+	if _bounce_audio == null or _bounce_audio.stream == null:
+		return
+
+	var events: Array = world.collision_events
+	if events.is_empty():
+		return
+
+	var now_s: float = float(Time.get_ticks_msec()) / 1000.0
+	if now_s - _last_bounce_time_s < bounce_sound_cooldown:
+		return
+
+	for ev in events:
+		if typeof(ev) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = ev
+		if int(d.get("ship_id", -1)) != local_ship_id:
+			continue
+		if String(d.get("type", "")) != "wall":
+			continue
+		var impact_speed: float = float(d.get("impact_speed", 0.0))
+		if impact_speed < bounce_sound_min_speed:
+			continue
+
+		var speed_norm: float = clampf((impact_speed - bounce_sound_min_speed) / 650.0, 0.0, 1.0)
+		_bounce_audio.volume_db = lerpf(-16.0, -4.0, speed_norm)
+		_bounce_audio.pitch_scale = lerpf(0.95, 1.15, speed_norm)
+		_bounce_audio.play()
+		_last_bounce_time_s = now_s
+		break
 
 
 func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void:

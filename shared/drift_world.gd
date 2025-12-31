@@ -20,6 +20,20 @@ var solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool] - tile coordinates
 const TILE_SIZE: int = 16
 const SEPARATION_EPSILON: float = 0.05
 
+# Transient (not networked): per-tick collision events for client-side audio/FX.
+# Each entry is a Dictionary: {type, ship_id, pos, normal, impact_speed}
+var collision_events: Array = []
+
+
+func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_speed: float) -> void:
+	collision_events.append({
+		"type": "wall",
+		"ship_id": ship_id,
+		"pos": pos,
+		"normal": normal,
+		"impact_speed": impact_speed,
+	})
+
 
 func add_ship(id: int, position: Vector2) -> void:
 	ships[id] = DriftTypes.DriftShipState.new(id, position)
@@ -116,6 +130,8 @@ func get_collision_normal(old_pos: Vector2, new_pos: Vector2, radius: float) -> 
 func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 	# Advance world tick.
 	tick += 1
+	# Clear transient events each tick.
+	collision_events.clear()
 
 	# Stable update order for determinism.
 	var ship_ids: Array = ships.keys()
@@ -164,8 +180,11 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 				# Keep a tiny gap so we don't remain in-contact and jitter.
 				var dir_x := signf(next_pos.x - old_position.x)
 				ship_state.position.x -= dir_x * SEPARATION_EPSILON
-				if abs(ship_state.velocity.x) >= BOUNCE_NORMAL_SPEED:
-					ship_state.velocity.x = -ship_state.velocity.x * DriftConstants.SHIP_WALL_RESTITUTION
+				var pre_vx: float = ship_state.velocity.x
+				if abs(pre_vx) >= BOUNCE_NORMAL_SPEED:
+					ship_state.velocity.x = -pre_vx * DriftConstants.SHIP_WALL_RESTITUTION
+					var nrm_x: Vector2 = Vector2(-dir_x, 0.0)
+					_record_wall_bounce(ship_id, ship_state.position, nrm_x, abs(pre_vx))
 				else:
 					ship_state.velocity.x = 0.0
 		else:
@@ -191,8 +210,11 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 				ship_state.position.y = lerpf(old_position.y, next_pos.y, t_lo)
 				var dir_y := signf(next_pos.y - old_position.y)
 				ship_state.position.y -= dir_y * SEPARATION_EPSILON
-				if abs(ship_state.velocity.y) >= BOUNCE_NORMAL_SPEED:
-					ship_state.velocity.y = -ship_state.velocity.y * DriftConstants.SHIP_WALL_RESTITUTION
+				var pre_vy: float = ship_state.velocity.y
+				if abs(pre_vy) >= BOUNCE_NORMAL_SPEED:
+					ship_state.velocity.y = -pre_vy * DriftConstants.SHIP_WALL_RESTITUTION
+					var nrm_y: Vector2 = Vector2(0.0, -dir_y)
+					_record_wall_bounce(ship_id, ship_state.position, nrm_y, abs(pre_vy))
 				else:
 					ship_state.velocity.y = 0.0
 		else:
@@ -209,13 +231,19 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		ship_state.position.y = clamp(ship_state.position.y, min_y, max_y)
 		# Bounce on arena bounds
 		if ship_state.position.x != old_x:
-			if abs(ship_state.velocity.x) >= BOUNCE_NORMAL_SPEED:
-				ship_state.velocity.x = -ship_state.velocity.x * DriftConstants.SHIP_WALL_RESTITUTION
+			var pre_vx2: float = ship_state.velocity.x
+			if abs(pre_vx2) >= BOUNCE_NORMAL_SPEED:
+				ship_state.velocity.x = -pre_vx2 * DriftConstants.SHIP_WALL_RESTITUTION
+				var nrm_x2: Vector2 = Vector2(1.0, 0.0) if old_x < ship_state.position.x else Vector2(-1.0, 0.0)
+				_record_wall_bounce(ship_id, ship_state.position, nrm_x2, abs(pre_vx2))
 			else:
 				ship_state.velocity.x = 0.0
 		if ship_state.position.y != old_y:
-			if abs(ship_state.velocity.y) >= BOUNCE_NORMAL_SPEED:
-				ship_state.velocity.y = -ship_state.velocity.y * DriftConstants.SHIP_WALL_RESTITUTION
+			var pre_vy2: float = ship_state.velocity.y
+			if abs(pre_vy2) >= BOUNCE_NORMAL_SPEED:
+				ship_state.velocity.y = -pre_vy2 * DriftConstants.SHIP_WALL_RESTITUTION
+				var nrm_y2: Vector2 = Vector2(0.0, 1.0) if old_y < ship_state.position.y else Vector2(0.0, -1.0)
+				_record_wall_bounce(ship_id, ship_state.position, nrm_y2, abs(pre_vy2))
 			else:
 				ship_state.velocity.y = 0.0
 
