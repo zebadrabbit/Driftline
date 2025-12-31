@@ -9,6 +9,24 @@ A small Godot 4 project with an authoritative server tick, a client with predict
 - `shared/`: deterministic shared simulation + network packet types
 - `tools/`: one-off utility scripts
 
+## Versioning
+
+Project version is stored in `VERSION` as:
+
+- `MAJOR.MINOR.REVISION`
+
+Rules:
+
+- **REVISION**: small changes/fixes
+- **MINOR**: large feature additions
+- **MAJOR**: huge milestones
+
+Bump helper:
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump_version.ps1 -Part revision`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump_version.ps1 -Part minor`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump_version.ps1 -Part major`
+
 ## Running
 
 ### Server
