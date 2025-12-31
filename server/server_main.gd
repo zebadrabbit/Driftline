@@ -73,6 +73,13 @@ func _initialize() -> void:
 	var err: int = enet_peer.create_server(SERVER_PORT, MAX_CLIENTS)
 	if err != OK:
 		push_error("Failed to start ENet server on port %d (err=%d)" % [SERVER_PORT, err])
+		# If the port is already in use (e.g., another server instance is running),
+		# SceneTree.quit() still allows one more _process() before exiting.
+		# Ensure we don't poll an inactive ENet peer in that final frame.
+		shutdown_requested = true
+		if enet_peer != null:
+			enet_peer.close()
+			enet_peer = null
 		quit()
 		return
 
