@@ -138,7 +138,9 @@ static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = Pa
 		checksum_len = 255
 	buffer.put_u8(checksum_len)
 	if checksum_len > 0:
-		buffer.put_data(map_checksum.slice(0, checksum_len))
+		# Write bytes explicitly to avoid any PackedByteArray slicing/put_data edge cases.
+		for i in range(checksum_len):
+			buffer.put_u8(int(map_checksum[i]))
 
 	return buffer.data_array
 
@@ -163,7 +165,9 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 	if bytes.size() >= (1 + 4 + 1):
 		var checksum_len: int = int(buffer.get_u8())
 		if checksum_len > 0 and bytes.size() >= (1 + 4 + 1 + checksum_len):
-			checksum = buffer.get_data(checksum_len)
+			checksum.resize(checksum_len)
+			for i in range(checksum_len):
+				checksum[i] = int(buffer.get_u8())
 	return {
 		"type": pkt_type,
 		"ship_id": ship_id,
