@@ -26,6 +26,11 @@ Or directly:
 
 Open the project in the Godot editor and run.
 
+In-game:
+
+- `Esc`: toggle the in-game menu (non-blocking)
+- In the menu: "Back to Menu" returns to the connection screen
+
 ## Map Editor
 
 Open the in-project map editor with `M` from the client.

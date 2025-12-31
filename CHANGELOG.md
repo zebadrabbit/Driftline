@@ -22,6 +22,7 @@ This project didn’t previously have a formal changelog. The entries below were
   - Translucent tile cursor rendering (auto texture fallback if missing).
   - Starfield background in the editor scene.
 - Client connection UI (client does not silently run “solo”).
+- In-game non-blocking ESC menu with "Back to Menu".
 - Reverse thrust input propagated through shared input types and packet serialization.
 - Deterministic map validation + canonical SHA-256 checksum (shared) and welcome-handshake verification.
 - Map format spec: `docs/map_format_v1.md`.
