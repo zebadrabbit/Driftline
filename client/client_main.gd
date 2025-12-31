@@ -43,6 +43,11 @@ var server_address: String = "127.0.0.1"
 var connection_status_message: String = "Not connected"
 var allow_offline_mode: bool = false
 
+# In-game ESC menu (non-blocking)
+var pause_menu_visible: bool = false
+var pause_menu_layer: CanvasLayer
+var pause_menu_panel: Panel
+
 var world: DriftWorld
 
 var client_map_checksum: PackedByteArray = PackedByteArray()
@@ -110,6 +115,9 @@ func _ready() -> void:
 	
 	# Load map for client-side rendering and collision
 	_load_client_map()
+
+	_build_pause_menu_ui()
+	_set_pause_menu_visible(false)
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -624,6 +632,13 @@ func _draw_connection_ui() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# In-game ESC menu toggle (does not pause the sim)
+	if not show_connect_ui and event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE:
+			_set_pause_menu_visible(not pause_menu_visible)
+			get_viewport().set_input_as_handled()
+			return
+
 	if show_connect_ui and event is InputEventKey and event.pressed:
 		if event.keycode == KEY_ENTER:
 			_attempt_server_connection()
@@ -631,6 +646,87 @@ func _input(event: InputEvent) -> void:
 			_start_offline_mode()
 		elif event.keycode == KEY_M:
 			_open_map_editor()
+
+
+func _build_pause_menu_ui() -> void:
+	pause_menu_layer = CanvasLayer.new()
+	pause_menu_layer.layer = 100
+	pause_menu_layer.visible = false
+	add_child(pause_menu_layer)
+
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pause_menu_layer.add_child(root)
+
+	pause_menu_panel = Panel.new()
+	pause_menu_panel.custom_minimum_size = Vector2(360, 140)
+	pause_menu_panel.set_anchors_preset(Control.PRESET_CENTER)
+	pause_menu_panel.position = -pause_menu_panel.custom_minimum_size * 0.5
+	pause_menu_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(pause_menu_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 10)
+	vbox.add_theme_constant_override("margin_left", 14)
+	vbox.add_theme_constant_override("margin_right", 14)
+	vbox.add_theme_constant_override("margin_top", 14)
+	vbox.add_theme_constant_override("margin_bottom", 14)
+	pause_menu_panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "Menu"
+	vbox.add_child(title)
+
+	var back_btn := Button.new()
+	back_btn.text = "Back to Menu"
+	back_btn.pressed.connect(_on_pause_back_to_menu_pressed)
+	vbox.add_child(back_btn)
+
+	var hint := Label.new()
+	hint.text = "(Esc to close)"
+	hint.modulate = Color(0.8, 0.8, 0.8, 1.0)
+	vbox.add_child(hint)
+
+
+func _set_pause_menu_visible(visible: bool) -> void:
+	pause_menu_visible = visible
+	if pause_menu_layer != null:
+		pause_menu_layer.visible = visible and not show_connect_ui
+
+
+func _on_pause_back_to_menu_pressed() -> void:
+	_return_to_menu()
+
+
+func _return_to_menu() -> void:
+	# Close networking.
+	if enet_peer != null:
+		# Best-effort close; server will see disconnect.
+		enet_peer.close()
+		enet_peer = null
+
+	connected = false
+	is_connected = false
+	has_authoritative = false
+	authoritative_tick = -1
+	authoritative_ship_state = null
+	local_ship_id = -1
+	input_history.clear()
+	snapshot_history.clear()
+	allow_offline_mode = false
+
+	# Reset world state to a clean baseline.
+	world = DriftWorld.new()
+	_load_client_map()
+	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
+
+	show_connect_ui = true
+	connection_status_message = "Enter server address to connect"
+	_set_pause_menu_visible(false)
+	_update_ui_visibility()
+	queue_redraw()
 
 
 func _open_map_editor() -> void:
@@ -679,6 +775,9 @@ func _update_ui_visibility() -> void:
 	var label := get_node_or_null("Label")
 	if label:
 		label.visible = not show_connect_ui
+
+	# Pause menu is never shown over the connection UI.
+	_set_pause_menu_visible(pause_menu_visible)
 
 
 func _send_hello() -> void:
