@@ -433,6 +433,18 @@ static func validate_server_config(root: Dictionary) -> Dictionary:
 	}
 
 
+static func validate_server_config_dict(cfg: Dictionary) -> Dictionary:
+	# Minimal wrapper for headless contract tests.
+	# Returns: { ok: bool, error?: String }
+	var res := validate_server_config(cfg)
+	if bool(res.get("ok", false)):
+		return {"ok": true}
+	var err_text := "server_config validation failed"
+	for e in (res.get("errors", []) as Array):
+		err_text += "\n - " + String(e)
+	return {"ok": false, "error": err_text}
+
+
 static func _tile_less(a, b) -> bool:
 	if int(a[0]) != int(b[0]):
 		return int(a[0]) < int(b[0])

@@ -1,0 +1,6 @@
+{
+  "format": "driftline.server_config",
+  "schema_version": 1,
+  "default_map": "res://maps/default.json",
+  "default_tileset": "res://assets/tilesets/subspace_base/tileset.json"
+}
