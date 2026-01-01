@@ -17,6 +17,17 @@ var tick: int = 0
 var ships: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
 var ball: DriftTypes.DriftBallState = DriftTypes.DriftBallState.new(DriftConstants.ARENA_CENTER, Vector2.ZERO)
 var solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool] - tile coordinates that are solid
+
+# Doors (dynamic tile solids)
+var _static_solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool]
+var _door_tile_cells: Array = [] # Array[Vector2i]
+var _doors_closed: bool = false
+
+var _door_open_ticks: int = 120
+var _door_closed_ticks: int = 120
+var _door_frame_ticks: int = 12
+var _door_start_open: bool = true
+
 const TILE_SIZE: int = 16
 const SEPARATION_EPSILON: float = 0.05
 
@@ -45,21 +56,103 @@ func get_spawn_position(ship_id: int) -> Vector2:
 
 func set_solid_tiles(tiles: Array) -> void:
 	"""Set solid tile positions from map data. tiles is Array of [x, y, atlas_x, atlas_y]"""
-	solid_tiles.clear()
+	_static_solid_tiles.clear()
 	for tile_data in tiles:
 		if tile_data.size() >= 2:
 			var tile_pos := Vector2i(tile_data[0], tile_data[1])
-			solid_tiles[tile_pos] = true
+			_static_solid_tiles[tile_pos] = true
+	_rebuild_effective_solids_for_tick(tick)
+
+
+func set_door_tiles(tiles: Array) -> void:
+	"""Set door tile positions from map data. tiles is Array of [x, y, atlas_x, atlas_y]"""
+	_door_tile_cells.clear()
+	for tile_data in tiles:
+		if tile_data.size() >= 2:
+			_door_tile_cells.append(Vector2i(int(tile_data[0]), int(tile_data[1])))
+	_rebuild_effective_solids_for_tick(tick)
+
+
+func configure_doors(open_seconds: float, closed_seconds: float, frame_seconds: float = 0.2, start_open: bool = true) -> void:
+	# Convert to ticks (keep deterministic integers).
+	var open_ticks: int = int(round(open_seconds / DriftConstants.TICK_DT))
+	var closed_ticks: int = int(round(closed_seconds / DriftConstants.TICK_DT))
+	var frame_ticks: int = int(round(frame_seconds / DriftConstants.TICK_DT))
+	_door_open_ticks = maxi(1, open_ticks)
+	_door_closed_ticks = maxi(1, closed_ticks)
+	_door_frame_ticks = maxi(1, frame_ticks)
+	_door_start_open = start_open
+	_rebuild_effective_solids_for_tick(tick)
+
+
+func get_door_anim_for_tick(tick_value: int) -> Dictionary:
+	# Returns { open: bool, frame: int }. frame is 0..3 when closed, -1 when open.
+	var cycle_ticks: int = _door_open_ticks + _door_closed_ticks
+	if cycle_ticks <= 0:
+		return {"open": true, "frame": -1}
+	var t_in_cycle: int = tick_value % cycle_ticks
+	if t_in_cycle < 0:
+		t_in_cycle += cycle_ticks
+	var open_first: bool = _door_start_open
+	var is_open: bool
+	if open_first:
+		is_open = (t_in_cycle < _door_open_ticks)
+	else:
+		is_open = (t_in_cycle >= _door_closed_ticks)
+	if is_open:
+		return {"open": true, "frame": -1}
+	var closed_t: int
+	if open_first:
+		closed_t = t_in_cycle - _door_open_ticks
+	else:
+		closed_t = t_in_cycle
+	var frame: int = int(floor(float(closed_t) / float(_door_frame_ticks))) % 4
+	if frame < 0:
+		frame += 4
+	return {"open": false, "frame": frame}
 
 
 func add_boundary_tiles(width: int, height: int) -> void:
 	"""Add boundary tiles around the map edges."""
 	for x in range(width):
-		solid_tiles[Vector2i(x, 0)] = true
-		solid_tiles[Vector2i(x, height - 1)] = true
+		_static_solid_tiles[Vector2i(x, 0)] = true
+		_static_solid_tiles[Vector2i(x, height - 1)] = true
 	for y in range(height):
-		solid_tiles[Vector2i(0, y)] = true
-		solid_tiles[Vector2i(width - 1, y)] = true
+		_static_solid_tiles[Vector2i(0, y)] = true
+		_static_solid_tiles[Vector2i(width - 1, y)] = true
+	_rebuild_effective_solids_for_tick(tick)
+
+
+func _rebuild_effective_solids_for_tick(tick_value: int) -> void:
+	# Start with static solids.
+	solid_tiles = _static_solid_tiles.duplicate(false)
+	# Apply door solids depending on current cycle.
+	var d := get_door_anim_for_tick(tick_value)
+	var closed_now: bool = not bool(d.get("open", true))
+	_doors_closed = closed_now
+	if closed_now:
+		for c in _door_tile_cells:
+			if c is Vector2i:
+				solid_tiles[c] = true
+
+
+func _update_doors_for_current_tick() -> void:
+	if _door_tile_cells.is_empty():
+		return
+	var d := get_door_anim_for_tick(tick)
+	var closed_now: bool = not bool(d.get("open", true))
+	if closed_now == _doors_closed:
+		return
+	_doors_closed = closed_now
+	if closed_now:
+		for c in _door_tile_cells:
+			if c is Vector2i:
+				solid_tiles[c] = true
+	else:
+		for c in _door_tile_cells:
+			if c is Vector2i:
+				if solid_tiles.has(c):
+					solid_tiles.erase(c)
 
 
 func is_position_blocked(pos: Vector2, radius: float) -> bool:
@@ -130,6 +223,7 @@ func get_collision_normal(old_pos: Vector2, new_pos: Vector2, radius: float) -> 
 func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 	# Advance world tick.
 	tick += 1
+	_update_doors_for_current_tick()
 	# Clear transient events each tick.
 	collision_events.clear()
 

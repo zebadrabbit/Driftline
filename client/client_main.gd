@@ -22,6 +22,7 @@ const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
+const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
 
 const VELOCITY_DRAW_SCALE: float = 0.10
 
@@ -109,6 +110,12 @@ var input_history: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
 var snapshot_history: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
 
 
+# Door tiles (animated + dynamic collision)
+var _door_cells: Array = [] # Array[Dictionary] { cell: Vector2i, orient: String }
+var _tilemap_solid: TileMap = null
+var _last_door_anim_key: int = -999999
+
+
 
 func _ready() -> void:
 	z_index = 0
@@ -156,6 +163,7 @@ func _load_client_map() -> void:
 		"solid": get_node_or_null("TileMapSolid"),
 		"fg": get_node_or_null("TileMapFG")
 	}
+	_tilemap_solid = tilemaps.get("solid", null)
 
 	# Apply tiles to the TileMaps.
 	var meta_applied := LevelIO.load_map_from_json(CLIENT_MAP_PATH, tilemaps)
@@ -174,6 +182,8 @@ func _load_client_map() -> void:
 	print("Client map version: ", client_map_version)
 	var meta: Dictionary = canonical.get("meta", raw.get("meta", meta_applied))
 	var tileset_name: String = String(meta.get("tileset", ""))
+	if tileset_name == "" and meta.has("tileset_path"):
+		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
@@ -181,13 +191,74 @@ func _load_client_map() -> void:
 		print("Tile defs: ", String(tileset_def.get("path", "")))
 
 	var canonical_layers: Dictionary = canonical.get("layers", {})
-	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(canonical_layers.get("solid", []), tileset_def)
+	var solid_layer_cells: Array = canonical_layers.get("solid", [])
+	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(solid_layer_cells, tileset_def)
+	var door_cells_raw: Array = DriftTileDefs.build_door_cells_from_layer_cells(solid_layer_cells, tileset_def)
 	world.set_solid_tiles(solid_cells)
+	world.set_door_tiles(door_cells_raw)
+	var door_open_s: float = float(meta.get("door_open_seconds", DriftConstants.DOOR_OPEN_SECONDS))
+	var door_closed_s: float = float(meta.get("door_closed_seconds", DriftConstants.DOOR_CLOSED_SECONDS))
+	var door_frame_s: float = float(meta.get("door_frame_seconds", DriftConstants.DOOR_FRAME_SECONDS))
+	var door_start_open: bool = bool(meta.get("door_start_open", DriftConstants.DOOR_START_OPEN))
+	world.configure_doors(door_open_s, door_closed_s, door_frame_s, door_start_open)
+
+	# Cache door cells for TileMap animation.
+	_door_cells.clear()
+	for d in door_cells_raw:
+		if not (d is Array) or (d as Array).size() != 4:
+			continue
+		var arr: Array = d
+		var ax: int = int(arr[2])
+		var ay: int = int(arr[3])
+		var orient: String = ""
+		# Door atlas coords are fixed across tilesets.
+		if ay == 8 and ax >= 9 and ax <= 12:
+			orient = "v"
+		elif ay == 8 and ax >= 13 and ax <= 16:
+			orient = "h"
+		_door_cells.append({"cell": Vector2i(int(arr[0]), int(arr[1])), "orient": orient})
 	
 	if meta.has("w") and meta.has("h"):
 		world.add_boundary_tiles(meta["w"], meta["h"])
 	
 	print("Client map loaded: ", meta.get("w", 0), "x", meta.get("h", 0), " tiles")
+	_update_door_tilemap_visual()
+
+
+func _update_door_tilemap_visual() -> void:
+	if _tilemap_solid == null:
+		return
+	if _door_cells.is_empty():
+		return
+	if world == null:
+		return
+
+	var anim: Dictionary = world.get_door_anim_for_tick(world.tick)
+	var is_open: bool = bool(anim.get("open", true))
+	var frame: int = int(anim.get("frame", -1))
+
+	# Build a tiny key so we only touch the TileMap when the visible state changes.
+	var key: int = (world.tick << 4) ^ (1 if is_open else 0) ^ (frame << 1)
+	if key == _last_door_anim_key:
+		return
+	_last_door_anim_key = key
+
+	var v_frames := [Vector2i(9, 8), Vector2i(10, 8), Vector2i(11, 8), Vector2i(12, 8)]
+	var h_frames := [Vector2i(13, 8), Vector2i(14, 8), Vector2i(15, 8), Vector2i(16, 8)]
+	var frame_idx: int = clampi(frame, 0, 3)
+
+	for entry in _door_cells:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var e: Dictionary = entry
+		var cell: Vector2i = e.get("cell", Vector2i.ZERO)
+		var orient: String = String(e.get("orient", ""))
+		if is_open:
+			# Clear tile graphic.
+			_tilemap_solid.set_cell(0, cell, -1)
+		else:
+			var atlas: Vector2i = v_frames[frame_idx] if orient == "v" else h_frames[frame_idx]
+			_tilemap_solid.set_cell(0, cell, 0, atlas)
 
 
 func _setup_networking() -> void:
@@ -214,6 +285,9 @@ func _process(delta: float) -> void:
 	# Always poll network even when showing UI
 	if enet_peer != null:
 		_poll_network_packets()
+
+	# Keep door tiles visually in sync with the local simulation tick.
+	_update_door_tilemap_visual()
 	
 	# Show connection UI if not connected and not in offline mode
 	if show_connect_ui:
@@ -677,6 +751,7 @@ func _draw_connection_ui() -> void:
 		"Press ENTER to connect to server",
 		"Press O for offline mode (local play only)",
 		"Press M to open Map Editor",
+		"Press T to open Tilemap Editor",
 		"",
 		"In offline mode: no server sync, collision still works"
 	]
@@ -704,6 +779,8 @@ func _input(event: InputEvent) -> void:
 			_start_offline_mode()
 		elif event.keycode == KEY_M:
 			_open_map_editor()
+		elif event.keycode == KEY_T:
+			_open_tilemap_editor()
 
 
 func _build_pause_menu_ui() -> void:
@@ -792,6 +869,13 @@ func _open_map_editor() -> void:
 	show_connect_ui = false
 	_update_ui_visibility()
 	get_tree().change_scene_to_packed(MapEditorScene)
+
+
+func _open_tilemap_editor() -> void:
+	# Leave the startup screen and open the runtime Tilemap Editor tool.
+	show_connect_ui = false
+	_update_ui_visibility()
+	get_tree().change_scene_to_packed(TilemapEditorScene)
 
 
 func _attempt_server_connection() -> void:

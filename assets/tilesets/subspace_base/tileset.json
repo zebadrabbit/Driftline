@@ -1,0 +1,9 @@
+{
+  "image": "tiles.png",
+  "name": "subspace_base",
+  "tile_size": [
+    16,
+    16
+  ],
+  "version": 1
+}

@@ -108,6 +108,8 @@ static func apply_map_data(map_data: Dictionary, tilemaps: Dictionary) -> Dictio
 	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
 	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
 	var tileset_name: String = String(meta.get("tileset", ""))
+	if tileset_name == "" and meta.has("tileset_path"):
+		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
@@ -189,7 +191,8 @@ static func build_map_data(width: int, height: int, tileset_name: String, tilema
 			"w": width,
 			"h": height,
 			"tile_size": TILE_SIZE,
-			"tileset": tileset_name
+			"tileset": tileset_name,
+			"tileset_path": "res://assets/tilesets/%s" % tileset_name
 		},
 		"layers": layers,
 		"entities": entities
@@ -272,6 +275,8 @@ static func load_map_from_json(path: String, tilemaps: Dictionary) -> Dictionary
 	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
 	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
 	var tileset_name: String = String(meta.get("tileset", ""))
+	if tileset_name == "" and meta.has("tileset_path"):
+		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))

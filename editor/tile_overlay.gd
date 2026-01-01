@@ -26,10 +26,14 @@ func set_collision_cells(cells: Dictionary) -> void:
 
 
 func _draw() -> void:
-	if camera == null or map_canvas == null:
+	if map_canvas == null:
 		return
 	if collision_cells.is_empty():
 		return
+
+	# Convert world/canvas coordinates to viewport coordinates.
+	# In Godot 4, Camera2D affects the viewport's canvas transform.
+	var canvas_to_viewport: Transform2D = get_viewport().get_canvas_transform()
 
 	var keys: Array = collision_cells.keys()
 	keys.sort_custom(Callable(self, "_cell_less"))
@@ -43,9 +47,9 @@ func _draw() -> void:
 
 		var tl_world := map_canvas.to_global(Vector2(cell.x * tile_size.x, cell.y * tile_size.y))
 		var br_world := map_canvas.to_global(Vector2((cell.x + 1) * tile_size.x, (cell.y + 1) * tile_size.y))
-		var tl := camera.unproject_position(tl_world)
-		var br := camera.unproject_position(br_world)
-		var rect := Rect2(tl, br - tl)
+		var tl: Vector2 = canvas_to_viewport * tl_world
+		var br: Vector2 = canvas_to_viewport * br_world
+		var rect := Rect2(tl, br - tl).abs()
 
 		if mode == Mode.SOLID:
 			draw_rect(rect, Color(1.0, 0.2, 0.2, 0.22), true)

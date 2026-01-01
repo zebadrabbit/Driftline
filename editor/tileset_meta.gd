@@ -19,6 +19,16 @@ const DEFAULT_SOLID: bool = false
 const DEFAULT_RESTITUTION: float = 0.0
 const DEFAULT_FRICTION: float = 0.0
 
+var defaults: Dictionary = {
+	"layer": DEFAULT_LAYER,
+	"solid": DEFAULT_SOLID,
+	"restitution": DEFAULT_RESTITUTION,
+	"friction": DEFAULT_FRICTION,
+}
+
+var _use_defs_schema: bool = false
+var _root_raw: Dictionary = {}
+
 var tileset_id: String = ""
 var tile_size: Vector2i = Vector2i(16, 16)
 var tiles: Dictionary = {} # "ax,ay" -> Dictionary
@@ -30,9 +40,23 @@ func load(p: String) -> bool:
 	tileset_id = ""
 	tile_size = Vector2i(16, 16)
 	tiles = {}
+	defaults = {
+		"layer": DEFAULT_LAYER,
+		"solid": DEFAULT_SOLID,
+		"restitution": DEFAULT_RESTITUTION,
+		"friction": DEFAULT_FRICTION,
+	}
+	_use_defs_schema = p.replace("\\", "/").get_file().to_lower() == "tiles_def.json"
+	_root_raw = {}
 
 	if not FileAccess.file_exists(p):
 		# Missing file is not fatal; keep defaults.
+		if _use_defs_schema:
+			_root_raw = {
+				"version": 1,
+				"defaults": defaults.duplicate(true),
+				"tiles": {},
+			}
 		return true
 
 	var f := FileAccess.open(p, FileAccess.READ)
@@ -49,6 +73,29 @@ func load(p: String) -> bool:
 		return false
 
 	var root: Dictionary = parsed
+	_root_raw = root.duplicate(true)
+
+	# Auto-detect schema.
+	_use_defs_schema = _use_defs_schema or root.has("version") or root.has("defaults")
+
+	if _use_defs_schema:
+		# tiles_def.json-like schema:
+		# { version, defaults:{...}, tiles:{"x,y":{...}}, reserved:{...} }
+		var d = root.get("defaults", {})
+		if d is Dictionary:
+			defaults = defaults.duplicate(true)
+			for k in (d as Dictionary).keys():
+				defaults[k] = (d as Dictionary)[k]
+		defaults["layer"] = _sanitize_layer(String(defaults.get("layer", DEFAULT_LAYER)))
+		defaults["solid"] = bool(defaults.get("solid", DEFAULT_SOLID))
+		defaults["restitution"] = clampf(float(defaults.get("restitution", DEFAULT_RESTITUTION)), 0.0, 1.2)
+		defaults["friction"] = clampf(float(defaults.get("friction", DEFAULT_FRICTION)), 0.0, 1.0)
+		var t = root.get("tiles", {})
+		if t is Dictionary:
+			tiles = t
+		return true
+
+	# Legacy tiles_meta.json schema.
 	tileset_id = String(root.get("tileset_id", ""))
 	var ts = root.get("tile_size", [16, 16])
 	if ts is Array and (ts as Array).size() >= 2:
@@ -67,13 +114,21 @@ func save(p: String = "") -> bool:
 		push_warning("[TILEMETA] save() missing path")
 		return false
 
-	var root := {
-		"tileset_id": tileset_id,
-		"tile_size": [tile_size.x, tile_size.y],
-		"tiles": tiles,
-	}
+	var root: Dictionary = {}
+	if _use_defs_schema:
+		root = _root_raw.duplicate(true)
+		root["version"] = int(root.get("version", 1))
+		root["defaults"] = defaults.duplicate(true)
+		root["tiles"] = tiles
+	else:
+		root = {
+			"tileset_id": tileset_id,
+			"tile_size": [tile_size.x, tile_size.y],
+			"tiles": tiles,
+		}
 
-	var json_str := JSON.stringify(root, "\t")
+	# Stable, diff-friendly JSON.
+	var json_str := JSON.stringify(_sort_any(root, _use_defs_schema), "  ") + "\n"
 	var f := FileAccess.open(out_path, FileAccess.WRITE)
 	if f == null:
 		push_warning("[TILEMETA] Failed to open for write: " + out_path)
@@ -83,14 +138,9 @@ func save(p: String = "") -> bool:
 	return true
 
 
-func get_meta(atlas: Vector2i) -> Dictionary:
+func get_tile_meta(atlas: Vector2i) -> Dictionary:
 	var key := "%d,%d" % [atlas.x, atlas.y]
-	var base := {
-		"layer": DEFAULT_LAYER,
-		"solid": DEFAULT_SOLID,
-		"restitution": DEFAULT_RESTITUTION,
-		"friction": DEFAULT_FRICTION,
-	}
+	var base := defaults.duplicate(true)
 	if tiles.has(key) and tiles[key] is Dictionary:
 		var t: Dictionary = tiles[key]
 		for k in t.keys():
@@ -102,9 +152,9 @@ func get_meta(atlas: Vector2i) -> Dictionary:
 	return base
 
 
-func set_meta(atlas: Vector2i, patch: Dictionary) -> void:
+func set_tile_meta(atlas: Vector2i, patch: Dictionary) -> void:
 	var key := "%d,%d" % [atlas.x, atlas.y]
-	var cur := get_meta(atlas)
+	var cur := get_tile_meta(atlas)
 	for k in patch.keys():
 		cur[k] = patch[k]
 
@@ -115,13 +165,13 @@ func set_meta(atlas: Vector2i, patch: Dictionary) -> void:
 
 	# Store only deltas vs defaults to keep the JSON compact.
 	var stored: Dictionary = {}
-	if String(cur["layer"]) != DEFAULT_LAYER:
+	if String(cur["layer"]) != String(defaults.get("layer", DEFAULT_LAYER)):
 		stored["layer"] = String(cur["layer"])
-	if bool(cur["solid"]) != DEFAULT_SOLID:
+	if bool(cur["solid"]) != bool(defaults.get("solid", DEFAULT_SOLID)):
 		stored["solid"] = bool(cur["solid"])
-	if absf(float(cur["restitution"]) - DEFAULT_RESTITUTION) > 0.00001:
+	if absf(float(cur["restitution"]) - float(defaults.get("restitution", DEFAULT_RESTITUTION))) > 0.00001:
 		stored["restitution"] = float(cur["restitution"])
-	if absf(float(cur["friction"]) - DEFAULT_FRICTION) > 0.00001:
+	if absf(float(cur["friction"]) - float(defaults.get("friction", DEFAULT_FRICTION))) > 0.00001:
 		stored["friction"] = float(cur["friction"])
 
 	if stored.is_empty():
@@ -135,3 +185,48 @@ func _sanitize_layer(layer: String) -> String:
 	if l not in ["bg", "mid", "fg"]:
 		l = DEFAULT_LAYER
 	return l
+
+
+func _sort_any(v: Variant, sort_tiles: bool) -> Variant:
+	if v is Dictionary:
+		var dict_in: Dictionary = v
+		var keys := dict_in.keys()
+		keys.sort()
+		var out: Dictionary = {}
+		for k in keys:
+			if sort_tiles and String(k) == "tiles" and dict_in[k] is Dictionary:
+				out[k] = _sort_tile_key_dict(dict_in[k])
+			else:
+				out[k] = _sort_any(dict_in[k], sort_tiles)
+		return out
+	if v is Array:
+		var arr_in: Array = v
+		var out_arr: Array = []
+		out_arr.resize(arr_in.size())
+		for i in range(arr_in.size()):
+			out_arr[i] = _sort_any(arr_in[i], sort_tiles)
+		return out_arr
+	return v
+
+
+func _sort_tile_key_dict(tiles_dict: Dictionary) -> Dictionary:
+	var keys := tiles_dict.keys()
+	keys.sort_custom(func(a, b):
+		var sa := String(a)
+		var sb := String(b)
+		var pa := sa.split(",")
+		var pb := sb.split(",")
+		if pa.size() == 2 and pb.size() == 2:
+			var ax := int(pa[0])
+			var ay := int(pa[1])
+			var bx := int(pb[0])
+			var by := int(pb[1])
+			if ax != bx:
+				return ax < bx
+			return ay < by
+		return sa < sb
+	)
+	var out: Dictionary = {}
+	for k in keys:
+		out[String(k)] = _sort_any(tiles_dict[k], false)
+	return out

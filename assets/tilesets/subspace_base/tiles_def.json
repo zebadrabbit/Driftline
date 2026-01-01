@@ -1,0 +1,70 @@
+{
+  "defaults": {
+    "layer": "mid",
+    "solid": true
+  },
+  "reserved": {
+    "doors": {
+      "comment": "Door frames behave like animated frames; coords fixed across tilesets.",
+      "frames": [
+        "9,8",
+        "10,8",
+        "11,8",
+        "12,8",
+        "13,8",
+        "14,8",
+        "15,8",
+        "16,8"
+      ],
+      "solid_when_closed": true
+    }
+  },
+  "tiles": {
+    "0,8": {
+      "layer": "bg",
+      "solid": false
+    },
+    "1,8": {
+      "layer": "bg",
+      "solid": false
+    },
+    "1,9": {
+      "layer": "bg",
+      "solid": false
+    },
+    "10,8": {
+      "door": true
+    },
+    "11,8": {
+      "door": true
+    },
+    "12,8": {
+      "door": true
+    },
+    "13,8": {
+      "door": true
+    },
+    "14,8": {
+      "door": true
+    },
+    "15,8": {
+      "door": true
+    },
+    "16,8": {
+      "door": true
+    },
+    "18,8": {
+      "layer": "bg",
+      "safe_zone": true,
+      "solid": false
+    },
+    "18,9": {
+      "layer": "bg",
+      "solid": false
+    },
+    "9,8": {
+      "door": true
+    }
+  },
+  "version": 1
+}

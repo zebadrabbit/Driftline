@@ -15,7 +15,24 @@ static func _resolve_tiles_def_path(tileset_name: String) -> String:
 	var ts := String(tileset_name).strip_edges()
 	if ts == "":
 		ts = "subspace_base"
+
+	# Support both the new tileset package layout and the legacy layout.
+	# Prefer res://assets/tilesets/<name>/tiles_def.json when present.
+	var packaged := "res://assets/tilesets/%s/tiles_def.json" % ts
+	if FileAccess.file_exists(packaged):
+		return packaged
+
 	return "res://client/graphics/tilesets/%s/tiles_def.json" % ts
+
+
+static func _layer_to_render_layer(layer: String) -> String:
+	# New schema uses bg|mid|fg; existing render stack uses bg|solid|fg.
+	var l := String(layer)
+	if l == "mid":
+		return "solid"
+	if l in ["bg", "solid", "fg"]:
+		return l
+	return "solid"
 
 
 static func load_tileset(tileset_name: String) -> Dictionary:
@@ -75,6 +92,12 @@ static func load_tileset(tileset_name: String) -> Dictionary:
 		for k in (root["defaults"] as Dictionary).keys():
 			defaults[k] = (root["defaults"] as Dictionary)[k]
 
+	# Backward/forward compatibility:
+	# - New defs use `layer` (bg|mid|fg)
+	# - Existing game code uses `render_layer` (bg|solid|fg)
+	if defaults.has("layer") and not defaults.has("render_layer"):
+		defaults["render_layer"] = _layer_to_render_layer(String(defaults.get("layer", "mid")))
+
 	var tiles: Dictionary = {}
 	if root.has("tiles") and root["tiles"] is Dictionary:
 		tiles = root["tiles"]
@@ -101,6 +124,9 @@ static func tile_props(tileset_def: Dictionary, atlas_x: int, atlas_y: int) -> D
 		var t: Dictionary = tiles[key]
 		for k2 in t.keys():
 			out[k2] = t[k2]
+	# If a tile override uses `layer`, translate to `render_layer` for callers.
+	if out.has("layer"):
+		out["render_layer"] = _layer_to_render_layer(String(out.get("layer", "mid")))
 	return out
 
 
@@ -115,6 +141,11 @@ static func tile_render_layer(tileset_def: Dictionary, atlas_x: int, atlas_y: in
 	if layer not in ["bg", "solid", "fg"]:
 		layer = "solid"
 	return layer
+
+
+static func tile_is_door(tileset_def: Dictionary, atlas_x: int, atlas_y: int) -> bool:
+	var p := tile_props(tileset_def, atlas_x, atlas_y)
+	return bool(p.get("door", false))
 
 
 static func build_render_layers(map_canonical: Dictionary, tileset_def: Dictionary) -> Dictionary:
@@ -160,7 +191,28 @@ static func build_solid_cells_from_layer_cells(cells: Array, tileset_def: Dictio
 		var y: int = int(arr[1])
 		var ax: int = int(arr[2])
 		var ay: int = int(arr[3])
+		# Doors are dynamic: they may be solid when "closed" but empty when "open".
+		# Exclude them from static solids so the simulation can toggle them.
+		if tile_is_door(tileset_def, ax, ay):
+			continue
 		if not tile_is_solid(tileset_def, ax, ay):
+			continue
+		seen["%d,%d" % [x, y]] = [x, y, ax, ay]
+	return _sorted_cells(seen.values())
+
+
+static func build_door_cells_from_layer_cells(cells: Array, tileset_def: Dictionary) -> Array:
+	# Returns Array[[x,y,ax,ay]] for any placed tiles flagged as door.
+	var seen: Dictionary = {} # "x,y" -> [x,y,ax,ay]
+	for cell in cells:
+		if not (cell is Array) or (cell as Array).size() != 4:
+			continue
+		var arr: Array = cell
+		var x: int = int(arr[0])
+		var y: int = int(arr[1])
+		var ax: int = int(arr[2])
+		var ay: int = int(arr[3])
+		if not tile_is_door(tileset_def, ax, ay):
 			continue
 		seen["%d,%d" % [x, y]] = [x, y, ax, ay]
 	return _sorted_cells(seen.values())

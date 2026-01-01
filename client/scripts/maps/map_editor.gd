@@ -9,6 +9,8 @@ const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const TilesetMetaScript = preload("res://editor/tileset_meta.gd")
 const TileOverlayScript = preload("res://editor/tile_overlay.gd")
 const TestPuckScript = preload("res://editor/test_puck.gd")
+const TilesetIO = preload("res://shared/tileset/tileset_io.gd")
+const TilesetData = preload("res://shared/tileset/tileset_data.gd")
 
 @export var map_width: int = 64
 @export var map_height: int = 64
@@ -34,10 +36,6 @@ var map_height_tiles: int = 1024
 
 var status_label: Label
 var status_timer: float = 0.0
-
-enum EditMode { TILE, ENTITY }
-var edit_mode: EditMode = EditMode.TILE
-var selected_entity_type: String = "spawn"
 var entities: Array = []
 
 var cursor_cell := Vector2i(10, 10)
@@ -89,6 +87,10 @@ var drag_end_cell := Vector2i.ZERO
 var _tilemaps := {}
 var _tileset_name := "subspace_base"
 
+var _tileset_data: TilesetData = null
+var _available_tilesets: PackedStringArray = PackedStringArray()
+var _tileset_index: int = 0
+
 var _tileset_meta
 var _tileset_meta_path: String = ""
 
@@ -125,6 +127,8 @@ func _ready() -> void:
 		"solid": tilemap_solid,
 		"fg": tilemap_fg
 	}
+	_refresh_available_tilesets()
+	_apply_tileset_package_if_present(_tileset_name)
 	_tileset_meta = TilesetMetaScript.new()
 	_tileset_meta.tileset_id = _tileset_name
 	_tileset_meta_path = _resolve_tileset_meta_path(_tileset_name)
@@ -157,6 +161,55 @@ func _ready() -> void:
 	rebuild_collision_cache()
 	_update_ui()
 	_sync_tile_props_from_selection()
+
+
+func _refresh_available_tilesets() -> void:
+	_available_tilesets = TilesetIO.list_tileset_packages()
+	_tileset_index = maxi(0, _available_tilesets.find(_tileset_name))
+
+
+func _load_tileset_by_name(name: String) -> void:
+	var n := String(name).strip_edges()
+	if n == "":
+		return
+	_tileset_name = n
+	_refresh_available_tilesets()
+	_apply_tileset_package_if_present(_tileset_name)
+	_tileset_meta.tileset_id = _tileset_name
+	_tileset_meta_path = _resolve_tileset_meta_path(_tileset_name)
+	_tileset_meta.load(_tileset_meta_path)
+	_build_tileset_palette()
+	_update_ui()
+
+
+func _apply_tileset_package_if_present(name: String) -> void:
+	_tileset_data = null
+	var package_dir := "res://assets/tilesets/%s" % String(name).strip_edges()
+	if not FileAccess.file_exists(package_dir + "/tileset.json"):
+		return
+	_tileset_data = TilesetIO.load_tileset(package_dir)
+	if _tileset_data == null or _tileset_data.texture == null:
+		return
+	var ts := _build_runtime_tileset(_tileset_data.texture, _tileset_data.tile_size)
+	for tm in [tilemap_bg, tilemap_solid, tilemap_fg]:
+		tm.tile_set = ts
+
+
+func _build_runtime_tileset(tex: Texture2D, tsz: Vector2i) -> TileSet:
+	var ts := TileSet.new()
+	ts.tile_size = tsz
+	var atlas := TileSetAtlasSource.new()
+	atlas.texture = tex
+	atlas.texture_region_size = tsz
+	ts.add_source(atlas)
+
+	var img_size := tex.get_size()
+	var cols := maxi(1, int(floor(img_size.x / float(tsz.x))))
+	var rows := maxi(1, int(floor(img_size.y / float(tsz.y))))
+	for y in range(rows):
+		for x in range(cols):
+			atlas.create_tile(Vector2i(x, y))
+	return ts
 
 
 func _map_width_cells() -> int:
@@ -204,35 +257,7 @@ func _draw() -> void:
 		# Border
 		draw_rect(rect, Color(0.2, 0.8, 1.0, 0.8), false, 2.0)
 
-	# Draw entities (simple shapes) in world-aligned tile space.
-	_draw_entities()
-
-
-func _draw_entities() -> void:
-	var tile_size: float = float(LevelIO.TILE_SIZE)
-	for e in entities:
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var d: Dictionary = e
-		var t: String = String(d.get("type", ""))
-		var x: int = int(d.get("x", -1))
-		var y: int = int(d.get("y", -1))
-		if x < 0 or y < 0:
-			continue
-		var center_world := map_canvas.to_global(Vector2(x, y) * tile_size + Vector2.ONE * (tile_size / 2.0))
-		var p := to_local(center_world)
-		var r := tile_size * 0.28
-		if t == "spawn":
-			draw_circle(p, r, Color(0.2, 1.0, 0.2, 0.85))
-		elif t == "flag":
-			var tri := PackedVector2Array([
-				p + Vector2(0, -r),
-				p + Vector2(r, r),
-				p + Vector2(-r, r)
-			])
-			draw_polygon(tri, PackedColorArray([Color(1.0, 0.9, 0.2, 0.85)]))
-		elif t == "base":
-			draw_rect(Rect2(p - Vector2(r, r), Vector2(r * 2.0, r * 2.0)), Color(0.2, 0.6, 1.0, 0.85), true)
+	# Entity mode removed: map entities are now derived from tiles/defs.
 
 
 func _get_active_tilemap() -> TileMap:
@@ -314,6 +339,17 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Ctrl shortcuts should not trigger movement.
 	if event is InputEventKey and event.pressed and event.ctrl_pressed:
+		if event.keycode == KEY_T:
+			_refresh_available_tilesets()
+			if _available_tilesets.is_empty():
+				_set_status("No tilesets found in res://assets/tilesets", true, 3.0)
+				get_viewport().set_input_as_handled()
+				return
+			_tileset_index = wrapi(_tileset_index + 1, 0, _available_tilesets.size())
+			_load_tileset_by_name(_available_tilesets[_tileset_index])
+			_set_status("Tileset: %s" % _tileset_name, false, 2.0)
+			get_viewport().set_input_as_handled()
+			return
 		if event.keycode == KEY_V:
 			_paste_map_from_clipboard()
 			get_viewport().set_input_as_handled()
@@ -330,48 +366,28 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 
-	# Mode toggle / entity type selection
+	# Mode toggle removed (tile-only editor).
 	if event is InputEventKey and event.pressed and not event.echo and not event.ctrl_pressed:
 		if event.keycode == KEY_T:
 			_toggle_test_mode()
 			get_viewport().set_input_as_handled()
 			return
-		if event.keycode == KEY_F:
-			edit_mode = EditMode.ENTITY if edit_mode == EditMode.TILE else EditMode.TILE
-			_set_status("Mode: %s" % ("ENTITY" if edit_mode == EditMode.ENTITY else "TILE"), false, 2.0)
+		# Zoom presets.
+		if event.keycode == KEY_1:
+			editor_zoom = 2.0
+			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
-			queue_redraw()
 			return
-		if edit_mode == EditMode.ENTITY:
-			if event.keycode == KEY_1:
-				selected_entity_type = "spawn"
-				get_viewport().set_input_as_handled()
-				return
-			elif event.keycode == KEY_2:
-				selected_entity_type = "flag"
-				get_viewport().set_input_as_handled()
-				return
-			elif event.keycode == KEY_3:
-				selected_entity_type = "base"
-				get_viewport().set_input_as_handled()
-				return
-		else:
-			# Zoom presets in TILE mode.
-			if event.keycode == KEY_1:
-				editor_zoom = 2.0
-				_apply_editor_zoom()
-				get_viewport().set_input_as_handled()
-				return
-			elif event.keycode == KEY_2:
-				editor_zoom = 4.0
-				_apply_editor_zoom()
-				get_viewport().set_input_as_handled()
-				return
-			elif event.keycode == KEY_3:
-				editor_zoom = 8.0
-				_apply_editor_zoom()
-				get_viewport().set_input_as_handled()
-				return
+		elif event.keycode == KEY_2:
+			editor_zoom = 4.0
+			_apply_editor_zoom()
+			get_viewport().set_input_as_handled()
+			return
+		elif event.keycode == KEY_3:
+			editor_zoom = 8.0
+			_apply_editor_zoom()
+			get_viewport().set_input_as_handled()
+			return
 
 		# +/- zoom
 		if event.keycode == KEY_EQUAL or event.keycode == KEY_KP_ADD:
@@ -438,16 +454,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 
-		# Entity mode: LMB places entity; RMB removes.
-		if edit_mode == EditMode.ENTITY:
-			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-				_place_entity_at_cell(cursor_cell)
-				get_viewport().set_input_as_handled()
-				return
-			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-				_remove_entity_at_cell(cursor_cell)
-				get_viewport().set_input_as_handled()
-				return
+		# Entity mode removed.
 
 	# Movement
 	var move_delta := Vector2i.ZERO
@@ -477,13 +484,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	
 	# Place tile (Space) / Rectangle fill tool (LMB drag)
 	if event.is_action_pressed("ui_accept"):
-		if edit_mode == EditMode.TILE:
-			_place_tile()
-			get_viewport().set_input_as_handled()
-		else:
-			_place_entity_at_cell(cursor_cell)
-			get_viewport().set_input_as_handled()
-	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and edit_mode == EditMode.TILE and not Input.is_key_pressed(KEY_SPACE):
+		_place_tile()
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not Input.is_key_pressed(KEY_SPACE):
 		if event.pressed:
 			dragging = true
 			drag_start_cell = cursor_cell
@@ -500,10 +503,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	
 	# Erase tile (Backspace or RMB)
 	if not test_mode and (event.is_action_pressed("ui_cancel") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT)):
-		if edit_mode == EditMode.TILE:
-			_erase_tile()
-		else:
-			_remove_entity_at_cell(cursor_cell)
+		_erase_tile()
 		get_viewport().set_input_as_handled()
 	
 	# Cycle layer (Tab)
@@ -538,7 +538,7 @@ func _place_tile() -> void:
 		print("Cannot edit boundary cells")
 		return
 
-	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_meta(selected_atlas_coords).get("layer", "mid")))
+	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_tile_meta(selected_atlas_coords).get("layer", "mid")))
 	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	tilemap.set_cell(0, cursor_cell, 0, selected_atlas_coords)
 	rebuild_collision_cache()
@@ -562,7 +562,7 @@ func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
 	var min_y: int = mini(a.y, b.y)
 	var max_y: int = maxi(a.y, b.y)
 
-	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_meta(selected_atlas_coords).get("layer", "mid")))
+	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_tile_meta(selected_atlas_coords).get("layer", "mid")))
 	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	for y in range(min_y, max_y + 1):
 		for x in range(min_x, max_x + 1):
@@ -604,8 +604,7 @@ func _update_cursor_position(move_camera: bool = true) -> void:
 func _update_ui() -> void:
 	var layer_display := current_layer.to_upper()
 	var atlas_str := "(%d,%d)" % [selected_atlas_coords.x, selected_atlas_coords.y]
-	var mode_str := "ENTITY(%s)" % selected_entity_type if edit_mode == EditMode.ENTITY else "TILE"
-	ui_label.text = "Map: %d×%d | Mode: %s | Cell: %s | Layer: %s | Tile: %s | Zoom: %.1f\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [F] Mode | [T] Test | [Wheel/+/-] Zoom | [MMB Drag] Pan | [Space+LMB] Pan | [Esc] Exit" % [map_width_tiles, map_height_tiles, mode_str, cursor_cell, layer_display, atlas_str, editor_zoom]
+	ui_label.text = "Map: %d×%d | Cell: %s | Layer: %s | Tile: %s | Zoom: %.1f\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [T] Test | [Wheel/+/-] Zoom | [MMB Drag] Pan | [Space+LMB] Pan | [Esc] Exit" % [map_width_tiles, map_height_tiles, cursor_cell, layer_display, atlas_str, editor_zoom]
 
 
 func _build_status_ui() -> void:
@@ -627,39 +626,7 @@ func _set_status(msg: String, is_error: bool = false, seconds: float = 4.0) -> v
 	status_timer = seconds
 
 
-func _find_entity_index(t: String, cell: Vector2i) -> int:
-	for i in range(entities.size()):
-		var e = entities[i]
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var d: Dictionary = e
-		if String(d.get("type", "")) == t and int(d.get("x", -999)) == cell.x and int(d.get("y", -999)) == cell.y:
-			return i
-	return -1
 
-
-func _place_entity_at_cell(cell: Vector2i) -> void:
-	if _is_boundary_cell(cell):
-		_set_status("Cannot place entities on boundary", true, 2.0)
-		return
-	var idx := _find_entity_index(selected_entity_type, cell)
-	if idx != -1:
-		return
-	entities.append({"type": selected_entity_type, "x": cell.x, "y": cell.y, "team": 0})
-	queue_redraw()
-
-
-func _remove_entity_at_cell(cell: Vector2i) -> void:
-	# Remove the first entity found at this cell.
-	for i in range(entities.size()):
-		var e = entities[i]
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var d: Dictionary = e
-		if int(d.get("x", -999)) == cell.x and int(d.get("y", -999)) == cell.y:
-			entities.remove_at(i)
-			queue_redraw()
-			return
 
 
 func _paste_map_from_clipboard() -> void:
@@ -938,6 +905,9 @@ func _resolve_tileset_meta_path(tileset_name: String) -> String:
 	var ts := String(tileset_name).strip_edges()
 	if ts == "":
 		ts = "subspace_base"
+	var packaged := "res://assets/tilesets/%s/tiles_def.json" % ts
+	if FileAccess.file_exists(packaged):
+		return packaged
 	return "res://client/graphics/tilesets/%s/tiles_meta.json" % ts
 
 
@@ -996,7 +966,7 @@ func rebuild_collision_cache() -> void:
 			var atlas: Vector2i = tm.get_cell_atlas_coords(0, cell)
 			if atlas.x < 0 or atlas.y < 0:
 				continue
-			var meta: Dictionary = _tileset_meta.get_meta(atlas)
+			var meta: Dictionary = _tileset_meta.get_tile_meta(atlas)
 			if not bool(meta.get("solid", false)):
 				continue
 			collision_cells[cell] = {
@@ -1038,7 +1008,7 @@ func reroute_tiles_by_meta() -> void:
 	cells.sort_custom(Callable(self, "_cell_less"))
 	for cell in cells:
 		var atlas: Vector2i = placed[cell]
-		var meta: Dictionary = _tileset_meta.get_meta(atlas)
+		var meta: Dictionary = _tileset_meta.get_tile_meta(atlas)
 		var dest := _meta_layer_to_map_layer(String(meta.get("layer", "mid")))
 		var tm: TileMap = _tilemaps.get(dest, null)
 		if tm != null:
@@ -1159,7 +1129,7 @@ func _sync_tile_props_from_selection() -> void:
 	if _tile_layer_option == null:
 		return
 	_tile_props_syncing = true
-	var meta: Dictionary = _tileset_meta.get_meta(selected_atlas_coords)
+	var meta: Dictionary = _tileset_meta.get_tile_meta(selected_atlas_coords)
 	var layer := String(meta.get("layer", "mid"))
 	var idx := 1
 	if layer == "bg":
@@ -1180,7 +1150,7 @@ func _apply_tile_meta_patch(patch: Dictionary) -> void:
 		return
 	if _tileset_meta == null:
 		return
-	_tileset_meta.set_meta(selected_atlas_coords, patch)
+	_tileset_meta.set_tile_meta(selected_atlas_coords, patch)
 	_tileset_meta.save(_tileset_meta_path)
 	reroute_tiles_by_meta()
 	rebuild_collision_cache()
@@ -1435,6 +1405,12 @@ func _load_latest_map() -> void:
 
 func _load_map_from_path(full_path: String) -> void:
 	var meta0 := LevelIO.load_map_meta(full_path)
+	var tileset_name: String = String(meta0.get("tileset", _tileset_name))
+	if meta0.has("tileset_path"):
+		var tp := String(meta0.get("tileset_path", "")).replace("\\", "/").trim_suffix("/")
+		if tp.strip_edges() != "":
+			tileset_name = tp.get_file()
+	_load_tileset_by_name(tileset_name)
 	var w_px := int(meta0.get("width", 1024))
 	var h_px := int(meta0.get("height", 1024))
 	_create_new_map(w_px, h_px)

@@ -99,12 +99,12 @@ func _circle_vs_aabb(c: Vector2, r: float, p: Vector2, s: Vector2) -> Dictionary
 
 	# If center is inside AABB, pick smallest axis as normal.
 	if dist2 <= 0.0000001:
-		var left := absf(c.x - p.x)
-		var right := absf((p.x + s.x) - c.x)
-		var top := absf(c.y - p.y)
-		var bottom := absf((p.y + s.y) - c.y)
-		var m := min(min(left, right), min(top, bottom))
-		var n := Vector2.ZERO
+		var left: float = absf(c.x - p.x)
+		var right: float = absf((p.x + s.x) - c.x)
+		var top: float = absf(c.y - p.y)
+		var bottom: float = absf((p.y + s.y) - c.y)
+		var m: float = minf(minf(left, right), minf(top, bottom))
+		var n: Vector2 = Vector2.ZERO
 		if m == left:
 			n = Vector2(-1, 0)
 			return {"hit": true, "normal": n, "penetration": r + left}

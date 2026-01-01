@@ -231,6 +231,8 @@ func _load_selected_map_from_config() -> bool:
 	var h_tiles: int = int(meta.get("h", 64))
 
 	var tileset_name: String = String(meta.get("tileset", ""))
+	if tileset_name == "" and meta.has("tileset_path"):
+		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
@@ -238,8 +240,16 @@ func _load_selected_map_from_config() -> bool:
 		print("Tile defs: ", String(tileset_def.get("path", "")))
 
 	var canonical_layers: Dictionary = canonical.get("layers", {})
-	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(canonical_layers.get("solid", []), tileset_def)
+	var solid_layer_cells: Array = canonical_layers.get("solid", [])
+	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(solid_layer_cells, tileset_def)
+	var door_cells: Array = DriftTileDefs.build_door_cells_from_layer_cells(solid_layer_cells, tileset_def)
 	world.set_solid_tiles(solid_cells)
+	world.set_door_tiles(door_cells)
+	var door_open_s: float = float(meta.get("door_open_seconds", DriftConstants.DOOR_OPEN_SECONDS))
+	var door_closed_s: float = float(meta.get("door_closed_seconds", DriftConstants.DOOR_CLOSED_SECONDS))
+	var door_frame_s: float = float(meta.get("door_frame_seconds", DriftConstants.DOOR_FRAME_SECONDS))
+	var door_start_open: bool = bool(meta.get("door_start_open", DriftConstants.DOOR_START_OPEN))
+	world.configure_doors(door_open_s, door_closed_s, door_frame_s, door_start_open)
 	world.add_boundary_tiles(w_tiles, h_tiles)
 
 	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")

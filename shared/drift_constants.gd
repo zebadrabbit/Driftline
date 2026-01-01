@@ -45,3 +45,14 @@ const SHIP_MAX_SPEED: float = 720.0
 const SHIP_BASE_DRAG: float = 0.35
 const SHIP_OVERSPEED_DRAG: float = 2.0
 const SHIP_WALL_RESTITUTION: float = 0.6  # Bounce damping (1.0=perfect bounce, 0.0=no bounce)
+
+
+## Door (tile) animation + cycle.
+## - When open: door tiles are cleared (not drawn) and do NOT block.
+## - When closed: door tiles animate 4 frames and DO block.
+## These defaults can be overridden per-map via meta keys:
+##   door_open_seconds, door_closed_seconds, door_frame_seconds, door_start_open
+const DOOR_FRAME_SECONDS: float = 0.2
+const DOOR_OPEN_SECONDS: float = 2.0
+const DOOR_CLOSED_SECONDS: float = 2.0
+const DOOR_START_OPEN: bool = true
