@@ -996,7 +996,7 @@ func rebuild_collision_cache() -> void:
 			var atlas: Vector2i = tm.get_cell_atlas_coords(0, cell)
 			if atlas.x < 0 or atlas.y < 0:
 				continue
-			var meta := _tileset_meta.get_meta(atlas)
+			var meta: Dictionary = _tileset_meta.get_meta(atlas)
 			if not bool(meta.get("solid", false)):
 				continue
 			collision_cells[cell] = {
@@ -1038,7 +1038,7 @@ func reroute_tiles_by_meta() -> void:
 	cells.sort_custom(Callable(self, "_cell_less"))
 	for cell in cells:
 		var atlas: Vector2i = placed[cell]
-		var meta := _tileset_meta.get_meta(atlas)
+		var meta: Dictionary = _tileset_meta.get_meta(atlas)
 		var dest := _meta_layer_to_map_layer(String(meta.get("layer", "mid")))
 		var tm: TileMap = _tilemaps.get(dest, null)
 		if tm != null:
@@ -1138,13 +1138,13 @@ func _build_overlays() -> void:
 	if ui_root == null:
 		return
 	_overlay_solid = TileOverlayScript.new()
-	_overlay_solid.mode = TileOverlay.Mode.SOLID
+	_overlay_solid.mode = TileOverlayScript.Mode.SOLID
 	_overlay_solid.camera = camera
 	_overlay_solid.map_canvas = map_canvas
 	ui_root.add_child(_overlay_solid)
 
 	_overlay_restitution = TileOverlayScript.new()
-	_overlay_restitution.mode = TileOverlay.Mode.RESTITUTION
+	_overlay_restitution.mode = TileOverlayScript.Mode.RESTITUTION
 	_overlay_restitution.camera = camera
 	_overlay_restitution.map_canvas = map_canvas
 	ui_root.add_child(_overlay_restitution)
@@ -1159,7 +1159,7 @@ func _sync_tile_props_from_selection() -> void:
 	if _tile_layer_option == null:
 		return
 	_tile_props_syncing = true
-	var meta := _tileset_meta.get_meta(selected_atlas_coords)
+	var meta: Dictionary = _tileset_meta.get_meta(selected_atlas_coords)
 	var layer := String(meta.get("layer", "mid"))
 	var idx := 1
 	if layer == "bg":
@@ -1442,7 +1442,7 @@ func _load_map_from_path(full_path: String) -> void:
 	var raw := LevelIO.read_map_data(full_path)
 	var norm := LevelIO.normalize_map_data(raw)
 	entities = norm.get("entities", [])
-	var meta := LevelIO.load_map_from_json(full_path, _tilemaps)
+	var meta: Dictionary = LevelIO.load_map_from_json(full_path, _tilemaps)
 	reroute_tiles_by_meta()
 	rebuild_collision_cache()
 	if test_mode and _test_puck != null:
