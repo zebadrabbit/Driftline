@@ -10,6 +10,8 @@ This document describes the current on-disk / clipboard JSON map format used by 
 - Layers: stored sparsely (only used tiles are listed).
 - Entities: optional gameplay markers stored as tile coordinates.
 
+Note: tile behavior (collision and intended render layer) is defined by the tileset's `tiles_def.json`. The on-disk map still stores `bg`/`solid`/`fg` arrays, but the game may re-route tiles to their declared `render_layer` on load.
+
 ## Schema
 
 Top-level object:
@@ -53,6 +55,11 @@ Notes:
 
 - Tiles on the boundary (where `x==0 || y==0 || x==w-1 || y==h-1`) are ignored/invalid for storage.
 - Order is not semantically meaningful; canonicalization (below) defines a stable ordering for hashing.
+
+Collision notes:
+
+- The `layers.solid` array is treated as the set of *candidate* colliders.
+- Actual collision is filtered by the tile's `solid` property from `tiles_def.json`.
 
 ### `entities`
 

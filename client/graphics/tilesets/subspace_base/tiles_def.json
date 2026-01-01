@@ -15,7 +15,7 @@
     "18,8": {
       "solid": false,
       "safe_zone": true,
-      "render_layer": "fg"
+      "render_layer": "bg"
     },
 
     "9,8":  { "door": true },

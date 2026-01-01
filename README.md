@@ -27,6 +27,19 @@ Bump helper:
 - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump_version.ps1 -Part minor`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bump_version.ps1 -Part major`
 
+## Tile Definitions (Source of Truth)
+
+Tile behavior is defined in `client/graphics/tilesets/<tileset_name>/tiles_def.json`.
+
+Key properties:
+
+- `solid`: whether the tile should be collidable.
+- `render_layer`: where the tile should draw (`bg`/`solid`/`fg`).
+- `safe_zone`: marker used for gameplay rules (non-colliding by default).
+- `door`: marker for door animation frames.
+
+On load, map tiles are routed into the correct render layer based on `render_layer`, and collision is derived from the map's `solid` candidates filtered by `solid` from `tiles_def.json`.
+
 ## Running
 
 ### Server
@@ -37,12 +50,14 @@ Example:
 
 ```
 [Server]
-DefaultMap=maps/default.json
-MapMode=single ; single|rotation|random
-MapRotation=maps/public/duel_01.json,maps/public/base_02.json
+DefaultMap="maps/default.json"
+MapMode="single" ; single|rotation|random
+MapRotation="maps/public/duel_01.json,maps/public/base_02.json"
 ```
 
 Paths may be `res://...`, `user://...`, or `res://`-relative (e.g. `maps/default.json`).
+
+Note: Godot `ConfigFile` requires string values to be quoted.
 
 From VS Code you can run the provided task:
 

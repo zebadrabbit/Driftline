@@ -2,6 +2,21 @@
 
 This project didn’t previously have a formal changelog. The entries below were reconstructed from recent development session notes and may be incomplete.
 
+## 0.5.3 - 2025-12-31
+
+### Added
+
+- `tiles_def.json`-driven tile behavior via `shared/drift_tile_defs.gd` (render-layer routing + collision filtering).
+
+### Changed
+
+- Rendering now routes tiles to `bg`/`solid`/`fg` based on `render_layer` in `tiles_def.json` (not strictly the map JSON layer arrays).
+
+### Fixed
+
+- Server startup failures caused by malformed map layer entries in `maps/default.json`.
+- `server.cfg` parsing by quoting string values for Godot `ConfigFile`.
+
 ## Unreleased
 
 ### Added

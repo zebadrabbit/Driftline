@@ -16,6 +16,7 @@ const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
+const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
@@ -221,7 +222,6 @@ func _load_selected_map_from_config() -> bool:
 
 	var canonical: Dictionary = res.get("map", {})
 	var meta: Dictionary = canonical.get("meta", {})
-	var layers: Dictionary = canonical.get("layers", {})
 	map_entities = canonical.get("entities", [])
 	map_checksum = res.get("checksum", PackedByteArray())
 	map_path = String(res.get("path", FALLBACK_MAP_PATH))
@@ -230,7 +230,16 @@ func _load_selected_map_from_config() -> bool:
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
 
-	world.set_solid_tiles(layers.get("solid", []))
+	var tileset_name: String = String(meta.get("tileset", ""))
+	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
+	if not bool(tileset_def.get("ok", false)):
+		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
+	else:
+		print("Tile defs: ", String(tileset_def.get("path", "")))
+
+	var canonical_layers: Dictionary = canonical.get("layers", {})
+	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(canonical_layers.get("solid", []), tileset_def)
+	world.set_solid_tiles(solid_cells)
 	world.add_boundary_tiles(w_tiles, h_tiles)
 
 	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")

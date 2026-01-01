@@ -8,6 +8,8 @@ const TILE_SIZE := 16
 const DEFAULT_WIDTH_TILES: int = 64
 const DEFAULT_HEIGHT_TILES: int = 64
 
+const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
+
 
 ## Safe JSON parse for map import (clipboard / network / file content).
 ## Returns: { ok: bool, error: String, data: Dictionary }
@@ -105,6 +107,11 @@ static func apply_map_data(map_data: Dictionary, tilemaps: Dictionary) -> Dictio
 	var layers: Dictionary = norm.get("layers", {})
 	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
 	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
+	var tileset_name: String = String(meta.get("tileset", ""))
+	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
+	if not bool(tileset_def.get("ok", false)):
+		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
+	var routed_layers: Dictionary = DriftTileDefs.build_render_layers({"layers": layers}, tileset_def)
 
 	# Clear all layers
 	for layer_name in ["bg", "solid", "fg"]:
@@ -113,10 +120,10 @@ static func apply_map_data(map_data: Dictionary, tilemaps: Dictionary) -> Dictio
 
 	# Apply loaded tiles
 	for layer_name in ["bg", "solid", "fg"]:
-		if not layers.has(layer_name) or not tilemaps.has(layer_name) or tilemaps[layer_name] == null:
+		if not routed_layers.has(layer_name) or not tilemaps.has(layer_name) or tilemaps[layer_name] == null:
 			continue
 		var tilemap: TileMap = tilemaps[layer_name]
-		var cells: Array = layers[layer_name]
+		var cells: Array = routed_layers[layer_name]
 		for cell_data in cells:
 			if cell_data is Array and cell_data.size() == 4:
 				var x: int = int(cell_data[0])
@@ -264,6 +271,11 @@ static func load_map_from_json(path: String, tilemaps: Dictionary) -> Dictionary
 	var layers: Dictionary = norm["layers"]
 	var w: int = int(meta.get("w", DEFAULT_WIDTH_TILES))
 	var h: int = int(meta.get("h", DEFAULT_HEIGHT_TILES))
+	var tileset_name: String = String(meta.get("tileset", ""))
+	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
+	if not bool(tileset_def.get("ok", false)):
+		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
+	var routed_layers: Dictionary = DriftTileDefs.build_render_layers({"layers": layers}, tileset_def)
 	
 	# Clear all layers
 	for layer_name in ["bg", "solid", "fg"]:
@@ -272,10 +284,10 @@ static func load_map_from_json(path: String, tilemaps: Dictionary) -> Dictionary
 	
 	# Apply loaded tiles
 	for layer_name in ["bg", "solid", "fg"]:
-		if not layers.has(layer_name) or not tilemaps.has(layer_name):
+		if not routed_layers.has(layer_name) or not tilemaps.has(layer_name):
 			continue
 		var tilemap: TileMap = tilemaps[layer_name]
-		var cells: Array = layers[layer_name]
+		var cells: Array = routed_layers[layer_name]
 		
 		for cell_data in cells:
 			if cell_data.size() != 4:

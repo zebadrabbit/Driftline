@@ -6,6 +6,7 @@ extends Node2D
 ## Boundary tiles are immutable and auto-generated.
 
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
+const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 
 @export var map_width: int = 64
 @export var map_height: int = 64
@@ -82,6 +83,7 @@ var drag_end_cell := Vector2i.ZERO
 
 var _tilemaps := {}
 var _tileset_name := "subspace_base"
+var _tileset_def: Dictionary = {}
 
 
 func _ready() -> void:
@@ -90,6 +92,9 @@ func _ready() -> void:
 		"solid": tilemap_solid,
 		"fg": tilemap_fg
 	}
+	_tileset_def = DriftTileDefs.load_tileset(_tileset_name)
+	if not bool(_tileset_def.get("ok", false)):
+		push_warning("[TILES] " + String(_tileset_def.get("error", "Failed to load tiles_def")))
 	_favorites_max_len = favorites.size()
 	# Keep defaults aligned with inspector exports (exports are in tiles; state vars are pixels).
 	map_width_tiles = map_width * LevelIO.TILE_SIZE
@@ -408,8 +413,9 @@ func _place_tile() -> void:
 	if _is_boundary_cell(cursor_cell):
 		print("Cannot edit boundary cells")
 		return
-	
-	var tilemap: TileMap = _get_active_tilemap()
+
+	var dest_layer := DriftTileDefs.tile_render_layer(_tileset_def, selected_atlas_coords.x, selected_atlas_coords.y)
+	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	tilemap.set_cell(0, cursor_cell, 0, selected_atlas_coords)
 
 
@@ -417,9 +423,11 @@ func _erase_tile() -> void:
 	if _is_boundary_cell(cursor_cell):
 		print("Cannot edit boundary cells")
 		return
-	
-	var tilemap: TileMap = _get_active_tilemap()
-	tilemap.erase_cell(0, cursor_cell)
+
+	for layer_name in ["bg", "solid", "fg"]:
+		var tm: TileMap = _tilemaps.get(layer_name, null)
+		if tm != null:
+			tm.erase_cell(0, cursor_cell)
 
 
 func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
@@ -428,7 +436,8 @@ func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
 	var min_y: int = mini(a.y, b.y)
 	var max_y: int = maxi(a.y, b.y)
 
-	var tilemap: TileMap = _get_active_tilemap()
+	var dest_layer := DriftTileDefs.tile_render_layer(_tileset_def, selected_atlas_coords.x, selected_atlas_coords.y)
+	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	for y in range(min_y, max_y + 1):
 		for x in range(min_x, max_x + 1):
 			var cell := Vector2i(x, y)

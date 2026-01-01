@@ -18,6 +18,7 @@ const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
+const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
@@ -162,7 +163,7 @@ func _load_client_map() -> void:
 		push_error("Failed to load client map")
 		return
 
-	# Also read raw layers for collision data (sparse cells list).
+	# Also read raw map for checksum/manifest verification and canonical layers for collision.
 	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
 	var validated := DriftMap.validate_and_canonicalize(raw)
 	var canonical: Dictionary = validated.get("map", {})
@@ -171,11 +172,17 @@ func _load_client_map() -> void:
 	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
 	print("Client map path: ", CLIENT_MAP_PATH)
 	print("Client map version: ", client_map_version)
-	var meta: Dictionary = raw.get("meta", meta_applied)
-	var layers: Dictionary = raw.get("layers", {})
-	
-	if layers.has("solid"):
-		world.set_solid_tiles(layers["solid"])
+	var meta: Dictionary = canonical.get("meta", raw.get("meta", meta_applied))
+	var tileset_name: String = String(meta.get("tileset", ""))
+	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
+	if not bool(tileset_def.get("ok", false)):
+		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
+	else:
+		print("Tile defs: ", String(tileset_def.get("path", "")))
+
+	var canonical_layers: Dictionary = canonical.get("layers", {})
+	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(canonical_layers.get("solid", []), tileset_def)
+	world.set_solid_tiles(solid_cells)
 	
 	if meta.has("w") and meta.has("h"):
 		world.add_boundary_tiles(meta["w"], meta["h"])
