@@ -112,7 +112,7 @@ func _ensure_action_key(action: StringName, keycodes: Array[int]) -> void:
 
 func _load_default_map() -> void:
 	# Load the default map shipped with the game
-	var map_path := "res://client/maps/default.json"
+	var map_path := "res://maps/default.json"
 	var tilemaps := {
 		"bg": tilemap_bg,
 		"solid": tilemap_solid,

@@ -26,6 +26,8 @@ This project didn’t previously have a formal changelog. The entries below were
 - Reverse thrust input propagated through shared input types and packet serialization.
 - Deterministic map validation + canonical SHA-256 checksum (shared) and welcome-handshake verification.
 - Map format spec: `docs/map_format_v1.md`.
+- Server-driven map selection via `server.cfg` (single/rotation/random) using `ConfigFile`.
+- MapManifest in welcome handshake (`map_path`, `map_hash`, optional `map_version`).
 
 ### Changed
 

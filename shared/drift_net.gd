@@ -121,7 +121,7 @@ static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Ve
 	return buffer.data_array
 
 
-static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray()) -> PackedByteArray:
+static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray(), map_path: String = "", map_version: int = 0) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
 
@@ -142,6 +142,22 @@ static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = Pa
 		for i in range(checksum_len):
 			buffer.put_u8(int(map_checksum[i]))
 
+	# MapManifest extension:
+	#   u16 map_path_len
+	#   u8[map_path_len] utf8 map_path
+	#   u32 map_version
+	var path_utf8 := map_path.to_utf8_buffer()
+	var path_len: int = path_utf8.size()
+	if path_len < 0:
+		path_len = 0
+	if path_len > 65535:
+		path_len = 65535
+	buffer.put_u16(path_len)
+	if path_len > 0:
+		for i in range(path_len):
+			buffer.put_u8(int(path_utf8[i]))
+	buffer.put_32(map_version)
+
 	return buffer.data_array
 
 
@@ -161,6 +177,8 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 
 	var ship_id: int = buffer.get_32()
 	var checksum: PackedByteArray = PackedByteArray()
+	var map_path: String = ""
+	var map_version: int = 0
 	# Backward compatible: checksum field may be absent.
 	if bytes.size() >= (1 + 4 + 1):
 		var checksum_len: int = int(buffer.get_u8())
@@ -168,10 +186,26 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 			checksum.resize(checksum_len)
 			for i in range(checksum_len):
 				checksum[i] = int(buffer.get_u8())
+
+	# Backward compatible: map manifest fields may be absent.
+	# Only read if the buffer still has enough bytes remaining.
+	if buffer.get_available_bytes() >= 2:
+		var path_len: int = int(buffer.get_u16())
+		if path_len > 0 and buffer.get_available_bytes() >= path_len:
+			var path_bytes := PackedByteArray()
+			path_bytes.resize(path_len)
+			for i in range(path_len):
+				path_bytes[i] = int(buffer.get_u8())
+			map_path = path_bytes.get_string_from_utf8()
+		# map_version is optional; only read if present.
+		if buffer.get_available_bytes() >= 4:
+			map_version = int(buffer.get_32())
 	return {
 		"type": pkt_type,
 		"ship_id": ship_id,
 		"map_checksum": checksum,
+		"map_path": map_path,
+		"map_version": map_version,
 	}
 
 

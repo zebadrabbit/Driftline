@@ -27,6 +27,8 @@ const VELOCITY_DRAW_SCALE: float = 0.10
 const SERVER_HOST: String = "127.0.0.1"
 const SERVER_PORT: int = 5000
 
+const CLIENT_MAP_PATH: String = "res://maps/default.json"
+
 const DEBUG_NET: bool = false
 
 # Use a non-zero channel so Godot's high-level multiplayer (RPC/scene cache)
@@ -57,6 +59,7 @@ var _last_bounce_time_s: float = -999.0
 var world: DriftWorld
 
 var client_map_checksum: PackedByteArray = PackedByteArray()
+var client_map_version: int = 0
 var accumulator_seconds: float = 0.0
 
 # Camera2D reference
@@ -154,15 +157,20 @@ func _load_client_map() -> void:
 	}
 
 	# Apply tiles to the TileMaps.
-	var meta_applied := LevelIO.load_map_from_json("res://client/maps/default.json", tilemaps)
+	var meta_applied := LevelIO.load_map_from_json(CLIENT_MAP_PATH, tilemaps)
 	if meta_applied.is_empty():
 		push_error("Failed to load client map")
 		return
 
 	# Also read raw layers for collision data (sparse cells list).
-	var raw := LevelIO.read_map_data("res://client/maps/default.json")
+	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
+	var validated := DriftMap.validate_and_canonicalize(raw)
+	var canonical: Dictionary = validated.get("map", {})
+	client_map_version = int(canonical.get("v", 0))
 	client_map_checksum = DriftMap.checksum_sha256(raw)
 	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
+	print("Client map path: ", CLIENT_MAP_PATH)
+	print("Client map version: ", client_map_version)
 	var meta: Dictionary = raw.get("meta", meta_applied)
 	var layers: Dictionary = raw.get("layers", {})
 	
@@ -905,7 +913,31 @@ func _poll_network_packets() -> void:
 		if pkt_type == DriftNet.PKT_WELCOME:
 			var w: Dictionary = DriftNet.unpack_welcome_packet(bytes)
 			if not w.is_empty():
+				var server_map_path: String = String(w.get("map_path", ""))
+				var server_map_version: int = int(w.get("map_version", 0))
 				var server_checksum: PackedByteArray = w.get("map_checksum", PackedByteArray())
+				if server_map_path != "" and server_map_path != CLIENT_MAP_PATH:
+					push_error("Map path mismatch. server='" + server_map_path + "' client='" + CLIENT_MAP_PATH + "'")
+					connection_status_message = "Map mismatch with server. Load the same map path." 
+					show_connect_ui = true
+					allow_offline_mode = false
+					is_connected = false
+					_update_ui_visibility()
+					if enet_peer != null:
+						enet_peer.close()
+						enet_peer = null
+					return
+				if server_map_version != 0 and client_map_version != 0 and server_map_version != client_map_version:
+					push_error("Map version mismatch. server=" + str(server_map_version) + " client=" + str(client_map_version))
+					connection_status_message = "Map mismatch with server. Map version differs." 
+					show_connect_ui = true
+					allow_offline_mode = false
+					is_connected = false
+					_update_ui_visibility()
+					if enet_peer != null:
+						enet_peer.close()
+						enet_peer = null
+					return
 				if server_checksum.size() > 0 and client_map_checksum.size() > 0 and server_checksum != client_map_checksum:
 					var server_hex := DriftMap.bytes_to_hex(server_checksum)
 					var client_hex := DriftMap.bytes_to_hex(client_map_checksum)

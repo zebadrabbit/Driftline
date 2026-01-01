@@ -31,6 +31,19 @@ Bump helper:
 
 ### Server
 
+Server reads config from `user://server.cfg` first; if missing, it falls back to `res://server.cfg`.
+
+Example:
+
+```
+[Server]
+DefaultMap=maps/default.json
+MapMode=single ; single|rotation|random
+MapRotation=maps/public/duel_01.json,maps/public/base_02.json
+```
+
+Paths may be `res://...`, `user://...`, or `res://`-relative (e.g. `maps/default.json`).
+
 From VS Code you can run the provided task:
 
 - `run server (ctrl+c to stop)`

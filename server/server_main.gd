@@ -38,6 +38,9 @@ const SNAPSHOT_INTERVAL_TICKS: int = 6
 const QUIT_FLAG_PATH := "user://server.quit"
 const QUIT_POLL_INTERVAL_SECONDS: float = 0.25
 
+# Only hard-coded fallback allowed.
+const FALLBACK_MAP_PATH: String = "res://maps/default.json"
+
 var world: DriftWorld
 var accumulator_seconds: float = 0.0
 var latest_snapshot: DriftTypes.DriftWorldSnapshot
@@ -47,6 +50,8 @@ var next_ship_id: int = 1
 
 var map_checksum: PackedByteArray = PackedByteArray()
 var map_entities: Array = []
+var map_path: String = FALLBACK_MAP_PATH
+var map_version: int = 0
 
 var quit_flag_path: String = QUIT_FLAG_PATH
 var quit_after_seconds: float = -1.0
@@ -92,7 +97,11 @@ func _initialize() -> void:
 	enet_peer.peer_disconnected.connect(_on_peer_disconnected)
 
 	world = DriftWorld.new()
-	_load_map("res://client/maps/default.json")
+	if not _load_selected_map_from_config():
+		# Map parse/validation failure is fatal.
+		_request_shutdown("map_load_failed")
+		quit()
+		return
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
 
 	print("Driftline server listening on port ", SERVER_PORT)
@@ -182,50 +191,58 @@ func _parse_user_args() -> void:
 
 
 func _load_map(path: String) -> void:
-	"""Load map collision data from JSON."""
-	var file := FileAccess.open(path, FileAccess.READ)
-	if not file:
-		push_error("Failed to load map: " + path)
-		return
-	
-	var json_str := file.get_as_text()
-	file.close()
-	
-	var json := JSON.new()
-	var parse_result := json.parse(json_str)
-	if parse_result != OK:
-		push_error("Failed to parse map JSON: " + path)
-		return
-	
-	var data: Dictionary = json.data
-	var validated := DriftMap.validate_and_canonicalize(data)
-	if not bool(validated.get("ok", false)):
-		push_error("Map validation failed: " + path)
-		for e in (validated.get("errors", []) as Array):
-			push_error(" - " + String(e))
-	# Warnings are non-fatal but should be visible.
-	for w in (validated.get("warnings", []) as Array):
+	push_warning("_load_map() is deprecated; use _load_selected_map_from_config()")
+
+
+func _load_selected_map_from_config() -> bool:
+	var cfg = DriftServerConfig.load_config()
+	var selected_raw: String = cfg.choose_map_path()
+	var selected_path: String = DriftServerConfig.normalize_map_path(selected_raw)
+	if selected_path == "":
+		selected_path = FALLBACK_MAP_PATH
+
+	# Try selected; if missing, fall back. If parse fails, refuse to start.
+	var res: Dictionary = DriftMapLoader.load_map(selected_path)
+	if not bool(res.get("ok", false)):
+		if bool(res.get("missing", false)):
+			push_warning("[MAP] " + String(res.get("error", "missing map")))
+			push_warning("[MAP] Falling back to " + FALLBACK_MAP_PATH)
+			res = DriftMapLoader.load_map(FALLBACK_MAP_PATH)
+			if not bool(res.get("ok", false)):
+				push_error("[MAP] Fallback map failed: " + String(res.get("error", "")))
+				return false
+		else:
+			push_error("[MAP] " + String(res.get("error", "map load failed")))
+			return false
+
+	# Apply warnings (non-fatal)
+	for w in (res.get("warnings", []) as Array):
 		print("[MAP] warning: ", String(w))
 
-	var canonical: Dictionary = validated.get("map", {})
+	var canonical: Dictionary = res.get("map", {})
 	var meta: Dictionary = canonical.get("meta", {})
 	var layers: Dictionary = canonical.get("layers", {})
 	map_entities = canonical.get("entities", [])
+	map_checksum = res.get("checksum", PackedByteArray())
+	map_path = String(res.get("path", FALLBACK_MAP_PATH))
+	map_version = int(res.get("map_version", 0))
+
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
 
-	# Load solid tiles (canonical list)
 	world.set_solid_tiles(layers.get("solid", []))
 	world.add_boundary_tiles(w_tiles, h_tiles)
 
-	map_checksum = DriftMap.checksum_sha256(canonical)
 	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")
+	print("Map path: ", map_path)
 	print("Map checksum (sha256): ", DriftMap.bytes_to_hex(map_checksum))
+	print("Map version: ", map_version)
 	var spawn_count: int = 0
 	for e in map_entities:
 		if typeof(e) == TYPE_DICTIONARY and String((e as Dictionary).get("type", "")) == "spawn":
 			spawn_count += 1
 	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ")")
+	return true
 
 
 func _on_peer_connected(peer_id: int) -> void:
@@ -406,7 +423,7 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 
 
 func _send_welcome(peer_id: int, ship_id: int) -> void:
-	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum)
+	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum, map_path, map_version)
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
 	enet_peer.set_target_peer(peer_id)
