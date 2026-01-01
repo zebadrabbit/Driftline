@@ -1,97 +1,82 @@
-## Server config loader (ConfigFile)
+## Server boot config loader (server_config.json)
 ##
-## Loads user://server.cfg first, then falls back to res://server.cfg.
+## Loads user://server_config.json first, then res://server_config.json.
+##
+## STRICT CONTRACT:
+## - Must include `format` and `schema_version`.
+## - Must include required fields.
+## - No normalization, auto-fill, or silent defaults.
 
 class_name DriftServerConfig
 
-const DEFAULT_SECTION: String = "Server"
+const DriftValidate = preload("res://shared/drift_validate.gd")
 
-var default_map: String = ""
-var map_mode: String = "single" # single|rotation|random
-var rotation: PackedStringArray = PackedStringArray()
+const USER_PATH: String = "user://server_config.json"
+const RES_PATH: String = "res://server_config.json"
 
 
-static func load_config() -> DriftServerConfig:
-	var cfg := DriftServerConfig.new()
-
-	var config := ConfigFile.new()
-	var loaded_path: String = ""
-
-	var candidates := PackedStringArray([
-		"user://server.cfg",
-		"user://server.ini",
-		"res://server.cfg",
-		"res://server.ini",
-	])
-
+static func load_config() -> Dictionary:
+	var candidates := PackedStringArray([USER_PATH, RES_PATH])
+	var path := ""
 	for p in candidates:
-		if not FileAccess.file_exists(p):
-			continue
-		var err := config.load(p)
-		if err == OK:
-			loaded_path = p
+		if FileAccess.file_exists(p):
+			path = p
 			break
-		push_warning("[CFG] Failed to load " + p + " (err=%d)" % int(err))
 
-	if loaded_path == "":
-		push_warning("[CFG] No server.cfg/server.ini found in user:// or res://. Using defaults.")
+	if path == "":
+		return {
+			"ok": false,
+			"error": "server_config.json not found (looked in user:// and res://)",
+			"paths": candidates,
+		}
 
-	if loaded_path != "":
-		print("[CFG] Loaded ", loaded_path)
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return {
+			"ok": false,
+			"error": "Failed to open server_config.json: " + path,
+			"path": path,
+		}
 
-	cfg.default_map = String(config.get_value(DEFAULT_SECTION, "DefaultMap", ""))
-	cfg.map_mode = String(config.get_value(DEFAULT_SECTION, "MapMode", "single")).to_lower()
-	var rotation_raw: String = String(config.get_value(DEFAULT_SECTION, "MapRotation", ""))
-	cfg.rotation = _parse_rotation(rotation_raw)
+	var json_str := file.get_as_text()
+	file.close()
 
-	if cfg.map_mode == "":
-		cfg.map_mode = "single"
+	var json := JSON.new()
+	var parse_err := json.parse(json_str)
+	if parse_err != OK:
+		return {
+			"ok": false,
+			"error": "Failed to parse server_config.json: %s (line %d): %s" % [path, int(json.get_error_line()), String(json.get_error_message())],
+			"path": path,
+			"parse_error": true,
+		}
 
-	return cfg
+	if typeof(json.data) != TYPE_DICTIONARY:
+		return {
+			"ok": false,
+			"error": "server_config.json must be a JSON object: " + path,
+			"path": path,
+			"parse_error": true,
+		}
 
+	var root: Dictionary = json.data
+	var validated := DriftValidate.validate_server_config(root)
+	if not bool(validated.get("ok", false)):
+		var err_text := "server_config validation failed: " + path
+		for e in (validated.get("errors", []) as Array):
+			err_text += "\n - " + String(e)
+		return {
+			"ok": false,
+			"error": err_text,
+			"path": path,
+			"errors": validated.get("errors", []),
+			"warnings": validated.get("warnings", []),
+			"validation_error": true,
+		}
 
-static func _parse_rotation(s: String) -> PackedStringArray:
-	var out := PackedStringArray()
-	var trimmed := s.strip_edges()
-	if trimmed == "":
-		return out
-	var parts := trimmed.split(",", false)
-	for p in parts:
-		var item := String(p).strip_edges()
-		if item != "":
-			out.append(item)
-	return out
-
-
-func choose_map_path() -> String:
-	match map_mode:
-		"single":
-			return default_map
-		"rotation":
-			if rotation.size() > 0:
-				return rotation[0]
-			return default_map
-		"random":
-			var choices := PackedStringArray()
-			if rotation.size() > 0:
-				choices = rotation
-			elif default_map != "":
-				choices.append(default_map)
-			if choices.size() == 0:
-				return ""
-			var rng := RandomNumberGenerator.new()
-			rng.randomize()
-			return choices[rng.randi_range(0, choices.size() - 1)]
-		_:
-			push_warning("[CFG] Unknown MapMode '%s' (expected single|rotation|random). Using 'single'." % map_mode)
-			return default_map
-
-
-static func normalize_map_path(path: String) -> String:
-	var p := String(path).strip_edges()
-	if p == "":
-		return ""
-	if p.begins_with("res://") or p.begins_with("user://"):
-		return p
-	# Treat as res:// relative.
-	return "res://" + p
+	return {
+		"ok": true,
+		"path": path,
+		"config": validated.get("server_config", {}),
+		"warnings": validated.get("warnings", []),
+	}

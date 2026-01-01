@@ -39,8 +39,6 @@ const SNAPSHOT_INTERVAL_TICKS: int = 6
 const QUIT_FLAG_PATH := "user://server.quit"
 const QUIT_POLL_INTERVAL_SECONDS: float = 0.25
 
-# Only hard-coded fallback allowed.
-const FALLBACK_MAP_PATH: String = "res://maps/default.json"
 
 var world: DriftWorld
 var accumulator_seconds: float = 0.0
@@ -51,7 +49,7 @@ var next_ship_id: int = 1
 
 var map_checksum: PackedByteArray = PackedByteArray()
 var map_entities: Array = []
-var map_path: String = FALLBACK_MAP_PATH
+var map_path: String = ""
 var map_version: int = 0
 
 var quit_flag_path: String = QUIT_FLAG_PATH
@@ -196,25 +194,22 @@ func _load_map(path: String) -> void:
 
 
 func _load_selected_map_from_config() -> bool:
-	var cfg = DriftServerConfig.load_config()
-	var selected_raw: String = cfg.choose_map_path()
-	var selected_path: String = DriftServerConfig.normalize_map_path(selected_raw)
-	if selected_path == "":
-		selected_path = FALLBACK_MAP_PATH
+	var cfg_res: Dictionary = DriftServerConfig.load_config()
+	if not bool(cfg_res.get("ok", false)):
+		push_error("[CFG] " + String(cfg_res.get("error", "Failed to load server_config.json")))
+		return false
 
-	# Try selected; if missing, fall back. If parse fails, refuse to start.
+	var cfg: Dictionary = cfg_res.get("config", {})
+	var selected_path: String = String(cfg.get("default_map", "")).strip_edges()
+	if selected_path == "":
+		push_error("[CFG] server_config.json default_map is empty")
+		return false
+
+	# Strict: no fallback map. Missing/invalid is fatal.
 	var res: Dictionary = DriftMapLoader.load_map(selected_path)
 	if not bool(res.get("ok", false)):
-		if bool(res.get("missing", false)):
-			push_warning("[MAP] " + String(res.get("error", "missing map")))
-			push_warning("[MAP] Falling back to " + FALLBACK_MAP_PATH)
-			res = DriftMapLoader.load_map(FALLBACK_MAP_PATH)
-			if not bool(res.get("ok", false)):
-				push_error("[MAP] Fallback map failed: " + String(res.get("error", "")))
-				return false
-		else:
-			push_error("[MAP] " + String(res.get("error", "map load failed")))
-			return false
+		push_error("[MAP] " + String(res.get("error", "map load failed")))
+		return false
 
 	# Apply warnings (non-fatal)
 	for w in (res.get("warnings", []) as Array):
@@ -224,7 +219,7 @@ func _load_selected_map_from_config() -> bool:
 	var meta: Dictionary = canonical.get("meta", {})
 	map_entities = canonical.get("entities", [])
 	map_checksum = res.get("checksum", PackedByteArray())
-	map_path = String(res.get("path", FALLBACK_MAP_PATH))
+	map_path = String(res.get("path", ""))
 	map_version = int(res.get("map_version", 0))
 
 	var w_tiles: int = int(meta.get("w", 64))

@@ -10,10 +10,12 @@ class_name DriftValidate
 const FORMAT_TILESET_MANIFEST := "driftline.tileset"
 const FORMAT_TILES_DEF := "driftline.tiles_def"
 const FORMAT_MAP := "driftline.map"
+const FORMAT_SERVER_CONFIG := "driftline.server_config"
 
 const SCHEMA_TILESET_MANIFEST := 1
 const SCHEMA_TILES_DEF := 1
 const SCHEMA_MAP := 1
+const SCHEMA_SERVER_CONFIG := 1
 
 const TILE_SIZE := 16
 
@@ -383,6 +385,51 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 		"errors": errors,
 		"warnings": warnings,
 		"map": canonical,
+	}
+
+
+static func validate_server_config(root: Dictionary) -> Dictionary:
+	var errors: Array[String] = []
+	var warnings: Array[String] = []
+	errors.append_array(validate_header(root, FORMAT_SERVER_CONFIG, SCHEMA_SERVER_CONFIG, "server_config"))
+
+	# Strict shape.
+	for k in root.keys():
+		var key := String(k)
+		if key not in ["format", "schema_version", "default_map", "default_tileset"]:
+			errors.append(_err("server_config", "unknown top-level key '%s'" % key))
+
+	if not root.has("default_map"):
+		errors.append(_err("server_config", "missing required field 'default_map'"))
+
+	var default_map := _require_string(root.get("default_map"), "server_config.default_map", errors).strip_edges()
+	if default_map == "":
+		errors.append(_err("server_config.default_map", "must be non-empty"))
+	elif not (default_map.begins_with("res://") or default_map.begins_with("user://")):
+		errors.append(_err("server_config.default_map", "must start with res:// or user://"))
+
+	var default_tileset := ""
+	var has_tileset := root.has("default_tileset")
+	if has_tileset:
+		default_tileset = _require_string(root.get("default_tileset"), "server_config.default_tileset", errors).strip_edges()
+		if default_tileset == "":
+			errors.append(_err("server_config.default_tileset", "must be non-empty when present"))
+		elif not (default_tileset.begins_with("res://") or default_tileset.begins_with("user://")):
+			errors.append(_err("server_config.default_tileset", "must start with res:// or user://"))
+
+	var canonical := {
+		"format": FORMAT_SERVER_CONFIG,
+		"schema_version": SCHEMA_SERVER_CONFIG,
+		"default_map": default_map,
+	}
+	if has_tileset:
+		canonical["default_tileset"] = default_tileset
+
+	return {
+		"ok": errors.is_empty(),
+		"errors": errors,
+		"warnings": warnings,
+		"server_config": canonical,
 	}
 
 
