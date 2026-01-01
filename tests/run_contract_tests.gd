@@ -19,14 +19,14 @@ func _initialize() -> void:
 
 	if files.is_empty():
 		print("[TEST] No contract vectors found under ", ROOT_DIR)
-		OS.exit(1)
+		_finish(1)
 		return
 
 	for path in files:
 		_run_one(path)
 
 	print("[TEST] Done: ", _ran, " checks, ", _failures, " failures")
-	OS.exit(0 if _failures == 0 else 1)
+	_finish(0 if _failures == 0 else 1)
 
 
 func _discover_json_files(dir_path: String) -> PackedStringArray:
@@ -120,3 +120,8 @@ func _pass(filename: String) -> void:
 func _fail(msg: String) -> void:
 	_failures += 1
 	print("[TEST] FAIL ", msg)
+
+
+func _finish(exit_code: int) -> void:
+	# Godot 4: quit the SceneTree with an explicit process exit code.
+	quit(int(exit_code))
