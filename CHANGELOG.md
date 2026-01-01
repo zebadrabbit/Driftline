@@ -31,6 +31,9 @@ This project didn’t previously have a formal changelog. The entries below were
 ### Added
 
 - Authoritative server + client architecture with deterministic shared simulation in `shared/`.
+- Tileset packages under `assets/tilesets/<tileset_name>/` (`tiles.png`, `tileset.json`, `tiles_def.json`).
+- Runtime Tilemap Editor tool scene: `tools/tilemap_editor/TilemapEditor.tscn`.
+- Shared tileset modules: `shared/tileset/tileset_data.gd` and `shared/tileset/tileset_io.gd`.
 - New shared ship simulation script (`shared/drift_ship.gd`) used by both server and client-side prediction.
 - Map editor quality-of-life features:
   - Tile palette popup (toggle `Q`) built from the first `TileSetAtlasSource`.
@@ -45,6 +48,7 @@ This project didn’t previously have a formal changelog. The entries below were
   - Mouse-only cursor selection and WASD camera navigation decoupled.
   - Translucent tile cursor rendering (auto texture fallback if missing).
   - Starfield background in the editor scene.
+  - `Ctrl+T` to cycle tileset packages from `assets/tilesets/`.
 - Client connection UI (client does not silently run “solo”).
 - In-game non-blocking ESC menu with "Back to Menu".
 - Reverse thrust input propagated through shared input types and packet serialization.

@@ -8,6 +8,7 @@ A small Godot 4 project with an authoritative server tick, a client with predict
 - `server/`: headless/host server scripts and run scripts
 - `shared/`: deterministic shared simulation + network packet types
 - `tools/`: one-off utility scripts
+- `assets/tilesets/`: runtime tileset packages (image + defs + manifest)
 
 ## Versioning
 
@@ -29,16 +30,39 @@ Bump helper:
 
 ## Tile Definitions (Source of Truth)
 
-Tile behavior is defined in `client/graphics/tilesets/<tileset_name>/tiles_def.json`.
+Tile behavior is defined in `tiles_def.json`.
+
+Preferred location (tileset packages):
+
+- `assets/tilesets/<tileset_name>/tiles_def.json`
+
+Legacy location (still supported):
+
+- `client/graphics/tilesets/<tileset_name>/tiles_def.json`
 
 Key properties:
 
 - `solid`: whether the tile should be collidable.
-- `render_layer`: where the tile should draw (`bg`/`solid`/`fg`).
+- `layer` (tileset packages) / `render_layer` (legacy): where the tile should draw (`bg`/`mid`/`fg` vs `bg`/`solid`/`fg`).
 - `safe_zone`: marker used for gameplay rules (non-colliding by default).
 - `door`: marker for door animation frames.
 
 On load, map tiles are routed into the correct render layer based on `render_layer`, and collision is derived from the map's `solid` candidates filtered by `solid` from `tiles_def.json`.
+
+Format docs (recommended for learning):
+
+- `docs/map_format_v1.md` (overview)
+- `docs/formats/map.schema.md` (full schema + checksum rules)
+- `docs/formats/tilemap.schema.md` (what `[x,y,ax,ay]` means)
+- `docs/formats/tiles_def.schema.md` (tile behavior: `solid`, doors, render layers)
+
+## Tilemap Editor (Runtime Tool)
+
+There is a separate runtime tool scene for editing tileset metadata:
+
+- `tools/tilemap_editor/TilemapEditor.tscn`
+
+It can import a PNG, display a zoomable grid, edit per-tile metadata, and save/load tileset packages under `assets/tilesets/<tileset_name>/`.
 
 ## Running
 
@@ -90,6 +114,7 @@ Controls (editor):
 - `RMB` or `Backspace`: erase tile at cursor
 - `WASD`: move camera (cursor remains mouse-controlled)
 - Mouse wheel or `+`/`-`: zoom
+- `1` / `2` / `3`: zoom presets
 - `MMB` drag or `Space`+`LMB` drag: pan
 - `Tab`: cycle layer (`bg` / `solid` / `fg`)
 - `Q`: open tile palette (click a tile to select; `Esc` closes)
@@ -98,19 +123,13 @@ Controls (editor):
 - `Ctrl+S`: save map JSON to `user://maps` and copy the JSON to clipboard (hold `Shift` to also print it)
 - `Ctrl+O`: load map (shows a picker if there are multiple)
 - `Ctrl+Shift+O`: load newest map directly
-- `F`: toggle tile vs entity edit mode
-- `1` / `2` / `3`: select entity type (`spawn` / `flag` / `base`)
+- `Ctrl+T`: cycle tileset packages under `assets/tilesets/`
 
 Tile metadata (editor):
 
-- The right-side Tile Properties panel edits per-atlas tile metadata in `client/graphics/tilesets/<tileset>/tiles_meta.json`.
+- The right-side Tile Properties panel edits per-atlas tile metadata in the tileset package `tiles_def.json` when available (fallback: `client/graphics/tilesets/<tileset>/tiles_meta.json`).
 - Changes apply immediately (collision cache, overlays, and test puck).
 - `T`: toggle test puck mode. In test mode: click to shoot; right click resets.
-
-Entity mode:
-
-- `LMB` or `Space`: place an entity at cursor
-- `RMB` or `Backspace`: remove an entity at cursor
 
 Map sizes in the editor UI are in pixels (multiples of 16). Internally the map is stored in tiles.
 

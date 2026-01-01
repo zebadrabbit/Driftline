@@ -2,6 +2,22 @@
 
 This document describes the current on-disk / clipboard JSON map format used by driftline.
 
+## See also (schema docs)
+
+For the normative, structured schema documentation:
+
+- `docs/formats/map.schema.md` — full map container schema (`v`, `meta`, `layers`, `entities`) and canonicalization/checksum rules
+- `docs/formats/tilemap.schema.md` — the `layers` tilemap portion (`bg|solid|fg` arrays of `[x,y,ax,ay]`)
+- `docs/formats/tiles_def.schema.md` — tileset behavior source-of-truth (`tiles_def.json`: `solid`, `door`, `safe_zone`, render layer)
+
+## Start here (recommended reading order)
+
+If you're learning Godot and want the “mental model” first:
+
+1. `docs/formats/map.schema.md` — what the full map JSON contains
+2. `docs/formats/tilemap.schema.md` — how tile placements are encoded (`[x,y,ax,ay]`)
+3. `docs/formats/tiles_def.schema.md` — where tile behavior is defined (`solid`, doors, render layers)
+
 ## Overview
 
 - Format: JSON object
