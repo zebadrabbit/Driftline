@@ -17,6 +17,15 @@ This project didn’t previously have a formal changelog. The entries below were
 - Server startup failures caused by malformed map layer entries in `maps/default.json`.
 - `server.cfg` parsing by quoting string values for Godot `ConfigFile`.
 
+## 0.5.4 - 2025-12-31
+
+### Added
+
+- Map editor tile metadata authoring (`tiles_meta.json`) with a right-side Tile Properties panel (layer/solid/restitution/friction).
+- Editor overlays for solid cells and restitution visualization.
+- Editor test puck sandbox (deterministic fixed-step) driven by the live collision cache.
+- Zoom and pan controls for editing at high DPI.
+
 ## Unreleased
 
 ### Added

@@ -89,6 +89,8 @@ Controls (editor):
 - `Space`: place tile at cursor
 - `RMB` or `Backspace`: erase tile at cursor
 - `WASD`: move camera (cursor remains mouse-controlled)
+- Mouse wheel or `+`/`-`: zoom
+- `MMB` drag or `Space`+`LMB` drag: pan
 - `Tab`: cycle layer (`bg` / `solid` / `fg`)
 - `Q`: open tile palette (click a tile to select; `Esc` closes)
 - `Shift+Q` / `Shift+E`: cycle favorite tiles
@@ -98,6 +100,12 @@ Controls (editor):
 - `Ctrl+Shift+O`: load newest map directly
 - `F`: toggle tile vs entity edit mode
 - `1` / `2` / `3`: select entity type (`spawn` / `flag` / `base`)
+
+Tile metadata (editor):
+
+- The right-side Tile Properties panel edits per-atlas tile metadata in `client/graphics/tilesets/<tileset>/tiles_meta.json`.
+- Changes apply immediately (collision cache, overlays, and test puck).
+- `T`: toggle test puck mode. In test mode: click to shoot; right click resets.
 
 Entity mode:
 

@@ -6,12 +6,16 @@ extends Node2D
 ## Boundary tiles are immutable and auto-generated.
 
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
-const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
+const TilesetMetaScript = preload("res://editor/tileset_meta.gd")
+const TileOverlayScript = preload("res://editor/tile_overlay.gd")
+const TestPuckScript = preload("res://editor/test_puck.gd")
 
 @export var map_width: int = 64
 @export var map_height: int = 64
 @export var cursor_move_speed: int = 1
 @export var cursor_move_speed_fast: int = 8
+
+var editor_zoom: float = 4.0
 
 # Map size state.
 # NOTE: Despite the name, these are pixel dimensions (multiples of TILE_SIZE).
@@ -19,11 +23,12 @@ const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 var map_width_tiles: int = 1024
 var map_height_tiles: int = 1024
 
-@onready var tilemap_bg: TileMap = $TileMapBG
-@onready var tilemap_solid: TileMap = $TileMapSolid
-@onready var tilemap_fg: TileMap = $TileMapFG
+@onready var map_canvas: Node2D = $MapCanvas
+@onready var tilemap_bg: TileMap = $MapCanvas/TileMapBG
+@onready var tilemap_solid: TileMap = $MapCanvas/TileMapSolid
+@onready var tilemap_fg: TileMap = $MapCanvas/TileMapFG
 @onready var camera: Camera2D = $Camera2D
-@onready var cursor_sprite: Sprite2D = $Cursor
+@onready var cursor_sprite: Sprite2D = $MapCanvas/Cursor
 @onready var ui_label: Label = $UI/Label
 @onready var ui_root: CanvasLayer = $UI
 
@@ -83,7 +88,35 @@ var drag_end_cell := Vector2i.ZERO
 
 var _tilemaps := {}
 var _tileset_name := "subspace_base"
-var _tileset_def: Dictionary = {}
+
+var _tileset_meta
+var _tileset_meta_path: String = ""
+
+# Right-side Tile Properties panel
+var _tile_props_panel: Panel
+var _tile_layer_option: OptionButton
+var _tile_solid_check: CheckBox
+var _tile_restitution_slider: HSlider
+var _tile_friction_slider: HSlider
+var _tile_restitution_value: Label
+var _tile_friction_value: Label
+var _tile_props_syncing: bool = false
+
+# Overlays
+var _overlay_solid
+var _overlay_restitution
+
+# Collision cache: only solid cells exist here.
+var collision_cells: Dictionary = {} # Dictionary[Vector2i, Dictionary]
+
+# Test puck sandbox
+var test_mode: bool = false
+var _test_puck
+var _test_accum: float = 0.0
+
+# Pan state
+var _panning: bool = false
+var _pan_last_mouse: Vector2 = Vector2.ZERO
 
 
 func _ready() -> void:
@@ -92,9 +125,10 @@ func _ready() -> void:
 		"solid": tilemap_solid,
 		"fg": tilemap_fg
 	}
-	_tileset_def = DriftTileDefs.load_tileset(_tileset_name)
-	if not bool(_tileset_def.get("ok", false)):
-		push_warning("[TILES] " + String(_tileset_def.get("error", "Failed to load tiles_def")))
+	_tileset_meta = TilesetMetaScript.new()
+	_tileset_meta.tileset_id = _tileset_name
+	_tileset_meta_path = _resolve_tileset_meta_path(_tileset_name)
+	_tileset_meta.load(_tileset_meta_path)
 	_favorites_max_len = favorites.size()
 	# Keep defaults aligned with inspector exports (exports are in tiles; state vars are pixels).
 	map_width_tiles = map_width * LevelIO.TILE_SIZE
@@ -104,6 +138,9 @@ func _ready() -> void:
 	_build_new_map_ui()
 	_build_load_map_ui()
 	_build_status_ui()
+	_build_tile_properties_ui()
+	_build_overlays()
+	_apply_editor_zoom()
 
 	# Ensure the cursor is visible even if the Sprite2D has no texture set in the scene.
 	# (The scene sets a region_rect, but without a texture nothing is drawn.)
@@ -116,7 +153,10 @@ func _ready() -> void:
 	cursor_sprite.modulate = Color(1, 1, 0, 0.35)
 	
 	_create_new_map(map_width_tiles, map_height_tiles)
+	reroute_tiles_by_meta()
+	rebuild_collision_cache()
 	_update_ui()
+	_sync_tile_props_from_selection()
 
 
 func _map_width_cells() -> int:
@@ -137,6 +177,12 @@ func _process(_delta: float) -> void:
 	if dragging:
 		queue_redraw()
 
+	if test_mode and _test_puck != null:
+		_test_accum += _delta
+		while _test_accum >= (1.0 / 60.0):
+			_test_puck.step(1.0 / 60.0, collision_cells)
+			_test_accum -= (1.0 / 60.0)
+
 
 func _draw() -> void:
 	# Editor-only rectangle preview when dragging.
@@ -148,12 +194,9 @@ func _draw() -> void:
 		var min_y: int = mini(a.y, b.y)
 		var max_y: int = maxi(a.y, b.y)
 
-		var tile_size: float = float(LevelIO.TILE_SIZE)
-		var top_left_world := Vector2(min_x, min_y) * tile_size
-		var size_world := Vector2(max_x - min_x + 1, max_y - min_y + 1) * tile_size
-
-		# Draw in this Node2D's local space.
-		var rect := Rect2(to_local(top_left_world), size_world)
+		var top_left_world := map_canvas.to_global(Vector2(min_x * LevelIO.TILE_SIZE, min_y * LevelIO.TILE_SIZE))
+		var bottom_right_world := map_canvas.to_global(Vector2((max_x + 1) * LevelIO.TILE_SIZE, (max_y + 1) * LevelIO.TILE_SIZE))
+		var rect := Rect2(to_local(top_left_world), bottom_right_world - top_left_world)
 
 		var outline_only := Input.is_key_pressed(KEY_SHIFT)
 		if not outline_only:
@@ -176,7 +219,7 @@ func _draw_entities() -> void:
 		var y: int = int(d.get("y", -1))
 		if x < 0 or y < 0:
 			continue
-		var center_world := Vector2(x, y) * tile_size + Vector2.ONE * (tile_size / 2.0)
+		var center_world := map_canvas.to_global(Vector2(x, y) * tile_size + Vector2.ONE * (tile_size / 2.0))
 		var p := to_local(center_world)
 		var r := tile_size * 0.28
 		if t == "spawn":
@@ -219,6 +262,12 @@ func _set_cursor_cell(cell: Vector2i) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Block map actions when interacting with the Tile Properties panel.
+	if _tile_props_panel != null and (event is InputEventMouseButton or event is InputEventMouseMotion):
+		var mp := get_viewport().get_mouse_position()
+		if _tile_props_panel.get_global_rect().has_point(mp):
+			return
+
 	# Load Map dialog blocks map editing input while visible.
 	if load_map_visible:
 		if event is InputEventKey and event.pressed and not event.echo:
@@ -283,27 +332,66 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Mode toggle / entity type selection
 	if event is InputEventKey and event.pressed and not event.echo and not event.ctrl_pressed:
+		if event.keycode == KEY_T:
+			_toggle_test_mode()
+			get_viewport().set_input_as_handled()
+			return
 		if event.keycode == KEY_F:
 			edit_mode = EditMode.ENTITY if edit_mode == EditMode.TILE else EditMode.TILE
 			_set_status("Mode: %s" % ("ENTITY" if edit_mode == EditMode.ENTITY else "TILE"), false, 2.0)
 			get_viewport().set_input_as_handled()
 			queue_redraw()
 			return
-		if event.keycode == KEY_1:
-			selected_entity_type = "spawn"
+		if edit_mode == EditMode.ENTITY:
+			if event.keycode == KEY_1:
+				selected_entity_type = "spawn"
+				get_viewport().set_input_as_handled()
+				return
+			elif event.keycode == KEY_2:
+				selected_entity_type = "flag"
+				get_viewport().set_input_as_handled()
+				return
+			elif event.keycode == KEY_3:
+				selected_entity_type = "base"
+				get_viewport().set_input_as_handled()
+				return
+		else:
+			# Zoom presets in TILE mode.
+			if event.keycode == KEY_1:
+				editor_zoom = 2.0
+				_apply_editor_zoom()
+				get_viewport().set_input_as_handled()
+				return
+			elif event.keycode == KEY_2:
+				editor_zoom = 4.0
+				_apply_editor_zoom()
+				get_viewport().set_input_as_handled()
+				return
+			elif event.keycode == KEY_3:
+				editor_zoom = 8.0
+				_apply_editor_zoom()
+				get_viewport().set_input_as_handled()
+				return
+
+		# +/- zoom
+		if event.keycode == KEY_EQUAL or event.keycode == KEY_KP_ADD:
+			editor_zoom = clampf(editor_zoom + 0.5, 1.0, 12.0)
+			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_2:
-			selected_entity_type = "flag"
-			get_viewport().set_input_as_handled()
-			return
-		elif event.keycode == KEY_3:
-			selected_entity_type = "base"
+		elif event.keycode == KEY_MINUS or event.keycode == KEY_KP_SUBTRACT:
+			editor_zoom = clampf(editor_zoom - 0.5, 1.0, 12.0)
+			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
 
 	# Mouse hover updates the cursor cell.
 	if event is InputEventMouseMotion:
+		if _panning:
+			var delta_screen: Vector2 = event.relative
+			camera.global_position -= delta_screen / maxf(0.01, editor_zoom)
+			_pan_last_mouse = get_viewport().get_mouse_position()
+			return
 		_set_cursor_cell(_get_cell_under_mouse())
 		# If dragging, keep the drag endpoint in sync with cursor.
 		if dragging:
@@ -313,7 +401,43 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Mouse buttons should act on the cell under the mouse.
 	if event is InputEventMouseButton:
+		# Zoom (mouse wheel)
+		if event.pressed and (event.button_index == MOUSE_BUTTON_WHEEL_UP or event.button_index == MOUSE_BUTTON_WHEEL_DOWN):
+			var step := 0.5
+			if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+				editor_zoom = clampf(editor_zoom + step, 1.0, 12.0)
+			else:
+				editor_zoom = clampf(editor_zoom - step, 1.0, 12.0)
+			_apply_editor_zoom()
+			get_viewport().set_input_as_handled()
+			return
+
+		# Pan: MMB drag or Space+LMB drag
+		if event.button_index == MOUSE_BUTTON_MIDDLE or (event.button_index == MOUSE_BUTTON_LEFT and Input.is_key_pressed(KEY_SPACE)):
+			if event.pressed:
+				_panning = true
+				_pan_last_mouse = get_viewport().get_mouse_position()
+				get_viewport().set_input_as_handled()
+				return
+			else:
+				_panning = false
+				_sync_camera_cell_from_camera_pos()
+				get_viewport().set_input_as_handled()
+				return
+
 		_set_cursor_cell(_get_cell_under_mouse())
+
+		# Test mode: click shoots puck; right click resets.
+		if test_mode and _test_puck != null:
+			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+				_test_puck.shoot_towards(map_canvas.to_local(get_global_mouse_position()))
+				get_viewport().set_input_as_handled()
+				return
+			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+				_reset_test_puck()
+				get_viewport().set_input_as_handled()
+				return
+
 		# Entity mode: LMB places entity; RMB removes.
 		if edit_mode == EditMode.ENTITY:
 			if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
@@ -359,7 +483,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_place_entity_at_cell(cursor_cell)
 			get_viewport().set_input_as_handled()
-	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and edit_mode == EditMode.TILE:
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and edit_mode == EditMode.TILE and not Input.is_key_pressed(KEY_SPACE):
 		if event.pressed:
 			dragging = true
 			drag_start_cell = cursor_cell
@@ -375,7 +499,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 	
 	# Erase tile (Backspace or RMB)
-	if event.is_action_pressed("ui_cancel") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT):
+	if not test_mode and (event.is_action_pressed("ui_cancel") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT)):
 		if edit_mode == EditMode.TILE:
 			_erase_tile()
 		else:
@@ -414,9 +538,10 @@ func _place_tile() -> void:
 		print("Cannot edit boundary cells")
 		return
 
-	var dest_layer := DriftTileDefs.tile_render_layer(_tileset_def, selected_atlas_coords.x, selected_atlas_coords.y)
+	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_meta(selected_atlas_coords).get("layer", "mid")))
 	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	tilemap.set_cell(0, cursor_cell, 0, selected_atlas_coords)
+	rebuild_collision_cache()
 
 
 func _erase_tile() -> void:
@@ -428,6 +553,7 @@ func _erase_tile() -> void:
 		var tm: TileMap = _tilemaps.get(layer_name, null)
 		if tm != null:
 			tm.erase_cell(0, cursor_cell)
+	rebuild_collision_cache()
 
 
 func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
@@ -436,7 +562,7 @@ func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
 	var min_y: int = mini(a.y, b.y)
 	var max_y: int = maxi(a.y, b.y)
 
-	var dest_layer := DriftTileDefs.tile_render_layer(_tileset_def, selected_atlas_coords.x, selected_atlas_coords.y)
+	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_meta(selected_atlas_coords).get("layer", "mid")))
 	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
 	for y in range(min_y, max_y + 1):
 		for x in range(min_x, max_x + 1):
@@ -447,6 +573,7 @@ func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
 				if not (x == min_x or x == max_x or y == min_y or y == max_y):
 					continue
 			tilemap.set_cell(0, cell, 0, selected_atlas_coords)
+	rebuild_collision_cache()
 
 
 func _cycle_layer() -> void:
@@ -461,15 +588,16 @@ func _cycle_layer() -> void:
 func _cycle_favorite(direction: int) -> void:
 	favorite_index = wrapi(favorite_index + direction, 0, favorites.size())
 	selected_atlas_coords = favorites[favorite_index]
+	_sync_tile_props_from_selection()
 
 
 
 func _update_cursor_position(move_camera: bool = true) -> void:
-	var cursor_world_pos := Vector2(cursor_cell) * LevelIO.TILE_SIZE + Vector2.ONE * (LevelIO.TILE_SIZE / 2.0)
-	cursor_sprite.global_position = cursor_world_pos
+	var cursor_local_pos := Vector2(cursor_cell) * LevelIO.TILE_SIZE + Vector2.ONE * (LevelIO.TILE_SIZE / 2.0)
+	cursor_sprite.position = cursor_local_pos
 	if move_camera:
-		var camera_world_pos := Vector2(camera_cell) * LevelIO.TILE_SIZE + Vector2.ONE * (LevelIO.TILE_SIZE / 2.0)
-		camera.global_position = camera_world_pos
+		var camera_local_pos := Vector2(camera_cell) * LevelIO.TILE_SIZE + Vector2.ONE * (LevelIO.TILE_SIZE / 2.0)
+		camera.global_position = map_canvas.to_global(camera_local_pos)
 	queue_redraw()
 
 
@@ -477,7 +605,7 @@ func _update_ui() -> void:
 	var layer_display := current_layer.to_upper()
 	var atlas_str := "(%d,%d)" % [selected_atlas_coords.x, selected_atlas_coords.y]
 	var mode_str := "ENTITY(%s)" % selected_entity_type if edit_mode == EditMode.ENTITY else "TILE"
-	ui_label.text = "Map: %d×%d | Mode: %s | Cell: %s | Layer: %s | Tile: %s\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [F] Mode | [1/2/3] Entity | [Shift+Q/E] Favorites | [Ctrl+N] New | [Ctrl+S] Save+Copy | [Ctrl+V] Paste | [Ctrl+O] Load… | [Ctrl+Shift+O] Load Latest | [Esc] Exit" % [map_width_tiles, map_height_tiles, mode_str, cursor_cell, layer_display, atlas_str]
+	ui_label.text = "Map: %d×%d | Mode: %s | Cell: %s | Layer: %s | Tile: %s | Zoom: %.1f\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [F] Mode | [T] Test | [Wheel/+/-] Zoom | [MMB Drag] Pan | [Space+LMB] Pan | [Esc] Exit" % [map_width_tiles, map_height_tiles, mode_str, cursor_cell, layer_display, atlas_str, editor_zoom]
 
 
 func _build_status_ui() -> void:
@@ -553,6 +681,8 @@ func _paste_map_from_clipboard() -> void:
 	# Resize the editor map BEFORE applying tiles.
 	_create_new_map(w_tiles * LevelIO.TILE_SIZE, h_tiles * LevelIO.TILE_SIZE)
 	LevelIO.apply_map_data(map, _tilemaps)
+	reroute_tiles_by_meta()
+	rebuild_collision_cache()
 	entities = map.get("entities", [])
 	queue_redraw()
 
@@ -695,6 +825,10 @@ func _create_new_map(width: int, height: int) -> void:
 		tilemap.clear()
 	entities = []
 	LevelIO.apply_boundary(tilemap_solid, _map_width_cells(), _map_height_cells())
+	reroute_tiles_by_meta()
+	rebuild_collision_cache()
+	if test_mode and _test_puck != null:
+		_reset_test_puck()
 
 	var w_cells := _map_width_cells()
 	var h_cells := _map_height_cells()
@@ -787,6 +921,7 @@ func _build_tileset_palette() -> void:
 func _on_palette_tile_pressed(button: TextureButton) -> void:
 	var coords := button.get_meta("atlas_coords") as Vector2i
 	selected_atlas_coords = coords
+	_sync_tile_props_from_selection()
 	# Update favorites: most-recent-first, dedupe, preserve max length.
 	var existing := favorites.find(coords)
 	if existing != -1:
@@ -797,6 +932,317 @@ func _on_palette_tile_pressed(button: TextureButton) -> void:
 	favorite_index = 0
 	_hide_palette()
 	_update_ui()
+
+
+func _resolve_tileset_meta_path(tileset_name: String) -> String:
+	var ts := String(tileset_name).strip_edges()
+	if ts == "":
+		ts = "subspace_base"
+	return "res://client/graphics/tilesets/%s/tiles_meta.json" % ts
+
+
+func _meta_layer_to_map_layer(layer: String) -> String:
+	var l := layer.strip_edges().to_lower()
+	if l == "bg":
+		return "bg"
+	if l == "fg":
+		return "fg"
+	return "solid" # mid
+
+
+func _apply_editor_zoom() -> void:
+	editor_zoom = clampf(editor_zoom, 1.0, 12.0)
+	if map_canvas != null:
+		map_canvas.scale = Vector2(editor_zoom, editor_zoom)
+	# Keep camera anchored to its logical cell.
+	_update_cursor_position(true)
+	if _overlay_solid != null:
+		_overlay_solid.queue_redraw()
+	if _overlay_restitution != null:
+		_overlay_restitution.queue_redraw()
+
+
+func _sync_camera_cell_from_camera_pos() -> void:
+	if camera == null or map_canvas == null:
+		return
+	var local := map_canvas.to_local(camera.global_position)
+	camera_cell = Vector2i(int(floor(local.x / float(LevelIO.TILE_SIZE))), int(floor(local.y / float(LevelIO.TILE_SIZE))))
+	camera_cell.x = clampi(camera_cell.x, 0, _map_width_cells() - 1)
+	camera_cell.y = clampi(camera_cell.y, 0, _map_height_cells() - 1)
+
+
+func rebuild_collision_cache() -> void:
+	collision_cells.clear()
+	if _tileset_meta == null:
+		return
+
+	var used_by_layer: Dictionary = {}
+	for layer_name in ["bg", "solid", "fg"]:
+		var tm: TileMap = _tilemaps.get(layer_name, null)
+		if tm == null:
+			continue
+		var used: Array = tm.get_used_cells(0)
+		used.sort_custom(Callable(self, "_cell_less"))
+		used_by_layer[layer_name] = used
+
+	for layer_name in ["bg", "solid", "fg"]:
+		var tm: TileMap = _tilemaps.get(layer_name, null)
+		if tm == null:
+			continue
+		var used: Array = used_by_layer.get(layer_name, [])
+		for cell in used:
+			if typeof(cell) != TYPE_VECTOR2I:
+				continue
+			var atlas: Vector2i = tm.get_cell_atlas_coords(0, cell)
+			if atlas.x < 0 or atlas.y < 0:
+				continue
+			var meta := _tileset_meta.get_meta(atlas)
+			if not bool(meta.get("solid", false)):
+				continue
+			collision_cells[cell] = {
+				"restitution": clampf(float(meta.get("restitution", 0.0)), 0.0, 1.2),
+				"friction": clampf(float(meta.get("friction", 0.0)), 0.0, 1.0),
+			}
+
+	if _overlay_solid != null:
+		_overlay_solid.set_collision_cells(collision_cells)
+	if _overlay_restitution != null:
+		_overlay_restitution.set_collision_cells(collision_cells)
+
+
+func reroute_tiles_by_meta() -> void:
+	if _tileset_meta == null:
+		return
+	var placed: Dictionary = {} # Vector2i -> Vector2i(atlas)
+	for layer_name in ["bg", "solid", "fg"]:
+		var tm: TileMap = _tilemaps.get(layer_name, null)
+		if tm == null:
+			continue
+		var used: Array = tm.get_used_cells(0)
+		used.sort_custom(Callable(self, "_cell_less"))
+		for cell in used:
+			if typeof(cell) != TYPE_VECTOR2I:
+				continue
+			var atlas: Vector2i = tm.get_cell_atlas_coords(0, cell)
+			if atlas.x < 0 or atlas.y < 0:
+				continue
+			placed[cell] = atlas
+
+	# Clear all tilemaps
+	for layer_name in ["bg", "solid", "fg"]:
+		var tm: TileMap = _tilemaps.get(layer_name, null)
+		if tm != null:
+			tm.clear()
+
+	var cells: Array = placed.keys()
+	cells.sort_custom(Callable(self, "_cell_less"))
+	for cell in cells:
+		var atlas: Vector2i = placed[cell]
+		var meta := _tileset_meta.get_meta(atlas)
+		var dest := _meta_layer_to_map_layer(String(meta.get("layer", "mid")))
+		var tm: TileMap = _tilemaps.get(dest, null)
+		if tm != null:
+			tm.set_cell(0, cell, 0, atlas)
+
+
+func _cell_less(a, b) -> bool:
+	if int(a.x) != int(b.x):
+		return int(a.x) < int(b.x)
+	return int(a.y) < int(b.y)
+
+
+func _build_tile_properties_ui() -> void:
+	if ui_root == null:
+		return
+
+	_tile_props_panel = Panel.new()
+	_tile_props_panel.name = "TilePropertiesPanel"
+	_tile_props_panel.custom_minimum_size = Vector2(280, 260)
+	_tile_props_panel.anchor_left = 1.0
+	_tile_props_panel.anchor_right = 1.0
+	_tile_props_panel.anchor_top = 0.0
+	_tile_props_panel.anchor_bottom = 0.0
+	_tile_props_panel.offset_left = -300.0
+	_tile_props_panel.offset_right = -12.0
+	_tile_props_panel.offset_top = 12.0
+	_tile_props_panel.offset_bottom = 12.0 + 260.0
+	ui_root.add_child(_tile_props_panel)
+
+	var root := VBoxContainer.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.add_theme_constant_override("separation", 8)
+	_tile_props_panel.add_child(root)
+
+	var title := Label.new()
+	title.text = "Tile Properties"
+	root.add_child(title)
+
+	# Layer
+	var layer_row := HBoxContainer.new()
+	layer_row.add_theme_constant_override("separation", 8)
+	root.add_child(layer_row)
+	var layer_lbl := Label.new()
+	layer_lbl.text = "Layer"
+	layer_row.add_child(layer_lbl)
+	_tile_layer_option = OptionButton.new()
+	_tile_layer_option.add_item("bg")
+	_tile_layer_option.add_item("mid")
+	_tile_layer_option.add_item("fg")
+	_tile_layer_option.item_selected.connect(_on_tile_layer_selected)
+	layer_row.add_child(_tile_layer_option)
+
+	# Solid
+	_tile_solid_check = CheckBox.new()
+	_tile_solid_check.text = "Solid"
+	_tile_solid_check.toggled.connect(_on_tile_solid_toggled)
+	root.add_child(_tile_solid_check)
+
+	# Restitution
+	var rest_lbl := Label.new()
+	rest_lbl.text = "Restitution"
+	root.add_child(rest_lbl)
+	var rest_row := HBoxContainer.new()
+	rest_row.add_theme_constant_override("separation", 8)
+	root.add_child(rest_row)
+	_tile_restitution_slider = HSlider.new()
+	_tile_restitution_slider.min_value = 0.0
+	_tile_restitution_slider.max_value = 1.2
+	_tile_restitution_slider.step = 0.01
+	_tile_restitution_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tile_restitution_slider.value_changed.connect(_on_tile_restitution_changed)
+	rest_row.add_child(_tile_restitution_slider)
+	_tile_restitution_value = Label.new()
+	_tile_restitution_value.text = "0.00"
+	rest_row.add_child(_tile_restitution_value)
+
+	# Friction
+	var fr_lbl := Label.new()
+	fr_lbl.text = "Friction"
+	root.add_child(fr_lbl)
+	var fr_row := HBoxContainer.new()
+	fr_row.add_theme_constant_override("separation", 8)
+	root.add_child(fr_row)
+	_tile_friction_slider = HSlider.new()
+	_tile_friction_slider.min_value = 0.0
+	_tile_friction_slider.max_value = 1.0
+	_tile_friction_slider.step = 0.01
+	_tile_friction_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tile_friction_slider.value_changed.connect(_on_tile_friction_changed)
+	fr_row.add_child(_tile_friction_slider)
+	_tile_friction_value = Label.new()
+	_tile_friction_value.text = "0.00"
+	fr_row.add_child(_tile_friction_value)
+
+
+func _build_overlays() -> void:
+	if ui_root == null:
+		return
+	_overlay_solid = TileOverlayScript.new()
+	_overlay_solid.mode = TileOverlay.Mode.SOLID
+	_overlay_solid.camera = camera
+	_overlay_solid.map_canvas = map_canvas
+	ui_root.add_child(_overlay_solid)
+
+	_overlay_restitution = TileOverlayScript.new()
+	_overlay_restitution.mode = TileOverlay.Mode.RESTITUTION
+	_overlay_restitution.camera = camera
+	_overlay_restitution.map_canvas = map_canvas
+	ui_root.add_child(_overlay_restitution)
+
+	_overlay_solid.set_collision_cells(collision_cells)
+	_overlay_restitution.set_collision_cells(collision_cells)
+
+
+func _sync_tile_props_from_selection() -> void:
+	if _tileset_meta == null:
+		return
+	if _tile_layer_option == null:
+		return
+	_tile_props_syncing = true
+	var meta := _tileset_meta.get_meta(selected_atlas_coords)
+	var layer := String(meta.get("layer", "mid"))
+	var idx := 1
+	if layer == "bg":
+		idx = 0
+	elif layer == "fg":
+		idx = 2
+	_tile_layer_option.select(idx)
+	_tile_solid_check.button_pressed = bool(meta.get("solid", false))
+	_tile_restitution_slider.value = float(meta.get("restitution", 0.0))
+	_tile_friction_slider.value = float(meta.get("friction", 0.0))
+	_tile_restitution_value.text = "%.2f" % float(_tile_restitution_slider.value)
+	_tile_friction_value.text = "%.2f" % float(_tile_friction_slider.value)
+	_tile_props_syncing = false
+
+
+func _apply_tile_meta_patch(patch: Dictionary) -> void:
+	if _tile_props_syncing:
+		return
+	if _tileset_meta == null:
+		return
+	_tileset_meta.set_meta(selected_atlas_coords, patch)
+	_tileset_meta.save(_tileset_meta_path)
+	reroute_tiles_by_meta()
+	rebuild_collision_cache()
+
+
+func _on_tile_layer_selected(index: int) -> void:
+	var layer := "mid"
+	if index == 0:
+		layer = "bg"
+	elif index == 2:
+		layer = "fg"
+	_apply_tile_meta_patch({"layer": layer})
+
+
+func _on_tile_solid_toggled(pressed: bool) -> void:
+	_apply_tile_meta_patch({"solid": pressed})
+
+
+func _on_tile_restitution_changed(v: float) -> void:
+	if _tile_restitution_value != null:
+		_tile_restitution_value.text = "%.2f" % clampf(v, 0.0, 1.2)
+	_apply_tile_meta_patch({"restitution": v})
+
+
+func _on_tile_friction_changed(v: float) -> void:
+	if _tile_friction_value != null:
+		_tile_friction_value.text = "%.2f" % clampf(v, 0.0, 1.0)
+	_apply_tile_meta_patch({"friction": v})
+
+
+func _toggle_test_mode() -> void:
+	test_mode = not test_mode
+	if test_mode:
+		_spawn_test_puck()
+		_set_status("Test mode ON", false, 1.5)
+	else:
+		_destroy_test_puck()
+		_set_status("Test mode OFF", false, 1.5)
+
+
+func _spawn_test_puck() -> void:
+	if _test_puck != null:
+		return
+	_test_puck = TestPuckScript.new()
+	_test_puck.tile_size = Vector2i(LevelIO.TILE_SIZE, LevelIO.TILE_SIZE)
+	map_canvas.add_child(_test_puck)
+	_reset_test_puck()
+
+
+func _destroy_test_puck() -> void:
+	if _test_puck != null:
+		_test_puck.queue_free()
+		_test_puck = null
+	_test_accum = 0.0
+
+
+func _reset_test_puck() -> void:
+	if _test_puck == null:
+		return
+	var center_cell := Vector2i(_map_width_cells() / 2, _map_height_cells() / 2)
+	var p := Vector2(center_cell) * LevelIO.TILE_SIZE + Vector2.ONE * (LevelIO.TILE_SIZE / 2.0)
+	_test_puck.reset(p)
 
 
 func _show_palette() -> void:
@@ -997,6 +1443,10 @@ func _load_map_from_path(full_path: String) -> void:
 	var norm := LevelIO.normalize_map_data(raw)
 	entities = norm.get("entities", [])
 	var meta := LevelIO.load_map_from_json(full_path, _tilemaps)
+	reroute_tiles_by_meta()
+	rebuild_collision_cache()
+	if test_mode and _test_puck != null:
+		_reset_test_puck()
 	if meta.has("w") and meta.has("h"):
 		print("Map loaded: " + full_path)
 	else:

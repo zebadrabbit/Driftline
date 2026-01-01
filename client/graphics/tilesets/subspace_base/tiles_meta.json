@@ -1,0 +1,14 @@
+{
+  "tileset_id": "subspace_base",
+  "tile_size": [16, 16],
+  "tiles": {
+    "1,0":  { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+    "1,2":  { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+    "17,0": { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+    "18,0": { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+    "18,2": { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+    "17,2": { "layer": "mid", "solid": true, "restitution": 0.85, "friction": 0.10 },
+
+    "18,8": { "layer": "fg", "solid": false, "restitution": 0.00, "friction": 0.00 }
+  }
+}
