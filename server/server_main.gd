@@ -230,9 +230,10 @@ func _load_selected_map_from_config() -> bool:
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
 
-	var tileset_name: String = String(meta.get("tileset", ""))
-	if tileset_name == "" and meta.has("tileset_path"):
-		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
+	var tileset_name: String = String(meta.get("tileset", "")).strip_edges()
+	if tileset_name == "":
+		push_error("[MAP] meta.tileset is required (empty)")
+		return false
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))

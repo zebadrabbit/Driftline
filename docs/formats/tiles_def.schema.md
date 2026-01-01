@@ -30,12 +30,11 @@ This separation is important:
 
 ### Where this file lives
 
-In this repo you may see tileset definitions in two places:
+Tileset packages live here:
 
-- `assets/tilesets/<tileset_name>/tiles_def.json` (tileset package)
-- `client/graphics/tilesets/<tileset_name>/tiles_def.json` (legacy/runtime layout)
+- `assets/tilesets/<tileset_name>/tiles_def.json`
 
-At runtime, the shared loader prefers the packaged path when present.
+Note: older checkouts may contain a legacy runtime layout under `client/graphics/tilesets/...`, but Driftline treats persistent JSON as versioned contracts; the canonical location is the packaged path.
 
 ### Glossary
 
@@ -89,37 +88,37 @@ Top-level object:
 
 ```json
 {
-	"version": 1,
-	"defaults": { /* optional */ },
-	"tiles": { /* optional */ },
+	"format": "driftline.tiles_def",
+	"schema_version": 1,
+	"defaults": { /* required */ },
+	"tiles": { /* required */ },
 	"reserved": { /* optional, editor conventions */ },
-	"meta": { /* optional, informational */ }
+	"reserved": { /* optional */ }
 }
 ```
 
-### `version` (optional)
+### Header: `format` + `schema_version` (required)
 
-- Integer.
-- Not currently required by the runtime loader, but used by tools/exporters.
-- Default: `1`.
+- `format` must be `"driftline.tiles_def"`.
+- `schema_version` must be `1`.
+- Loaders refuse to load files missing these fields or with unknown values.
 
-### `defaults` (optional, but strongly recommended)
+### `defaults` (required)
 
 An object describing the default properties for any tile that does not have an override entry.
 
-Runtime defaults (used when the file is missing or invalid):
+Required keys:
 
-```json
-{
-	"solid": true,
-	"safe_zone": false,
-	"render_layer": "solid",
-	"restitution": 0.90,
-	"door": false
-}
-```
+- `layer` (string): one of `bg|mid|fg`
+- `solid` (bool)
 
-Editor/package defaults (used by tileset packaging tools when creating new tilesets):
+Dialect compatibility:
+
+- `render_layer` is accepted in place of `layer` and is canonicalized to `layer`.
+	- `render_layer="solid"` becomes `layer="mid"`.
+	- `render_layer="bg"|"fg"` maps to the same meaning.
+
+Minimal defaults example:
 
 ```json
 {
@@ -130,10 +129,9 @@ Editor/package defaults (used by tileset packaging tools when creating new tiles
 
 Notes:
 
-- Both dialects are allowed: you may use either `layer` or `render_layer`.
-- If you provide `layer` but not `render_layer`, loaders may derive `render_layer` via the mapping above.
+- The runtime may *derive* a `render_layer` view from `layer`, but canonical JSON uses `layer`.
 
-### `tiles` (optional)
+### `tiles` (required)
 
 A dictionary mapping `"ax,ay"` strings to per-tile override objects.
 
@@ -205,7 +203,8 @@ If behavior is map-specific, it belongs in the map format (or entities), not her
 
 ```json
 {
-	"version": 1,
+	"format": "driftline.tiles_def",
+	"schema_version": 1,
 	"defaults": {
 		"layer": "mid",
 		"solid": false
@@ -218,6 +217,8 @@ If behavior is map-specific, it belongs in the map format (or entities), not her
 
 ```json
 {
+	"format": "driftline.tiles_def",
+	"schema_version": 1,
 	"defaults": { "layer": "mid", "solid": true },
 	"tiles": {
 		"0,8": { "layer": "bg", "solid": false }
@@ -229,6 +230,8 @@ If behavior is map-specific, it belongs in the map format (or entities), not her
 
 ```json
 {
+	"format": "driftline.tiles_def",
+	"schema_version": 1,
 	"defaults": { "render_layer": "solid", "solid": true },
 	"tiles": {
 		"0,8": { "render_layer": "bg", "solid": false }

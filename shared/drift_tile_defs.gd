@@ -6,6 +6,7 @@
 class_name DriftTileDefs
 
 const DriftMap = preload("res://shared/drift_map.gd")
+const DriftValidate = preload("res://shared/drift_validate.gd")
 
 # tileset_name -> { ok, path, defaults, tiles, error }
 static var _cache: Dictionary = {}
@@ -14,7 +15,7 @@ static var _cache: Dictionary = {}
 static func _resolve_tiles_def_path(tileset_name: String) -> String:
 	var ts := String(tileset_name).strip_edges()
 	if ts == "":
-		ts = "subspace_base"
+		return ""
 
 	# Support both the new tileset package layout and the legacy layout.
 	# Prefer res://assets/tilesets/<name>/tiles_def.json when present.
@@ -37,25 +38,25 @@ static func _layer_to_render_layer(layer: String) -> String:
 
 static func load_tileset(tileset_name: String) -> Dictionary:
 	var key := String(tileset_name).strip_edges()
+	if key == "":
+		return {
+			"ok": false,
+			"path": "",
+			"defaults": {},
+			"tiles": {},
+			"error": "tileset_name is required",
+		}
 	if _cache.has(key):
 		return _cache[key]
 
-	var defaults: Dictionary = {
-		"solid": true,
-		"safe_zone": false,
-		"render_layer": "solid",
-		"restitution": 0.90,
-		"door": false,
-	}
-
 	var path := _resolve_tiles_def_path(key)
-	if not FileAccess.file_exists(path):
+	if path == "" or not FileAccess.file_exists(path):
 		var res_missing := {
 			"ok": false,
 			"path": path,
-			"defaults": defaults,
+			"defaults": {},
 			"tiles": {},
-			"error": "tiles_def.json not found: " + path,
+			"error": "tiles_def.json not found for tileset '%s'" % key,
 		}
 		_cache[key] = res_missing
 		return res_missing
@@ -65,7 +66,7 @@ static func load_tileset(tileset_name: String) -> Dictionary:
 		var res_open := {
 			"ok": false,
 			"path": path,
-			"defaults": defaults,
+			"defaults": {},
 			"tiles": {},
 			"error": "Failed to open tiles_def.json: " + path,
 		}
@@ -80,7 +81,7 @@ static func load_tileset(tileset_name: String) -> Dictionary:
 		var res_parse := {
 			"ok": false,
 			"path": path,
-			"defaults": defaults,
+			"defaults": {},
 			"tiles": {},
 			"error": "Invalid tiles_def.json (must be an object): " + path,
 		}
@@ -88,19 +89,26 @@ static func load_tileset(tileset_name: String) -> Dictionary:
 		return res_parse
 
 	var root: Dictionary = parsed
-	if root.has("defaults") and root["defaults"] is Dictionary:
-		for k in (root["defaults"] as Dictionary).keys():
-			defaults[k] = (root["defaults"] as Dictionary)[k]
+	var validated := DriftValidate.validate_tiles_def(root)
+	if not bool(validated.get("ok", false)):
+		var err_text := "tiles_def validation failed: " + path
+		for e in (validated.get("errors", []) as Array):
+			err_text += "\n - " + String(e)
+		var res_bad := {
+			"ok": false,
+			"path": path,
+			"defaults": {},
+			"tiles": {},
+			"error": err_text,
+			"errors": validated.get("errors", []),
+			"warnings": validated.get("warnings", []),
+		}
+		_cache[key] = res_bad
+		return res_bad
 
-	# Backward/forward compatibility:
-	# - New defs use `layer` (bg|mid|fg)
-	# - Existing game code uses `render_layer` (bg|solid|fg)
-	if defaults.has("layer") and not defaults.has("render_layer"):
-		defaults["render_layer"] = _layer_to_render_layer(String(defaults.get("layer", "mid")))
-
-	var tiles: Dictionary = {}
-	if root.has("tiles") and root["tiles"] is Dictionary:
-		tiles = root["tiles"]
+	var canonical: Dictionary = validated.get("tiles_def", {})
+	var defaults: Dictionary = canonical.get("defaults", {})
+	var tiles: Dictionary = canonical.get("tiles", {})
 
 	var res_ok := {
 		"ok": true,
@@ -108,6 +116,7 @@ static func load_tileset(tileset_name: String) -> Dictionary:
 		"defaults": defaults,
 		"tiles": tiles,
 		"error": "",
+		"warnings": validated.get("warnings", []),
 	}
 	_cache[key] = res_ok
 	return res_ok

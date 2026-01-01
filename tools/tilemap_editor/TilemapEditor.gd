@@ -142,12 +142,17 @@ func _on_open_tileset_dir_selected(abs_dir: String) -> void:
 	if res_dir == abs_dir:
 		_set_status("Open Tileset requires a folder under the project (res://assets/tilesets)")
 		return
-	_data = TilesetIO.load_tileset(res_dir)
+	var res := TilesetIO.load_tileset(res_dir)
+	if not bool(res.get("ok", false)):
+		_set_status("Open failed: " + String(res.get("error", "")))
+		return
+	_data = res.get("data", null)
 	_current_dir = res_dir
 	_dirty = false
 	_apply_data_to_view()
-	if _data.warnings.size() > 0:
-		_set_status("Opened with warnings: " + String(_data.warnings[0]))
+	var warnings: Array = res.get("warnings", [])
+	if warnings.size() > 0:
+		_set_status("Opened with warnings: " + String(warnings[0]))
 	else:
 		_set_status("Opened: " + res_dir)
 

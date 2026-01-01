@@ -4,12 +4,13 @@
 ##
 ## Requirements:
 ## - Stable, diff-friendly JSON: keys are sorted and pretty-printed.
-## - Unknown keys are preserved when possible.
+## - Unknown formats/schema versions fail loudly.
 
 class_name TilesetIO
 extends Node
 
 const TilesetData = preload("res://shared/tileset/tileset_data.gd")
+const DriftValidate = preload("res://shared/drift_validate.gd")
 
 const ASSETS_TILESETS_DIR := "res://assets/tilesets"
 
@@ -35,26 +36,36 @@ static func list_tileset_packages() -> PackedStringArray:
 	return out
 
 
-static func load_tileset(dir_path: String) -> TilesetData:
+static func load_tileset(dir_path: String) -> Dictionary:
+	# Returns: { ok: bool, error: String, warnings: Array[String], data: TilesetData }
+	var result := {"ok": false, "error": "", "warnings": [], "data": null}
+	var warnings: Array[String] = []
+
 	var data := TilesetData.new()
 	data.dir_path = dir_path
 	data.name = _infer_name_from_dir(dir_path)
 
 	# Manifest (tileset.json)
 	var manifest_path := _path_join(dir_path, "tileset.json")
-	var manifest: Dictionary = {}
-	if FileAccess.file_exists(manifest_path):
-		manifest = _read_json_dict(manifest_path)
-	data.manifest_raw = manifest.duplicate(true)
-	if data.manifest_raw.is_empty():
-		data.warnings.append("tileset.json missing; using default manifest")
-		data.manifest_raw = {
-			"version": 1,
-			"name": data.name,
-			"image": "tiles.png",
-			"tile_size": [16, 16],
-		}
-
+	if not FileAccess.file_exists(manifest_path):
+		result["error"] = "tileset.json missing: " + manifest_path
+		result["data"] = data
+		return result
+	var manifest_raw := _read_json_dict(manifest_path)
+	if manifest_raw.is_empty():
+		result["error"] = "tileset.json invalid or empty: " + manifest_path
+		result["data"] = data
+		return result
+	var manifest_valid := DriftValidate.validate_tileset_manifest(manifest_raw)
+	if not bool(manifest_valid.get("ok", false)):
+		var err_text := "tileset.json validation failed: " + manifest_path
+		for e in (manifest_valid.get("errors", []) as Array):
+			err_text += "\n - " + String(e)
+		result["error"] = err_text
+		result["data"] = data
+		result["warnings"] = manifest_valid.get("warnings", [])
+		return result
+	data.manifest_raw = (manifest_valid.get("manifest", {}) as Dictionary).duplicate(true)
 	data.name = String(data.manifest_raw.get("name", data.name))
 	data.image_rel_path = String(data.manifest_raw.get("image", "tiles.png"))
 	data.tile_size = _parse_tile_size(data.manifest_raw.get("tile_size", [16, 16]))
@@ -63,47 +74,50 @@ static func load_tileset(dir_path: String) -> TilesetData:
 	var image_path := _path_join(dir_path, data.image_rel_path)
 	data.texture = _load_texture(image_path)
 	if data.texture == null:
-		data.warnings.append("tiles.png missing or not loadable: " + image_path)
+		result["error"] = "tileset image missing or not loadable: " + image_path
+		result["data"] = data
+		return result
 
 	# Defs (tiles_def.json)
 	var defs_path := _path_join(dir_path, "tiles_def.json")
-	var defs: Dictionary = {}
-	if FileAccess.file_exists(defs_path):
-		defs = _read_json_dict(defs_path)
-	data.defs_raw = defs.duplicate(true)
-	if data.defs_raw.is_empty():
-		data.warnings.append("tiles_def.json missing; creating defaults")
-		data.defs_raw = {
-			"version": 1,
-			"defaults": {"layer": "mid", "solid": false},
-			"tiles": {},
-			"reserved": {
-				"doors": {
-					"comment": "Door frames behave like animated frames; coords fixed across tilesets.",
-					"frames": ["9,8", "10,8", "11,8", "12,8", "13,8", "14,8", "15,8", "16,8"],
-					"solid_when_closed": true
-				}
-			}
-		}
+	if not FileAccess.file_exists(defs_path):
+		result["error"] = "tiles_def.json missing: " + defs_path
+		result["data"] = data
+		return result
+	var defs_raw := _read_json_dict(defs_path)
+	if defs_raw.is_empty():
+		result["error"] = "tiles_def.json invalid or empty: " + defs_path
+		result["data"] = data
+		return result
+	var defs_valid := DriftValidate.validate_tiles_def(defs_raw)
+	if not bool(defs_valid.get("ok", false)):
+		var err_text2 := "tiles_def.json validation failed: " + defs_path
+		for e2 in (defs_valid.get("errors", []) as Array):
+			err_text2 += "\n - " + String(e2)
+		result["error"] = err_text2
+		result["data"] = data
+		result["warnings"] = defs_valid.get("warnings", [])
+		return result
+	data.defs_raw = (defs_valid.get("tiles_def", {}) as Dictionary).duplicate(true)
 
-	# Ensure required sub-objects exist.
-	if not data.defs_raw.has("defaults") or not (data.defs_raw["defaults"] is Dictionary):
-		data.defs_raw["defaults"] = {"layer": "mid", "solid": false}
-	if not data.defs_raw.has("tiles") or not (data.defs_raw["tiles"] is Dictionary):
-		data.defs_raw["tiles"] = {}
+	# Extra validation: ensure tile keys are within the image atlas.
+	var sz := data.texture.get_size()
+	if int(sz.x) % data.tile_size.x != 0 or int(sz.y) % data.tile_size.y != 0:
+		result["error"] = "tileset image size not divisible by tile_size: " + image_path
+		result["data"] = data
+		return result
+	var cols := maxi(1, int(floor(sz.x / float(data.tile_size.x))))
+	var rows := maxi(1, int(floor(sz.y / float(data.tile_size.y))))
+	var bad := _count_defs_out_of_bounds((data.defs_raw.get("tiles", {}) as Dictionary), cols, rows)
+	if bad > 0:
+		result["error"] = "tiles_def.json contains %d out-of-bounds tile key(s)" % bad
+		result["data"] = data
+		return result
 
-	# Basic validation warnings.
-	if data.texture != null:
-		var sz := data.texture.get_size()
-		if int(sz.x) % data.tile_size.x != 0 or int(sz.y) % data.tile_size.y != 0:
-			data.warnings.append("image size not divisible by tile_size; bounds will be clamped")
-		var cols := maxi(1, int(floor(sz.x / float(data.tile_size.x))))
-		var rows := maxi(1, int(floor(sz.y / float(data.tile_size.y))))
-		var bad := _count_defs_out_of_bounds((data.defs_raw.get("tiles", {}) as Dictionary), cols, rows)
-		if bad > 0:
-			data.warnings.append("tiles_def.json contains %d out-of-bounds tile keys" % bad)
-
-	return data
+	result["ok"] = true
+	result["data"] = data
+	result["warnings"] = warnings
+	return result
 
 
 static func _count_defs_out_of_bounds(tiles: Dictionary, cols: int, rows: int) -> int:
@@ -119,7 +133,7 @@ static func _count_defs_out_of_bounds(tiles: Dictionary, cols: int, rows: int) -
 	return bad
 
 
-static func load_tileset_by_name(tileset_name: String) -> TilesetData:
+static func load_tileset_by_name(tileset_name: String) -> Dictionary:
 	return load_tileset(_path_join(ASSETS_TILESETS_DIR, tileset_name))
 
 
@@ -131,13 +145,15 @@ static func new_from_png(abs_png_path: String, tileset_name: String = "") -> Til
 	data.image_rel_path = "tiles.png"
 	data.tile_size = Vector2i(16, 16)
 	data.manifest_raw = {
-		"version": 1,
+		"format": DriftValidate.FORMAT_TILESET_MANIFEST,
+		"schema_version": DriftValidate.SCHEMA_TILESET_MANIFEST,
 		"name": data.name,
 		"image": "tiles.png",
 		"tile_size": [16, 16],
 	}
 	data.defs_raw = {
-		"version": 1,
+		"format": DriftValidate.FORMAT_TILES_DEF,
+		"schema_version": DriftValidate.SCHEMA_TILES_DEF,
 		"defaults": {"layer": "mid", "solid": false},
 		"tiles": {},
 		"reserved": {
@@ -162,20 +178,32 @@ static func save_tileset(dir_path: String, data: TilesetData) -> Dictionary:
 
 	_ensure_dir(dir_path)
 
-	# Update manifest fields while preserving unknown keys.
-	var manifest_out: Dictionary = data.manifest_raw.duplicate(true)
-	manifest_out["version"] = int(manifest_out.get("version", 1))
-	manifest_out["name"] = data.name
-	manifest_out["image"] = data.image_rel_path
-	manifest_out["tile_size"] = [data.tile_size.x, data.tile_size.y]
+	# Canonical manifest (strict contract).
+	var manifest_out := {
+		"format": DriftValidate.FORMAT_TILESET_MANIFEST,
+		"schema_version": DriftValidate.SCHEMA_TILESET_MANIFEST,
+		"name": data.name,
+		"image": data.image_rel_path,
+		"tile_size": [data.tile_size.x, data.tile_size.y],
+	}
+	var manifest_valid := DriftValidate.validate_tileset_manifest(manifest_out)
+	if not bool(manifest_valid.get("ok", false)):
+		var err_text := "Refusing to save invalid tileset manifest"
+		for e in (manifest_valid.get("errors", []) as Array):
+			err_text += "\n - " + String(e)
+		result["error"] = err_text
+		return result
+	manifest_out = manifest_valid.get("manifest", {})
 
-	# Update defs fields while preserving unknown keys.
-	var defs_out: Dictionary = data.defs_raw.duplicate(true)
-	defs_out["version"] = int(defs_out.get("version", 1))
-	if not defs_out.has("defaults") or not (defs_out["defaults"] is Dictionary):
-		defs_out["defaults"] = {"layer": "mid", "solid": false}
-	if not defs_out.has("tiles") or not (defs_out["tiles"] is Dictionary):
-		defs_out["tiles"] = {}
+	# Canonical defs (strict contract).
+	var defs_valid := DriftValidate.validate_tiles_def(data.defs_raw)
+	if not bool(defs_valid.get("ok", false)):
+		var err_text2 := "Refusing to save invalid tiles_def"
+		for e2 in (defs_valid.get("errors", []) as Array):
+			err_text2 += "\n - " + String(e2)
+		result["error"] = err_text2
+		return result
+	var defs_out: Dictionary = defs_valid.get("tiles_def", {})
 
 	# Write image (copy or encode).
 	var image_abs := ProjectSettings.globalize_path(_path_join(dir_path, data.image_rel_path))

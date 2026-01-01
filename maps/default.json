@@ -1,8 +1,9 @@
 ﻿{
+    "format":  "driftline.map",
+    "schema_version":  1,
     "entities":  [
 
                  ],
-    "height":  1024,
     "layers":  {
                    "bg":  [
 
@@ -2609,6 +2610,5 @@
                  "tile_size":  16,
                  "tileset":  "subspace_base",
                  "w":  128
-             },
-    "width":  2048
+             }
 }

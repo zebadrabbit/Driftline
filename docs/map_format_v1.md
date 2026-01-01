@@ -7,6 +7,7 @@ This document describes the current on-disk / clipboard JSON map format used by 
 For the normative, structured schema documentation:
 
 - `docs/formats/map.schema.md` — full map container schema (`v`, `meta`, `layers`, `entities`) and canonicalization/checksum rules
+- `docs/formats/map.schema.md` — full map container schema (`format`, `schema_version`, `meta`, `layers`, `entities`) and canonicalization/checksum rules
 - `docs/formats/tilemap.schema.md` — the `layers` tilemap portion (`bg|solid|fg` arrays of `[x,y,ax,ay]`)
 - `docs/formats/tiles_def.schema.md` — tileset behavior source-of-truth (`tiles_def.json`: `solid`, `door`, `safe_zone`, render layer)
 
@@ -34,7 +35,8 @@ Top-level object:
 
 ```json
 {
-  "v": 1,
+  "format": "driftline.map",
+  "schema_version": 1,
   "meta": {
     "w": 64,
     "h": 64,
@@ -54,11 +56,17 @@ Top-level object:
 }
 ```
 
+### Header
+
+- `format` must be `"driftline.map"`.
+- `schema_version` must be `1`.
+- Loaders refuse to load files missing these fields or with unknown values.
+
 ### `meta`
 
 - `w` / `h` (required): map size in **tiles**.
 - `tile_size`: size of a tile in pixels (currently 16).
-- `tileset`: a hint for which tileset atlas the editor expects.
+- `tileset` (required): tileset name (non-empty).
 
 ### `layers.*` tile entries
 
@@ -85,33 +93,25 @@ Each entity is an object:
 - `x`, `y`: tile coordinate
 - `team`: integer (currently used as a placeholder; default 0)
 
-## Backward compatibility / normalization
+## Legacy maps
 
-Some older maps may contain top-level `width`/`height` (pixels) instead of `meta.w`/`meta.h` (tiles).
-
-Normalization rules:
-
-- If `meta.w`/`meta.h` are missing or invalid, they may be derived from `width`/`height`:
-  - If the value is large and divisible by 16, it is treated as pixels and converted to tiles.
-  - Otherwise it is treated as tiles.
-- Missing `layers.bg/solid/fg` are defaulted to empty arrays.
-- Missing `entities` is defaulted to an empty array.
+Driftline does not perform permissive normalization. Older/legacy layouts (such as top-level `width`/`height`, missing `entities`, or missing headers) are rejected by validators.
 
 ## Canonicalization and checksum
 
-To ensure client/server determinism, both sides compute a **canonical SHA-256 checksum** of a normalized map.
+To ensure client/server determinism, both sides compute a **canonical SHA-256 checksum** of a validated, canonical map.
 
 Canonicalization rules (implemented in `shared/drift_map.gd`):
 
 - Only these fields contribute to the checksum:
-  - `v`, `meta.{w,h,tile_size,tileset}`, `layers.{bg,solid,fg}`, `entities`
-- Boundary tiles are excluded.
+  - `format`, `schema_version`, `meta`, `layers.{bg,solid,fg}`, `entities`
+- Boundary tiles are rejected.
 - Invalid/out-of-bounds entries are rejected.
-- Duplicate tiles at the same `(x,y)` within a layer: **last wins**.
-- Duplicate entities at the same `(type,x,y)`: **last wins**.
+- Duplicate tiles at the same `(x,y)` within a layer are rejected.
+- Duplicate entities at the same `(type,x,y)` are rejected.
 - Sorting:
   - Each layer is sorted by `(x, y, ax, ay)`.
-  - Entities are sorted by `(type, x, y, team)`.
+  - Entities are sorted by `(type, x, y)`.
 - The canonical JSON string is emitted with a fixed key order and no extra whitespace.
 - The checksum is computed as `sha256(UTF8(canonical_json_string))`.
 

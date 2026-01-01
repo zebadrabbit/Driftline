@@ -57,8 +57,8 @@ static func load_map(map_path: String) -> Dictionary:
 		}
 
 	var canonical: Dictionary = validated.get("map", {})
-	var checksum: PackedByteArray = DriftMap.checksum_sha256(canonical)
-	var map_version: int = int(canonical.get("v", 0))
+	var checksum: PackedByteArray = DriftMap.checksum_sha256_canonical(canonical)
+	var map_version: int = int(canonical.get("schema_version", 0))
 
 	return {
 		"ok": true,

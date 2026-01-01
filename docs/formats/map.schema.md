@@ -1,4 +1,4 @@
-# Map Schema (Driftline Map Format v1)
+# Map Schema (driftline.map v1)
 
 This document specifies Driftline's JSON **map container format**.
 
@@ -42,7 +42,8 @@ Canonical top-level object:
 
 ```json
 {
-	"v": 1,
+	"format": "driftline.map",
+	"schema_version": 1,
 	"meta": {
 		"w": 64,
 		"h": 64,
@@ -60,58 +61,41 @@ Canonical top-level object:
 
 Notes:
 
-- The canonicalizer outputs **only** these keys: `v`, `meta`, `layers`, `entities`.
-- Unknown keys in input may be tolerated but will not affect canonical output or checksum.
+- Loaders **refuse to load** maps missing `format` / `schema_version`.
+- Unknown `format` or unsupported `schema_version` **fails loudly**.
+- Top-level keys are strict: `format`, `schema_version`, `meta`, `layers`, `entities`.
 
 ## Required fields + defaults
 
-Validation/canonicalization normalizes missing or legacy fields.
+There is no permissive “normalization” step. Missing/invalid required fields are errors.
 
-### `v` (format version)
+### `format` and `schema_version`
 
-- In canonical output, `v` is always set to `1`.
-- Input `v` is not used to select different parsing rules.
+- `format` must be exactly `"driftline.map"`.
+- `schema_version` must be exactly `1`.
 
 ### `meta`
 
 Canonical `meta`:
 
-- `meta.w` (int, required after normalization): width in tiles
-- `meta.h` (int, required after normalization): height in tiles
-- `meta.tile_size` (int): default `16`
-- `meta.tileset` (string): default `""` (empty string)
-
-Defaults / legacy fallbacks:
-
-- If `meta.w` is missing/invalid:
-	- If legacy top-level `width` exists:
-		- if `width >= 256` and `width % 16 == 0`, it is treated as **pixels** and converted to tiles (`width/16`)
-		- otherwise it is treated as **tiles**
-	- else defaults to `64`
-
-- If `meta.h` is missing/invalid:
-	- If legacy top-level `height` exists:
-		- if `height >= 256` and `height % 16 == 0`, it is treated as **pixels** and converted to tiles (`height/16`)
-		- otherwise it is treated as **tiles**
-	- else defaults to `64`
+- `meta.w` (int, required): width in tiles
+- `meta.h` (int, required): height in tiles
+- `meta.tile_size` (int, required): must be `16`
+- `meta.tileset` (string, required): must be non-empty (e.g. `"subspace_base"`)
 
 Validation constraints:
 
 - `meta.w` and `meta.h` must be `>= 2` (smaller values are treated as errors).
-
-Tileset resolution note:
-
-- The map may leave `meta.tileset` empty.
-- When looking up tile behavior, the runtime tileset loader treats an empty tileset name as `subspace_base`.
+- `meta.tile_size` must be `16`.
 
 ### `layers` (tilemap)
 
 See `docs/formats/tilemap.schema.md` for the full tilemap schema.
 
-Minimum requirements after normalization:
+Minimum requirements:
 
 - `layers` must be an object.
-- `layers.bg`, `layers.solid`, `layers.fg` must exist and be Arrays; default `[]`.
+- `layers.bg`, `layers.solid`, `layers.fg` must exist and be arrays.
 
 Each tile placement is a 4-tuple:
 
@@ -165,10 +149,9 @@ For each of `layers.bg|solid|fg`:
 - Bounds:
 	- `0 <= x < meta.w`, `0 <= y < meta.h` (out of bounds is an error)
 	- `ax >= 0` and `ay >= 0` (negative is an error)
-- Boundary ring is excluded:
-	- if `x==0 || y==0 || x==w-1 || y==h-1`, the tile is skipped (warning; boundary is generated)
-- Duplicate placements in the same layer at the same `(x,y)`:
-	- **last wins** (warning)
+- Boundary ring is reserved:
+	- if `x==0 || y==0 || x==w-1 || y==h-1`, the tile is rejected (error; boundary is engine-generated)
+- Duplicate placements in the same layer at the same `(x,y)` are rejected (error).
 - Output is sorted by `(x, y, ax, ay)`.
 
 ### Entity canonicalization
@@ -177,21 +160,24 @@ For each of `layers.bg|solid|fg`:
 - `type` must be one of `spawn|flag|base` (invalid type is an error).
 - Bounds:
 	- `0 <= x < meta.w`, `0 <= y < meta.h` (out of bounds is an error)
-	- boundary ring is reserved; entities on the boundary are skipped (warning)
-- Duplicate entities at the same `(type,x,y)`:
-	- **last wins** (warning)
-- Output is sorted by `(type, x, y, team)`.
+	- boundary ring is reserved; entities on the boundary are rejected (error)
+- Duplicate entities at the same `(type,x,y)` are rejected (error).
+- Output is sorted by `(type, x, y)`.
 
 ### What contributes to checksum
 
 Only canonical output contributes to checksum:
 
-- `v`
-- `meta.{w,h,tile_size,tileset}`
+- `format`
+- `schema_version`
+- `meta` (including additional scalar keys)
 - `layers.{bg,solid,fg}`
 - `entities`
 
-Unknown input keys do not contribute.
+Notes:
+
+- Unknown top-level keys are rejected by validation.
+- Unknown `meta` keys are allowed only if scalar (string/number/bool) and are preserved in canonical output.
 
 ## Checksum
 
@@ -226,18 +212,20 @@ Common beginner pitfall: don’t add `solid` (or similar) to the map. If you do,
 
 ```json
 {
-	"v": 1,
+	"format": "driftline.map",
+	"schema_version": 1,
 	"meta": {"w": 64, "h": 64, "tile_size": 16, "tileset": "subspace_base"},
 	"layers": {"bg": [], "solid": [], "fg": []},
 	"entities": []
 }
 ```
 
-### Example B: Legacy width/height (pixels) + sparse layers
+### Example B: Legacy width/height (rejected)
 
 ```json
 {
-	"v": 1,
+	"format": "driftline.map",
+	"schema_version": 1,
 	"width": 1024,
 	"height": 1024,
 	"meta": {"tile_size": 16, "tileset": "subspace_base"},
@@ -250,13 +238,14 @@ Common beginner pitfall: don’t add `solid` (or similar) to the map. If you do,
 }
 ```
 
-After normalization, `meta.w`/`meta.h` become `64` (`1024/16`).
+This is **not valid** Driftline map data: strict loaders reject unknown top-level keys like `width` and `height`.
 
 ### Example C: Entities
 
 ```json
 {
-	"v": 1,
+	"format": "driftline.map",
+	"schema_version": 1,
 	"meta": {"w": 64, "h": 64, "tile_size": 16, "tileset": "subspace_base"},
 	"layers": {"bg": [], "solid": [], "fg": []},
 	"entities": [

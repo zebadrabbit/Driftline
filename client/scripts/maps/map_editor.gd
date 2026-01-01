@@ -187,7 +187,11 @@ func _apply_tileset_package_if_present(name: String) -> void:
 	var package_dir := "res://assets/tilesets/%s" % String(name).strip_edges()
 	if not FileAccess.file_exists(package_dir + "/tileset.json"):
 		return
-	_tileset_data = TilesetIO.load_tileset(package_dir)
+	var res := TilesetIO.load_tileset(package_dir)
+	if not bool(res.get("ok", false)):
+		push_error(String(res.get("error", "Failed to load tileset")))
+		return
+	_tileset_data = res.get("data", null)
 	if _tileset_data == null or _tileset_data.texture == null:
 		return
 	var ts := _build_runtime_tileset(_tileset_data.texture, _tileset_data.tile_size)
@@ -637,7 +641,13 @@ func _paste_map_from_clipboard() -> void:
 		return
 
 	var raw: Dictionary = parsed.get("data", {})
-	var map = LevelIO.normalize_map_data(raw)
+	var validated := DriftMap.validate_and_canonicalize(raw)
+	if not bool(validated.get("ok", false)):
+		_set_status("Paste failed: invalid map", true)
+		for e in (validated.get("errors", []) as Array):
+			print("[MAP] paste error: ", String(e))
+		return
+	var map: Dictionary = validated.get("map", {})
 	var meta: Dictionary = map.get("meta", {})
 	var w_tiles: int = int(meta.get("w", 0))
 	var h_tiles: int = int(meta.get("h", 0))
@@ -1405,19 +1415,27 @@ func _load_latest_map() -> void:
 
 func _load_map_from_path(full_path: String) -> void:
 	var meta0 := LevelIO.load_map_meta(full_path)
-	var tileset_name: String = String(meta0.get("tileset", _tileset_name))
-	if meta0.has("tileset_path"):
-		var tp := String(meta0.get("tileset_path", "")).replace("\\", "/").trim_suffix("/")
-		if tp.strip_edges() != "":
-			tileset_name = tp.get_file()
+	if meta0.is_empty():
+		push_error("Failed to load map meta: " + full_path)
+		return
+	var tileset_name: String = String(meta0.get("tileset", "")).strip_edges()
+	if tileset_name == "":
+		push_error("Map meta.tileset is required (empty): " + full_path)
+		return
 	_load_tileset_by_name(tileset_name)
 	var w_px := int(meta0.get("width", 1024))
 	var h_px := int(meta0.get("height", 1024))
 	_create_new_map(w_px, h_px)
 
 	var raw := LevelIO.read_map_data(full_path)
-	var norm := LevelIO.normalize_map_data(raw)
-	entities = norm.get("entities", [])
+	var validated := DriftMap.validate_and_canonicalize(raw)
+	if not bool(validated.get("ok", false)):
+		push_error("Map validation failed: " + full_path)
+		for e in (validated.get("errors", []) as Array):
+			push_error(" - " + String(e))
+		return
+	var canonical: Dictionary = validated.get("map", {})
+	entities = canonical.get("entities", [])
 	var meta: Dictionary = LevelIO.load_map_from_json(full_path, _tilemaps)
 	reroute_tiles_by_meta()
 	rebuild_collision_cache()

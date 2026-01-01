@@ -133,12 +133,12 @@ These rules are written for long-term stability of editor assets and client/serv
 
 ### Canonicalization rules (determinism contract)
 
-When the map is normalized and canonicalized:
+When the map is validated and canonicalized:
 
-- Missing `layers.bg/solid/fg` are defaulted to empty arrays.
+- `layers.bg`, `layers.solid`, and `layers.fg` must exist and must be arrays (missing is an error).
 - Invalid cells are rejected.
-- Boundary cells are excluded (see below).
-- Duplicate placements in the same layer at the same `(x,y)`: **last wins**.
+- Boundary cells are rejected (see below).
+- Duplicate placements in the same layer at the same `(x,y)` are rejected.
 - Output cell arrays are sorted by `(x, y, ax, ay)`.
 
 These rules exist so different tools can emit tiles in any order, but still converge on the same canonical representation and checksum.
@@ -148,8 +148,8 @@ These rules exist so different tools can emit tiles in any order, but still conv
 The **outermost tile ring** is reserved and generated.
 
 - Tiles where `x==0` or `y==0` or `x==w-1` or `y==h-1` are considered “on boundary”.
-- Boundary tiles are **not stored** in canonical output.
-- Tools should avoid writing boundary tiles; if present, they should be dropped during canonicalization.
+- Boundary tiles must not be stored.
+- Any boundary tiles present in map data are treated as validation errors.
 
 ## Forbidden coupling (what the tilemap must NOT contain)
 
@@ -200,7 +200,7 @@ Source-of-truth rules:
 }
 ```
 
-### Example C: Duplicate placement (“last wins” before sorting)
+### Example C: Duplicate placement is rejected
 
 Input (two entries claim `(x,y)=(5,5)` in the same layer):
 
@@ -217,23 +217,13 @@ Input (two entries claim `(x,y)=(5,5)` in the same layer):
 }
 ```
 
-Canonical output contains only the last one at `(5,5)`:
+This is rejected during validation (duplicate cell at `(5,5)` in the same layer).
 
-```json
-{
-	"layers": {
-		"bg": [],
-		"solid": [
-			[5, 5, 9, 9]
-		],
-		"fg": []
-	}
-}
-```
+### Example D: Boundary tiles are rejected
 
-### Example D: Boundary tiles are dropped
+Given a 64x64 map (`w=64`, `h=64`), any tile at `x=0`/`y=0`/`x=63`/`y=63` is on the boundary.
 
-Given a 64x64 map (`w=64`, `h=64`), any tile at `x=0`/`y=0`/`x=63`/`y=63` is on the boundary and is excluded from canonical output.
+Boundary tiles must not be stored; any boundary placements are rejected during validation.
 
 ```json
 {
@@ -251,7 +241,7 @@ Given a 64x64 map (`w=64`, `h=64`), any tile at `x=0`/`y=0`/`x=63`/`y=63` is on 
 }
 ```
 
-Canonical output keeps only the non-boundary cell:
+The only valid cell above is the non-boundary one (`[10, 10, 1, 2]`), but the presence of any boundary tiles still makes the input invalid.
 
 ```json
 {

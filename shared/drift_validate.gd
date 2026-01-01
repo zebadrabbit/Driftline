@@ -1,0 +1,410 @@
+## Driftline strict validators for versioned JSON contracts.
+##
+## NON-NEGOTIABLE:
+## - All persistent JSON artifacts must include `format` and `schema_version`.
+## - Unknown formats or schema versions must fail loudly.
+## - Loaders must refuse to load invalid data (no silent defaults / mutation).
+
+class_name DriftValidate
+
+const FORMAT_TILESET_MANIFEST := "driftline.tileset"
+const FORMAT_TILES_DEF := "driftline.tiles_def"
+const FORMAT_MAP := "driftline.map"
+
+const SCHEMA_TILESET_MANIFEST := 1
+const SCHEMA_TILES_DEF := 1
+const SCHEMA_MAP := 1
+
+const TILE_SIZE := 16
+
+
+static func _err(ctx: String, msg: String) -> String:
+	return (ctx + ": " if ctx != "" else "") + msg
+
+
+static func _require_dict(v, ctx: String, errors: Array[String]) -> Dictionary:
+	if typeof(v) != TYPE_DICTIONARY:
+		errors.append(_err(ctx, "must be an object"))
+		return {}
+	return v as Dictionary
+
+
+static func _require_array(v, ctx: String, errors: Array[String]) -> Array:
+	if not (v is Array):
+		errors.append(_err(ctx, "must be an array"))
+		return []
+	return v as Array
+
+
+static func _require_string(v, ctx: String, errors: Array[String]) -> String:
+	if typeof(v) != TYPE_STRING:
+		errors.append(_err(ctx, "must be a string"))
+		return ""
+	return String(v)
+
+
+static func _require_int(v, ctx: String, errors: Array[String]) -> int:
+	if typeof(v) not in [TYPE_INT, TYPE_FLOAT]:
+		errors.append(_err(ctx, "must be a number"))
+		return 0
+	return int(v)
+
+
+static func _require_bool(v, ctx: String, errors: Array[String]) -> bool:
+	if typeof(v) != TYPE_BOOL:
+		errors.append(_err(ctx, "must be a boolean"))
+		return false
+	return bool(v)
+
+
+static func validate_header(root: Dictionary, expected_format: String, expected_schema_version: int, ctx: String = "") -> Array[String]:
+	var errors: Array[String] = []
+	if not root.has("format"):
+		errors.append(_err(ctx, "missing required field 'format'"))
+	else:
+		var fmt := _require_string(root.get("format"), ctx + ".format", errors)
+		if fmt != "" and fmt != expected_format:
+			errors.append(_err(ctx, "unknown format '%s' (expected '%s')" % [fmt, expected_format]))
+
+	if not root.has("schema_version"):
+		errors.append(_err(ctx, "missing required field 'schema_version'"))
+	else:
+		var sv := _require_int(root.get("schema_version"), ctx + ".schema_version", errors)
+		if sv != expected_schema_version:
+			errors.append(_err(ctx, "unsupported schema_version %d (expected %d)" % [sv, expected_schema_version]))
+
+	return errors
+
+
+static func validate_tileset_manifest(manifest: Dictionary) -> Dictionary:
+	var errors: Array[String] = []
+	var warnings: Array[String] = []
+	errors.append_array(validate_header(manifest, FORMAT_TILESET_MANIFEST, SCHEMA_TILESET_MANIFEST, "tileset"))
+
+	var name := _require_string(manifest.get("name"), "tileset.name", errors)
+	var image := _require_string(manifest.get("image"), "tileset.image", errors)
+	var tile_size_arr := _require_array(manifest.get("tile_size"), "tileset.tile_size", errors)
+	if tile_size_arr.size() != 2:
+		errors.append(_err("tileset.tile_size", "must be [w,h]"))
+	var tw := 0
+	var th := 0
+	if tile_size_arr.size() == 2:
+		tw = _require_int(tile_size_arr[0], "tileset.tile_size[0]", errors)
+		th = _require_int(tile_size_arr[1], "tileset.tile_size[1]", errors)
+		if tw != TILE_SIZE or th != TILE_SIZE:
+			errors.append(_err("tileset.tile_size", "must be [%d,%d]" % [TILE_SIZE, TILE_SIZE]))
+
+	if name.strip_edges() == "":
+		errors.append(_err("tileset.name", "must be non-empty"))
+	if image.strip_edges() == "":
+		errors.append(_err("tileset.image", "must be non-empty"))
+
+	# Keep canonical manifest.
+	var canonical := {
+		"format": FORMAT_TILESET_MANIFEST,
+		"schema_version": SCHEMA_TILESET_MANIFEST,
+		"name": name,
+		"image": image,
+		"tile_size": [TILE_SIZE, TILE_SIZE],
+	}
+
+	return {
+		"ok": errors.is_empty(),
+		"errors": errors,
+		"warnings": warnings,
+		"manifest": canonical,
+	}
+
+
+static func _render_layer_to_layer(render_layer: String) -> String:
+	var rl := String(render_layer)
+	if rl == "solid":
+		return "mid"
+	if rl in ["bg", "mid", "fg"]:
+		return rl
+	if rl == "fg":
+		return "fg"
+	return "mid"
+
+
+static func validate_tiles_def(defs: Dictionary) -> Dictionary:
+	var errors: Array[String] = []
+	var warnings: Array[String] = []
+	errors.append_array(validate_header(defs, FORMAT_TILES_DEF, SCHEMA_TILES_DEF, "tiles_def"))
+
+	# Required objects.
+	var defaults := _require_dict(defs.get("defaults"), "tiles_def.defaults", errors)
+	var tiles := _require_dict(defs.get("tiles"), "tiles_def.tiles", errors)
+
+	# Defaults: must include at least solid + layer.
+	var solid_default := _require_bool(defaults.get("solid"), "tiles_def.defaults.solid", errors)
+	var layer_default := ""
+	if defaults.has("layer"):
+		layer_default = _require_string(defaults.get("layer"), "tiles_def.defaults.layer", errors)
+	elif defaults.has("render_layer"):
+		# Deprecated dialect support: accept render_layer but canonicalize to layer.
+		layer_default = _render_layer_to_layer(_require_string(defaults.get("render_layer"), "tiles_def.defaults.render_layer", errors))
+	else:
+		errors.append(_err("tiles_def.defaults", "missing required field 'layer'"))
+
+	if layer_default not in ["bg", "mid", "fg"]:
+		errors.append(_err("tiles_def.defaults.layer", "must be one of: bg, mid, fg"))
+
+	# Validate tile overrides.
+	var canonical_tiles: Dictionary = {}
+	for k in tiles.keys():
+		var key := String(k)
+		var parts := key.split(",")
+		if parts.size() != 2:
+			errors.append(_err("tiles_def.tiles", "invalid tile key '%s' (expected 'ax,ay')" % key))
+			continue
+		var ax := int(parts[0])
+		var ay := int(parts[1])
+		if ax < 0 or ay < 0:
+			errors.append(_err("tiles_def.tiles['%s']" % key, "atlas coords must be >= 0"))
+			continue
+
+		var ov = tiles[k]
+		if typeof(ov) != TYPE_DICTIONARY:
+			errors.append(_err("tiles_def.tiles['%s']" % key, "must be an object"))
+			continue
+		var o: Dictionary = ov
+
+		var canon_o: Dictionary = {}
+		for field in o.keys():
+			canon_o[field] = o[field]
+
+		# Normalize dialect: render_layer -> layer.
+		if canon_o.has("render_layer") and not canon_o.has("layer"):
+			canon_o["layer"] = _render_layer_to_layer(String(canon_o.get("render_layer")))
+			canon_o.erase("render_layer")
+
+		# Validate known fields when present.
+		if canon_o.has("solid") and typeof(canon_o["solid"]) != TYPE_BOOL:
+			errors.append(_err("tiles_def.tiles['%s'].solid" % key, "must be a boolean"))
+		if canon_o.has("door") and typeof(canon_o["door"]) != TYPE_BOOL:
+			errors.append(_err("tiles_def.tiles['%s'].door" % key, "must be a boolean"))
+		if canon_o.has("safe_zone") and typeof(canon_o["safe_zone"]) != TYPE_BOOL:
+			errors.append(_err("tiles_def.tiles['%s'].safe_zone" % key, "must be a boolean"))
+		if canon_o.has("layer"):
+			var lay := _require_string(canon_o.get("layer"), "tiles_def.tiles['%s'].layer" % key, errors)
+			if lay not in ["bg", "mid", "fg"]:
+				errors.append(_err("tiles_def.tiles['%s'].layer" % key, "must be one of: bg, mid, fg"))
+
+		canonical_tiles[key] = canon_o
+
+	# Reserved section is optional but must be well-typed if present.
+	var reserved_out: Dictionary = {}
+	if defs.has("reserved"):
+		var reserved := _require_dict(defs.get("reserved"), "tiles_def.reserved", errors)
+		# Only validate the reserved.doors shape if present.
+		if reserved.has("doors"):
+			var doors := _require_dict(reserved.get("doors"), "tiles_def.reserved.doors", errors)
+			if doors.has("frames"):
+				var frames := _require_array(doors.get("frames"), "tiles_def.reserved.doors.frames", errors)
+				for i in range(frames.size()):
+					if typeof(frames[i]) != TYPE_STRING:
+						errors.append(_err("tiles_def.reserved.doors.frames[%d]" % i, "must be a string 'ax,ay'"))
+			if doors.has("solid_when_closed") and typeof(doors.get("solid_when_closed")) != TYPE_BOOL:
+				errors.append(_err("tiles_def.reserved.doors.solid_when_closed", "must be a boolean"))
+			reserved_out["doors"] = doors
+		reserved_out = reserved
+
+	var canonical := {
+		"format": FORMAT_TILES_DEF,
+		"schema_version": SCHEMA_TILES_DEF,
+		"defaults": {
+			"layer": layer_default,
+			"solid": solid_default,
+		},
+		"tiles": canonical_tiles,
+	}
+	if not reserved_out.is_empty():
+		canonical["reserved"] = reserved_out
+
+	return {
+		"ok": errors.is_empty(),
+		"errors": errors,
+		"warnings": warnings,
+		"tiles_def": canonical,
+	}
+
+
+static func validate_map(map_root: Dictionary) -> Dictionary:
+	var errors: Array[String] = []
+	var warnings: Array[String] = []
+	errors.append_array(validate_header(map_root, FORMAT_MAP, SCHEMA_MAP, "map"))
+
+	# Strict root shape.
+	for k in map_root.keys():
+		var key := String(k)
+		if key not in ["format", "schema_version", "meta", "layers", "entities"]:
+			errors.append(_err("map", "unknown top-level key '%s'" % key))
+
+	var meta := _require_dict(map_root.get("meta"), "map.meta", errors)
+	var layers := _require_dict(map_root.get("layers"), "map.layers", errors)
+	var entities := _require_array(map_root.get("entities"), "map.entities", errors)
+
+	# Meta
+	if meta.has("tileset_path"):
+		errors.append(_err("map.meta.tileset_path", "forbidden (derived); use meta.tileset"))
+
+	var w := _require_int(meta.get("w"), "map.meta.w", errors)
+	var h := _require_int(meta.get("h"), "map.meta.h", errors)
+	var tile_size := _require_int(meta.get("tile_size"), "map.meta.tile_size", errors)
+	var tileset := _require_string(meta.get("tileset"), "map.meta.tileset", errors)
+	if w < 2 or h < 2:
+		errors.append(_err("map.meta", "w and h must be >= 2"))
+	if tile_size != TILE_SIZE:
+		errors.append(_err("map.meta.tile_size", "must be %d" % TILE_SIZE))
+	if tileset.strip_edges() == "":
+		errors.append(_err("map.meta.tileset", "must be non-empty"))
+
+	# Optional door timing metadata.
+	var door_keys := ["door_open_seconds", "door_closed_seconds", "door_frame_seconds"]
+	for dk in door_keys:
+		if meta.has(dk) and typeof(meta.get(dk)) not in [TYPE_INT, TYPE_FLOAT]:
+			errors.append(_err("map.meta.%s" % dk, "must be a number"))
+	if meta.has("door_start_open") and typeof(meta.get("door_start_open")) != TYPE_BOOL:
+		errors.append(_err("map.meta.door_start_open", "must be a boolean"))
+
+	# Unknown meta keys must be scalar (prevents embedding behavior blobs).
+	for mk in meta.keys():
+		var mks := String(mk)
+		if mks in ["w", "h", "tile_size", "tileset"] + door_keys + ["door_start_open"]:
+			continue
+		var tv := typeof(meta[mk])
+		if tv in [TYPE_DICTIONARY, TYPE_ARRAY, TYPE_OBJECT]:
+			errors.append(_err("map.meta.%s" % mks, "must be a scalar (string/number/bool)"))
+
+	# Layers
+	for layer_key in layers.keys():
+		var lk := String(layer_key)
+		if lk not in ["bg", "solid", "fg"]:
+			errors.append(_err("map.layers", "unknown layer '%s'" % lk))
+
+	var out_layers: Dictionary = {"bg": [], "solid": [], "fg": []}
+	for layer_name in ["bg", "solid", "fg"]:
+		var cells_in := _require_array(layers.get(layer_name), "map.layers.%s" % layer_name, errors)
+		var seen: Dictionary = {}
+		for i in range(cells_in.size()):
+			var cell = cells_in[i]
+			if not (cell is Array) or (cell as Array).size() != 4:
+				errors.append(_err("map.layers.%s[%d]" % [layer_name, i], "must be [x,y,ax,ay]"))
+				continue
+			var arr: Array = cell
+			var x := int(arr[0])
+			var y := int(arr[1])
+			var ax := int(arr[2])
+			var ay := int(arr[3])
+			if x < 0 or y < 0 or x >= w or y >= h:
+				errors.append(_err("map.layers.%s[%d]" % [layer_name, i], "out of bounds (%d,%d)" % [x, y]))
+				continue
+			if x == 0 or y == 0 or x == w - 1 or y == h - 1:
+				errors.append(_err("map.layers.%s[%d]" % [layer_name, i], "on boundary (%d,%d); boundary is engine-generated" % [x, y]))
+				continue
+			if ax < 0 or ay < 0:
+				errors.append(_err("map.layers.%s[%d]" % [layer_name, i], "invalid atlas coords (%d,%d)" % [ax, ay]))
+				continue
+			var key := "%d,%d" % [x, y]
+			if seen.has(key):
+				errors.append(_err("map.layers.%s" % layer_name, "duplicate cell at (%d,%d)" % [x, y]))
+				continue
+			seen[key] = [x, y, ax, ay]
+
+		var cells_out: Array = seen.values()
+		cells_out.sort_custom(Callable(DriftValidate, "_tile_less"))
+		out_layers[layer_name] = cells_out
+
+	# Entities
+	var allowed := {"spawn": true, "flag": true, "base": true}
+	var entities_seen: Dictionary = {}
+	var entities_out: Array = []
+	for i in range(entities.size()):
+		var e = entities[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			errors.append(_err("map.entities[%d]" % i, "must be an object"))
+			continue
+		var d: Dictionary = e
+		var t := _require_string(d.get("type"), "map.entities[%d].type" % i, errors)
+		if not allowed.has(t):
+			errors.append(_err("map.entities[%d].type" % i, "invalid type '%s'" % t))
+			continue
+		var ex := _require_int(d.get("x"), "map.entities[%d].x" % i, errors)
+		var ey := _require_int(d.get("y"), "map.entities[%d].y" % i, errors)
+		var team := 0
+		if d.has("team"):
+			team = _require_int(d.get("team"), "map.entities[%d].team" % i, errors)
+		if ex < 0 or ey < 0 or ex >= w or ey >= h:
+			errors.append(_err("map.entities[%d]" % i, "out of bounds (%d,%d)" % [ex, ey]))
+			continue
+		if ex == 0 or ey == 0 or ex == w - 1 or ey == h - 1:
+			errors.append(_err("map.entities[%d]" % i, "on boundary (%d,%d); boundary is reserved" % [ex, ey]))
+			continue
+		var key2 := "%s:%d,%d" % [t, ex, ey]
+		if entities_seen.has(key2):
+			errors.append(_err("map.entities", "duplicate '%s' at (%d,%d)" % [t, ex, ey]))
+			continue
+		entities_seen[key2] = true
+		entities_out.append({"type": t, "x": ex, "y": ey, "team": team})
+
+	entities_out.sort_custom(Callable(DriftValidate, "_entity_less"))
+
+	var out_meta: Dictionary = {
+		"w": w,
+		"h": h,
+		"tile_size": TILE_SIZE,
+		"tileset": tileset,
+	}
+	for dk in door_keys:
+		if meta.has(dk):
+			out_meta[dk] = float(meta.get(dk))
+	if meta.has("door_start_open"):
+		out_meta["door_start_open"] = bool(meta.get("door_start_open"))
+	# Preserve additional scalar meta keys.
+	for mk in meta.keys():
+		var mks := String(mk)
+		if out_meta.has(mks):
+			continue
+		var tv := typeof(meta[mk])
+		if tv in [TYPE_STRING, TYPE_INT, TYPE_FLOAT, TYPE_BOOL]:
+			out_meta[mks] = meta[mk]
+
+	var canonical := {
+		"format": FORMAT_MAP,
+		"schema_version": SCHEMA_MAP,
+		"meta": out_meta,
+		"layers": out_layers,
+		"entities": entities_out,
+	}
+
+	return {
+		"ok": errors.is_empty(),
+		"errors": errors,
+		"warnings": warnings,
+		"map": canonical,
+	}
+
+
+static func _tile_less(a, b) -> bool:
+	if int(a[0]) != int(b[0]):
+		return int(a[0]) < int(b[0])
+	if int(a[1]) != int(b[1]):
+		return int(a[1]) < int(b[1])
+	if int(a[2]) != int(b[2]):
+		return int(a[2]) < int(b[2])
+	return int(a[3]) < int(b[3])
+
+
+static func _entity_less(a, b) -> bool:
+	var at := String((a as Dictionary).get("type", ""))
+	var bt := String((b as Dictionary).get("type", ""))
+	if at != bt:
+		return at < bt
+	var ax := int((a as Dictionary).get("x", 0))
+	var bx := int((b as Dictionary).get("x", 0))
+	if ax != bx:
+		return ax < bx
+	var ay := int((a as Dictionary).get("y", 0))
+	var by := int((b as Dictionary).get("y", 0))
+	return ay < by

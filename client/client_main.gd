@@ -174,16 +174,22 @@ func _load_client_map() -> void:
 	# Also read raw map for checksum/manifest verification and canonical layers for collision.
 	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
 	var validated := DriftMap.validate_and_canonicalize(raw)
+	if not bool(validated.get("ok", false)):
+		push_error("Failed to validate client map: " + CLIENT_MAP_PATH)
+		for e in (validated.get("errors", []) as Array):
+			push_error(" - " + String(e))
+		return
 	var canonical: Dictionary = validated.get("map", {})
-	client_map_version = int(canonical.get("v", 0))
-	client_map_checksum = DriftMap.checksum_sha256(raw)
+	client_map_version = int(canonical.get("schema_version", 0))
+	client_map_checksum = DriftMap.checksum_sha256_canonical(canonical)
 	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
 	print("Client map path: ", CLIENT_MAP_PATH)
 	print("Client map version: ", client_map_version)
-	var meta: Dictionary = canonical.get("meta", raw.get("meta", meta_applied))
-	var tileset_name: String = String(meta.get("tileset", ""))
-	if tileset_name == "" and meta.has("tileset_path"):
-		tileset_name = String(meta.get("tileset_path", "")).replace("\\", "/").trim_suffix("/").get_file()
+	var meta: Dictionary = canonical.get("meta", {})
+	var tileset_name: String = String(meta.get("tileset", "")).strip_edges()
+	if tileset_name == "":
+		push_error("Client map meta.tileset is required (empty)")
+		return
 	var tileset_def := DriftTileDefs.load_tileset(tileset_name)
 	if not bool(tileset_def.get("ok", false)):
 		push_warning("[TILES] " + String(tileset_def.get("error", "Failed to load tiles_def")))
@@ -218,8 +224,7 @@ func _load_client_map() -> void:
 			orient = "h"
 		_door_cells.append({"cell": Vector2i(int(arr[0]), int(arr[1])), "orient": orient})
 	
-	if meta.has("w") and meta.has("h"):
-		world.add_boundary_tiles(meta["w"], meta["h"])
+	world.add_boundary_tiles(int(meta.get("w", 0)), int(meta.get("h", 0)))
 	
 	print("Client map loaded: ", meta.get("w", 0), "x", meta.get("h", 0), " tiles")
 	_update_door_tilemap_visual()
