@@ -18,6 +18,7 @@ var _ran: int = 0
 func _initialize() -> void:
 	_test_controls_actions_present()
 	_test_controls_default_bindings_wasd()
+	_test_controls_weapon_defaults_present()
 	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
@@ -71,6 +72,24 @@ func _test_controls_default_bindings_wasd() -> void:
 			_fail("controls_default_bindings_wasd (action %s unexpectedly requires modifiers)" % action_name)
 			return
 	_pass("controls_default_bindings_wasd")
+
+
+func _test_controls_weapon_defaults_present() -> void:
+	_ran += 1
+	# Weapons must have a default binding (still rebindable in InputMap).
+	var required := [
+		"drift_fire_primary",
+		"drift_fire_secondary",
+	]
+	for a in required:
+		if not InputMap.has_action(a):
+			_fail("controls_weapon_defaults_present (missing action: %s)" % a)
+			return
+		var events: Array = InputMap.action_get_events(StringName(a))
+		if events.size() < 1:
+			_fail("controls_weapon_defaults_present (action %s has no default binding)" % a)
+			return
+	_pass("controls_weapon_defaults_present")
 
 
 func _test_no_hardcoded_keys_in_gameplay() -> void:
