@@ -68,20 +68,19 @@ It can import a PNG, display a zoomable grid, edit per-tile metadata, and save/l
 
 ### Server
 
-Server reads config from `user://server.cfg` first; if missing, it falls back to `res://server.cfg`.
+Server reads boot configuration from `user://server_config.json` first; if missing, it falls back to `res://server_config.json`.
+
+This file is a strict, versioned JSON contract (no silent defaults).
 
 Example:
 
+```json
+{
+	"format": "driftline.server_config",
+	"schema_version": 1,
+	"default_map": "res://maps/default.json"
+}
 ```
-[Server]
-DefaultMap="maps/default.json"
-MapMode="single" ; single|rotation|random
-MapRotation="maps/public/duel_01.json,maps/public/base_02.json"
-```
-
-Paths may be `res://...`, `user://...`, or `res://`-relative (e.g. `maps/default.json`).
-
-Note: Godot `ConfigFile` requires string values to be quoted.
 
 From VS Code you can run the provided task:
 
@@ -144,3 +143,16 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 ## License
 
 No license specified yet. Add one if/when you want to open-source the project.
+
+## Testing policy
+
+Driftline uses two testing layers:
+
+1) **Required** dependency-free headless contract tests for all versioned JSON formats.
+2) Optional future unit/integration tests (GUT/GdUnit4) only if gameplay complexity demands it.
+
+Run contract tests:
+
+```bash
+godot --headless --quit --script res://tests/run_contract_tests.gd
+```

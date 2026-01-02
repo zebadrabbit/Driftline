@@ -8,6 +8,8 @@ This directory contains **dependency-free** contract tests for Driftline’s ver
 godot --headless --quit --script res://tests/run_contract_tests.gd
 ```
 
+CI expectation: the GitHub Actions job `contract-tests` must pass before merging.
+
 ## Test vector naming
 
 Under `res://tests/contracts/`, JSON files are discovered recursively.

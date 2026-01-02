@@ -59,6 +59,20 @@ VALIDATION
   - coordinate bounds
 - Invalid data MUST produce explicit errors.
 
+TESTING POLICY (MANDATORY)
+- Two layers:
+  1) Required dependency-free headless contract tests for all versioned JSON formats.
+  2) Optional unit/integration tests (GUT/GdUnit4) only when gameplay complexity demands it.
+- Contract tests live under: `res://tests/contracts/<format_name>/`
+  - `valid_*.json` MUST validate successfully
+  - `invalid_*.json` MUST fail validation
+  - Parse errors count as FAIL for `valid_*` and PASS for `invalid_*`
+- Headless runner command:
+  - `godot --headless --quit --script res://tests/run_contract_tests.gd`
+- CI expectation:
+  - GitHub Actions job `contract-tests` must pass before merging.
+- Do not commit `.godot/` artifacts.
+
 CANONICALIZATION
 - Saved JSON must be canonical:
   - stable key ordering
