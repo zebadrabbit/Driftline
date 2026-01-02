@@ -54,6 +54,7 @@ var map_path: String = ""
 var map_version: int = 0
 
 var wall_restitution: float = DriftConstants.SHIP_WALL_RESTITUTION
+var canonical_ruleset: Dictionary = {}
 
 var quit_flag_path: String = QUIT_FLAG_PATH
 var quit_after_seconds: float = -1.0
@@ -219,9 +220,9 @@ func _load_selected_map_from_config() -> bool:
 	for w in (rules_res.get("warnings", []) as Array):
 		print("[RULESET] warning: ", String(w))
 	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
-	var physics: Dictionary = canonical_ruleset.get("physics", {})
-	wall_restitution = float(physics.get("wall_restitution", DriftConstants.SHIP_WALL_RESTITUTION))
-	world.wall_restitution = wall_restitution
+	self.canonical_ruleset = canonical_ruleset
+	world.apply_ruleset(canonical_ruleset)
+	wall_restitution = world.wall_restitution
 
 	# Strict: no fallback map. Missing/invalid is fatal.
 	var res: Dictionary = DriftMapLoader.load_map(selected_path)
@@ -456,7 +457,10 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 
 
 func _send_welcome(peer_id: int, ship_id: int) -> void:
-	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum, map_path, map_version, wall_restitution)
+	var ruleset_json := ""
+	if canonical_ruleset != null and typeof(canonical_ruleset) == TYPE_DICTIONARY and not canonical_ruleset.is_empty():
+		ruleset_json = JSON.stringify(canonical_ruleset)
+	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum, map_path, map_version, wall_restitution, ruleset_json, world.tangent_damping)
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
 	enet_peer.set_target_peer(peer_id)

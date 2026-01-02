@@ -36,3 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           ./godot/Godot_v4.5.1-stable_linux.x86_64 --headless --quit --path . --script res://tests/run_contract_tests.gd
+
+      - name: Run smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./godot/Godot_v4.5.1-stable_linux.x86_64 --headless --quit --path . --script res://tests/run_smoke_tests.gd

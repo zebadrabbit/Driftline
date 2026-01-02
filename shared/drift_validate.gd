@@ -61,6 +61,18 @@ static func _require_bool(v, ctx: String, errors: Array[String]) -> bool:
 	return bool(v)
 
 
+static func _validate_optional_number_range(d: Dictionary, key: String, ctx: String, min_v: float, max_v: float, errors: Array[String]) -> void:
+	if not d.has(key):
+		return
+	var t := typeof(d.get(key))
+	if t not in [TYPE_INT, TYPE_FLOAT]:
+		errors.append(_err(ctx, "must be a number"))
+		return
+	var f := float(d.get(key))
+	if f < min_v or f > max_v:
+		errors.append(_err(ctx, "must be in range %.3f..%.3f" % [min_v, max_v]))
+
+
 static func validate_header(root: Dictionary, expected_format: String, expected_schema_version: int, ctx: String = "") -> Array[String]:
 	var errors: Array[String] = []
 	if not root.has("format"):
@@ -509,15 +521,29 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 	# Strict top-level shape.
 	for k in root.keys():
 		var key := String(k)
-		if key not in ["format", "schema_version", "physics"]:
+		if key not in ["format", "schema_version", "physics", "weapons", "energy"]:
 			errors.append(_err("ruleset", "unknown top-level key '%s'" % key))
 
 	var physics := _require_dict(root.get("physics"), "ruleset.physics", errors)
+
+	# Strict physics keys.
+	var physics_allowed := {
+		"wall_restitution": true,
+		"tangent_damping": true,
+		"ship_turn_rate": true,
+		"ship_thrust_accel": true,
+		"ship_reverse_accel": true,
+		"ship_max_speed": true,
+		"ship_base_drag": true,
+		"ship_overspeed_drag": true,
+		"ship_bounce_min_normal_speed": true,
+	}
 	for pk in physics.keys():
 		var pks := String(pk)
-		if pks != "wall_restitution":
+		if not physics_allowed.has(pks):
 			errors.append(_err("ruleset.physics", "unknown key '%s'" % pks))
 
+	# Required physics.wall_restitution
 	var wall_rest: float = 0.0
 	if not physics.has("wall_restitution"):
 		errors.append(_err("ruleset.physics", "missing required field 'wall_restitution'"))
@@ -530,13 +556,110 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			if wall_rest < 0.0 or wall_rest > 2.0:
 				errors.append(_err("ruleset.physics.wall_restitution", "must be in range 0.0..2.0"))
 
+	# Optional physics (validated when present).
+	_validate_optional_number_range(physics, "tangent_damping", "ruleset.physics.tangent_damping", 0.0, 1.0, errors)
+	_validate_optional_number_range(physics, "ship_turn_rate", "ruleset.physics.ship_turn_rate", 0.0, 20.0, errors)
+	_validate_optional_number_range(physics, "ship_thrust_accel", "ruleset.physics.ship_thrust_accel", 0.0, 5000.0, errors)
+	_validate_optional_number_range(physics, "ship_reverse_accel", "ruleset.physics.ship_reverse_accel", 0.0, 5000.0, errors)
+	_validate_optional_number_range(physics, "ship_max_speed", "ruleset.physics.ship_max_speed", 0.0, 5000.0, errors)
+	_validate_optional_number_range(physics, "ship_base_drag", "ruleset.physics.ship_base_drag", 0.0, 10.0, errors)
+	_validate_optional_number_range(physics, "ship_overspeed_drag", "ruleset.physics.ship_overspeed_drag", 0.0, 50.0, errors)
+	_validate_optional_number_range(physics, "ship_bounce_min_normal_speed", "ruleset.physics.ship_bounce_min_normal_speed", 0.0, 2000.0, errors)
+
+	# Optional weapons section.
+	var weapons: Dictionary = {}
+	if root.has("weapons"):
+		weapons = _require_dict(root.get("weapons"), "ruleset.weapons", errors)
+		var weapons_allowed := {
+			"ball_friction": true,
+			"ball_max_speed": true,
+			"ball_kick_speed": true,
+			"ball_knock_impulse": true,
+			"ball_stick_offset": true,
+			"ball_steal_padding": true,
+		}
+		for wk in weapons.keys():
+			var wks := String(wk)
+			if not weapons_allowed.has(wks):
+				errors.append(_err("ruleset.weapons", "unknown key '%s'" % wks))
+		_validate_optional_number_range(weapons, "ball_friction", "ruleset.weapons.ball_friction", 0.0, 1.0, errors)
+		_validate_optional_number_range(weapons, "ball_max_speed", "ruleset.weapons.ball_max_speed", 0.0, 5000.0, errors)
+		_validate_optional_number_range(weapons, "ball_kick_speed", "ruleset.weapons.ball_kick_speed", 0.0, 5000.0, errors)
+		_validate_optional_number_range(weapons, "ball_knock_impulse", "ruleset.weapons.ball_knock_impulse", 0.0, 5000.0, errors)
+		_validate_optional_number_range(weapons, "ball_stick_offset", "ruleset.weapons.ball_stick_offset", 0.0, 200.0, errors)
+		_validate_optional_number_range(weapons, "ball_steal_padding", "ruleset.weapons.ball_steal_padding", 0.0, 128.0, errors)
+
+	# Optional energy section.
+	var energy: Dictionary = {}
+	if root.has("energy"):
+		energy = _require_dict(root.get("energy"), "ruleset.energy", errors)
+		var energy_allowed := {
+			"max": true,
+			"regen_per_s": true,
+			"afterburner_drain_per_s": true,
+		}
+		for ek in energy.keys():
+			var eks := String(ek)
+			if not energy_allowed.has(eks):
+				errors.append(_err("ruleset.energy", "unknown key '%s'" % eks))
+		_validate_optional_number_range(energy, "max", "ruleset.energy.max", 0.0, 1000.0, errors)
+		_validate_optional_number_range(energy, "regen_per_s", "ruleset.energy.regen_per_s", 0.0, 1000.0, errors)
+		_validate_optional_number_range(energy, "afterburner_drain_per_s", "ruleset.energy.afterburner_drain_per_s", 0.0, 1000.0, errors)
+
+	# Warnings for omitted optional knobs (no silent defaults).
+	var missing_physics: Array[String] = []
+	for k in [
+		"tangent_damping",
+		"ship_turn_rate",
+		"ship_thrust_accel",
+		"ship_reverse_accel",
+		"ship_max_speed",
+		"ship_base_drag",
+		"ship_overspeed_drag",
+		"ship_bounce_min_normal_speed",
+	]:
+		if not physics.has(k):
+			missing_physics.append(k)
+	if missing_physics.size() > 0:
+		warnings.append(_err("ruleset.physics", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_physics)))
+	if root.has("weapons"):
+		var missing_weapons: Array[String] = []
+		for k in ["ball_friction", "ball_max_speed", "ball_kick_speed", "ball_knock_impulse", "ball_stick_offset", "ball_steal_padding"]:
+			if not weapons.has(k):
+				missing_weapons.append(k)
+		if missing_weapons.size() > 0:
+			warnings.append(_err("ruleset.weapons", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_weapons)))
+	if root.has("energy"):
+		var missing_energy: Array[String] = []
+		for k in ["max", "regen_per_s", "afterburner_drain_per_s"]:
+			if not energy.has(k):
+				missing_energy.append(k)
+		if missing_energy.size() > 0:
+			warnings.append(_err("ruleset.energy", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_energy)))
+
+	# Canonical (no auto-fill).
 	var canonical := {
 		"format": FORMAT_RULESET,
 		"schema_version": SCHEMA_RULESET,
-		"physics": {
-			"wall_restitution": wall_rest,
-		},
+		"physics": {},
 	}
+	# Required
+	(canonical["physics"] as Dictionary)["wall_restitution"] = wall_rest
+	# Optional passthrough
+	for k in physics.keys():
+		var ks := String(k)
+		if ks != "wall_restitution" and physics_allowed.has(ks):
+			(canonical["physics"] as Dictionary)[ks] = physics.get(ks)
+	if root.has("weapons"):
+		canonical["weapons"] = {}
+		for k in weapons.keys():
+			var ks := String(k)
+			(canonical["weapons"] as Dictionary)[ks] = weapons.get(ks)
+	if root.has("energy"):
+		canonical["energy"] = {}
+		for k in energy.keys():
+			var ks := String(k)
+			(canonical["energy"] as Dictionary)[ks] = energy.get(ks)
 
 	return {
 		"ok": errors.is_empty(),

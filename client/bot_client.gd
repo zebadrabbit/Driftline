@@ -15,6 +15,7 @@ const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
+const DriftValidate = preload("res://shared/drift_validate.gd")
 
 const SERVER_HOST: String = "127.0.0.1"
 const SERVER_PORT: int = 5000
@@ -227,9 +228,23 @@ func _poll_network_packets() -> void:
 				authoritative_tick = -1
 				authoritative_ship_state = null
 				has_authoritative = false
-				var wr: float = float(w.get("wall_restitution", -1.0))
-				if wr >= 0.0:
-					world.wall_restitution = wr
+				var ruleset_json: String = String(w.get("ruleset_json", "")).strip_edges()
+				if ruleset_json != "":
+					var json := JSON.new()
+					var parse_err := json.parse(ruleset_json)
+					if parse_err == OK and typeof(json.data) == TYPE_DICTIONARY:
+						var validated := DriftValidate.validate_ruleset(json.data)
+						if bool(validated.get("ok", false)):
+							world.apply_ruleset(validated.get("ruleset", {}))
+				else:
+					# Backward compat: accept wall_restitution-only handshake.
+					var wr: float = float(w.get("wall_restitution", -1.0))
+					if wr >= 0.0:
+						world.wall_restitution = wr
+				# Optional: tangent damping (present in newer handshakes).
+				var td: float = float(w.get("tangent_damping", -1.0))
+				if td >= 0.0:
+					world.tangent_damping = td
 			continue
 
 		if pkt_type == DriftNet.PKT_SNAPSHOT:

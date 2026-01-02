@@ -1,0 +1,8 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6,
+    "ship_base_drag": -0.1
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "weapons": {
+    "ball_friction": 1.5
+  }
+}

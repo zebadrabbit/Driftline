@@ -18,8 +18,68 @@ var ships: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
 var ball: DriftTypes.DriftBallState = DriftTypes.DriftBallState.new(DriftConstants.ARENA_CENTER, Vector2.ZERO)
 var solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool] - tile coordinates that are solid
 
-# Rules (authoritative + prediction must match)
+# Ruleset (authoritative + prediction must match)
+# This is the validated canonical ruleset dict (no normalization).
+var ruleset: Dictionary = {}
+
+# Effective tuning values used by the deterministic sim.
 var wall_restitution: float = DriftConstants.SHIP_WALL_RESTITUTION
+var tangent_damping: float = 0.0
+var ship_turn_rate: float = DriftConstants.SHIP_TURN_RATE
+var ship_thrust_accel: float = DriftConstants.SHIP_THRUST_ACCEL
+var ship_reverse_accel: float = DriftConstants.SHIP_REVERSE_ACCEL
+var ship_max_speed: float = DriftConstants.SHIP_MAX_SPEED
+var ship_base_drag: float = DriftConstants.SHIP_BASE_DRAG
+var ship_overspeed_drag: float = DriftConstants.SHIP_OVERSPEED_DRAG
+var ship_bounce_min_normal_speed: float = 160.0
+
+var ball_friction: float = 0.98
+var ball_max_speed: float = 600.0
+var ball_kick_speed: float = DriftConstants.BALL_KICK_SPEED
+var ball_knock_impulse: float = DriftConstants.BALL_KNOCK_IMPULSE
+var ball_stick_offset: float = 18.0
+var ball_steal_padding: float = 4.0
+
+var energy_max: float = 100.0
+var energy_regen_per_s: float = 18.0
+var energy_afterburner_drain_per_s: float = 30.0
+
+
+func apply_ruleset(canonical_ruleset: Dictionary) -> void:
+	# Must only be called with a validated driftline.ruleset dict.
+	ruleset = canonical_ruleset
+
+	var physics: Dictionary = canonical_ruleset.get("physics", {})
+	if typeof(physics) == TYPE_DICTIONARY:
+		wall_restitution = float(physics.get("wall_restitution", wall_restitution))
+		# Optional: tangent damping on wall collisions.
+		# Default to 0.0 only after validation (sim init), not in the validator.
+		if physics.has("tangent_damping"):
+			tangent_damping = float(physics.get("tangent_damping"))
+		else:
+			tangent_damping = 0.0
+		ship_turn_rate = float(physics.get("ship_turn_rate", ship_turn_rate))
+		ship_thrust_accel = float(physics.get("ship_thrust_accel", ship_thrust_accel))
+		ship_reverse_accel = float(physics.get("ship_reverse_accel", ship_reverse_accel))
+		ship_max_speed = float(physics.get("ship_max_speed", ship_max_speed))
+		ship_base_drag = float(physics.get("ship_base_drag", ship_base_drag))
+		ship_overspeed_drag = float(physics.get("ship_overspeed_drag", ship_overspeed_drag))
+		ship_bounce_min_normal_speed = float(physics.get("ship_bounce_min_normal_speed", ship_bounce_min_normal_speed))
+
+	var weapons: Dictionary = canonical_ruleset.get("weapons", {})
+	if typeof(weapons) == TYPE_DICTIONARY and not weapons.is_empty():
+		ball_friction = float(weapons.get("ball_friction", ball_friction))
+		ball_max_speed = float(weapons.get("ball_max_speed", ball_max_speed))
+		ball_kick_speed = float(weapons.get("ball_kick_speed", ball_kick_speed))
+		ball_knock_impulse = float(weapons.get("ball_knock_impulse", ball_knock_impulse))
+		ball_stick_offset = float(weapons.get("ball_stick_offset", ball_stick_offset))
+		ball_steal_padding = float(weapons.get("ball_steal_padding", ball_steal_padding))
+
+	var energy: Dictionary = canonical_ruleset.get("energy", {})
+	if typeof(energy) == TYPE_DICTIONARY and not energy.is_empty():
+		energy_max = float(energy.get("max", energy_max))
+		energy_regen_per_s = float(energy.get("regen_per_s", energy_regen_per_s))
+		energy_afterburner_drain_per_s = float(energy.get("afterburner_drain_per_s", energy_afterburner_drain_per_s))
 
 # Doors (dynamic tile solids)
 var _static_solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool]
@@ -242,7 +302,17 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		# Store position before movement
 		var old_position := ship_state.position
 		
-		DriftShip.apply_input(ship_state, input_cmd, DriftConstants.TICK_DT)
+		DriftShip.apply_input(
+			ship_state,
+			input_cmd,
+			DriftConstants.TICK_DT,
+			ship_turn_rate,
+			ship_thrust_accel,
+			ship_reverse_accel,
+			ship_max_speed,
+			ship_base_drag,
+			ship_overspeed_drag,
+		)
 		
 		# Axis-separated collision resolution (sweep to avoid "teleport back")
 		# We keep the post-integration velocity, but resolve position by sweeping
@@ -250,7 +320,7 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		const SEPARATION_EPSILON: float = 0.25
 		# Only bounce when the ship has meaningful speed INTO the wall.
 		# Otherwise, kill the normal component and let the ship slide along the wall.
-		const BOUNCE_NORMAL_SPEED: float = 160.0
+		var BOUNCE_NORMAL_SPEED: float = ship_bounce_min_normal_speed
 		const SWEEP_ITERS: int = 10
 		var next_pos := ship_state.position
 		ship_state.position = old_position
@@ -277,13 +347,22 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 				# Keep a tiny gap so we don't remain in-contact and jitter.
 				var dir_x := signf(next_pos.x - old_position.x)
 				ship_state.position.x -= dir_x * SEPARATION_EPSILON
-				var pre_vx: float = ship_state.velocity.x
-				if abs(pre_vx) >= BOUNCE_NORMAL_SPEED:
-					ship_state.velocity.x = -pre_vx * wall_restitution
-					var nrm_x: Vector2 = Vector2(-dir_x, 0.0)
-					_record_wall_bounce(ship_id, ship_state.position, nrm_x, abs(pre_vx))
+				var pre_v: Vector2 = ship_state.velocity
+				var nrm_x: Vector2 = Vector2(-dir_x, 0.0)
+				var vdotn: float = pre_v.dot(nrm_x)
+				# Only apply bounce/damping when moving into the wall.
+				if vdotn < 0.0:
+					var normal_speed: float = -vdotn
+					var v_t: Vector2 = pre_v - nrm_x * vdotn
+					var v_t_damped: Vector2 = v_t * (1.0 - tangent_damping)
+					if normal_speed >= BOUNCE_NORMAL_SPEED:
+						ship_state.velocity = v_t_damped + nrm_x * (normal_speed * wall_restitution)
+						_record_wall_bounce(ship_id, ship_state.position, nrm_x, normal_speed)
+					else:
+						ship_state.velocity = v_t_damped
 				else:
-					ship_state.velocity.x = 0.0
+					# Not moving into the wall; kill outward normal component only.
+					ship_state.velocity = pre_v - nrm_x * maxf(0.0, vdotn)
 		else:
 			ship_state.position.x = next_pos.x
 
@@ -307,13 +386,20 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 				ship_state.position.y = lerpf(old_position.y, next_pos.y, t_lo)
 				var dir_y := signf(next_pos.y - old_position.y)
 				ship_state.position.y -= dir_y * SEPARATION_EPSILON
-				var pre_vy: float = ship_state.velocity.y
-				if abs(pre_vy) >= BOUNCE_NORMAL_SPEED:
-					ship_state.velocity.y = -pre_vy * wall_restitution
-					var nrm_y: Vector2 = Vector2(0.0, -dir_y)
-					_record_wall_bounce(ship_id, ship_state.position, nrm_y, abs(pre_vy))
+				var pre_v: Vector2 = ship_state.velocity
+				var nrm_y: Vector2 = Vector2(0.0, -dir_y)
+				var vdotn: float = pre_v.dot(nrm_y)
+				if vdotn < 0.0:
+					var normal_speed: float = -vdotn
+					var v_t: Vector2 = pre_v - nrm_y * vdotn
+					var v_t_damped: Vector2 = v_t * (1.0 - tangent_damping)
+					if normal_speed >= BOUNCE_NORMAL_SPEED:
+						ship_state.velocity = v_t_damped + nrm_y * (normal_speed * wall_restitution)
+						_record_wall_bounce(ship_id, ship_state.position, nrm_y, normal_speed)
+					else:
+						ship_state.velocity = v_t_damped
 				else:
-					ship_state.velocity.y = 0.0
+					ship_state.velocity = pre_v - nrm_y * maxf(0.0, vdotn)
 		else:
 			ship_state.position.y = next_pos.y
 
@@ -328,21 +414,35 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		ship_state.position.y = clamp(ship_state.position.y, min_y, max_y)
 		# Bounce on arena bounds
 		if ship_state.position.x != old_x:
-			var pre_vx2: float = ship_state.velocity.x
-			if abs(pre_vx2) >= BOUNCE_NORMAL_SPEED:
-				ship_state.velocity.x = -pre_vx2 * wall_restitution
-				var nrm_x2: Vector2 = Vector2(1.0, 0.0) if old_x < ship_state.position.x else Vector2(-1.0, 0.0)
-				_record_wall_bounce(ship_id, ship_state.position, nrm_x2, abs(pre_vx2))
+			var pre_v: Vector2 = ship_state.velocity
+			var nrm_x2: Vector2 = Vector2(1.0, 0.0) if old_x < ship_state.position.x else Vector2(-1.0, 0.0)
+			var vdotn: float = pre_v.dot(nrm_x2)
+			if vdotn < 0.0:
+				var normal_speed: float = -vdotn
+				var v_t: Vector2 = pre_v - nrm_x2 * vdotn
+				var v_t_damped: Vector2 = v_t * (1.0 - tangent_damping)
+				if normal_speed >= BOUNCE_NORMAL_SPEED:
+					ship_state.velocity = v_t_damped + nrm_x2 * (normal_speed * wall_restitution)
+					_record_wall_bounce(ship_id, ship_state.position, nrm_x2, normal_speed)
+				else:
+					ship_state.velocity = v_t_damped
 			else:
-				ship_state.velocity.x = 0.0
+				ship_state.velocity = pre_v - nrm_x2 * maxf(0.0, vdotn)
 		if ship_state.position.y != old_y:
-			var pre_vy2: float = ship_state.velocity.y
-			if abs(pre_vy2) >= BOUNCE_NORMAL_SPEED:
-				ship_state.velocity.y = -pre_vy2 * wall_restitution
-				var nrm_y2: Vector2 = Vector2(0.0, 1.0) if old_y < ship_state.position.y else Vector2(0.0, -1.0)
-				_record_wall_bounce(ship_id, ship_state.position, nrm_y2, abs(pre_vy2))
+			var pre_v: Vector2 = ship_state.velocity
+			var nrm_y2: Vector2 = Vector2(0.0, 1.0) if old_y < ship_state.position.y else Vector2(0.0, -1.0)
+			var vdotn: float = pre_v.dot(nrm_y2)
+			if vdotn < 0.0:
+				var normal_speed: float = -vdotn
+				var v_t: Vector2 = pre_v - nrm_y2 * vdotn
+				var v_t_damped: Vector2 = v_t * (1.0 - tangent_damping)
+				if normal_speed >= BOUNCE_NORMAL_SPEED:
+					ship_state.velocity = v_t_damped + nrm_y2 * (normal_speed * wall_restitution)
+					_record_wall_bounce(ship_id, ship_state.position, nrm_y2, normal_speed)
+				else:
+					ship_state.velocity = v_t_damped
 			else:
-				ship_state.velocity.y = 0.0
+				ship_state.velocity = pre_v - nrm_y2 * maxf(0.0, vdotn)
 
 
 	# --- Sticky/Magnetic Ball Logic ---
@@ -361,14 +461,14 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 			ball.velocity.x = 0.0
 		if ball.position.y != ball_old_y:
 			ball.velocity.y = 0.0
-		DriftBall.step_ball(ball, DriftConstants.TICK_DT)
+		DriftBall.step_ball(ball, DriftConstants.TICK_DT, ball_friction, ball_max_speed)
 		# Check for acquisition
 		for ship_id in ship_ids:
 			var ship = ships[ship_id]
 			if ship.position.distance_to(ball.position) <= DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS:
 				ball.owner_id = ship.id
 				ball.velocity = Vector2.ZERO
-				ball.position = ship.position + DriftConstants.BALL_STICK_OFFSET.rotated(ship.rotation)
+				ball.position = ship.position + Vector2(ball_stick_offset, 0.0).rotated(ship.rotation)
 				break
 	else:
 		# Ball is carried
@@ -377,20 +477,21 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 			ball.owner_id = -1
 		else:
 			var owner = ships[ball.owner_id]
-			ball.position = owner.position + DriftConstants.BALL_STICK_OFFSET.rotated(owner.rotation)
+			ball.position = owner.position + Vector2(ball_stick_offset, 0.0).rotated(owner.rotation)
 			ball.velocity = owner.velocity
 			# Knock-off / steal check
 			for other_id in ship_ids:
 				if other_id == owner.id:
 					continue
 				var other = ships[other_id]
-				if other.position.distance_to(owner.position) <= DriftConstants.BALL_STEAL_RADIUS:
+				var steal_radius := DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS + ball_steal_padding
+				if other.position.distance_to(owner.position) <= steal_radius:
 					var n = ball.position - other.position
 					if n.length() == 0:
 						n = Vector2(1,0)
 					n = n.normalized()
 					ball.owner_id = -1
-					ball.velocity = owner.velocity + n * DriftConstants.BALL_KNOCK_IMPULSE
+					ball.velocity = owner.velocity + n * ball_knock_impulse
 					ball.position = owner.position + n * (DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS)
 					break
 
@@ -399,7 +500,7 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		var owner = ships[ball.owner_id]
 		ball.owner_id = -1
 		var fwd = Vector2(cos(owner.rotation), sin(owner.rotation))
-		ball.velocity = owner.velocity + fwd * DriftConstants.BALL_KICK_SPEED
+		ball.velocity = owner.velocity + fwd * ball_kick_speed
 		ball.position = owner.position + fwd * (DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS + 2.0)
 
 	# Return a snapshot (deep copy of ship states and ball)

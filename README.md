@@ -77,10 +77,16 @@ Example:
 ```json
 {
 	"format": "driftline.server_config",
-	"schema_version": 1,
-	"default_map": "res://maps/default.json"
+	"schema_version": 2,
+	"default_map": "res://maps/default.json",
+	"ruleset": "res://rulesets/base.json"
 }
 ```
+
+See schema docs:
+
+- `docs/formats/server_config.schema.md`
+- `docs/formats/ruleset.schema.md`
 
 From VS Code you can run the provided task:
 

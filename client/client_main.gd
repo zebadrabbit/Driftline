@@ -18,6 +18,7 @@ const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
+const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
@@ -1050,9 +1051,44 @@ func _poll_network_packets() -> void:
 
 				local_ship_id = w["ship_id"]
 				# Authoritative rules (must match server for prediction).
-				var wr: float = float(w.get("wall_restitution", -1.0))
-				if wr >= 0.0:
-					world.wall_restitution = wr
+				var ruleset_json: String = String(w.get("ruleset_json", "")).strip_edges()
+				if ruleset_json != "":
+					var json := JSON.new()
+					var parse_err := json.parse(ruleset_json)
+					if parse_err != OK or typeof(json.data) != TYPE_DICTIONARY:
+						push_error("Ruleset JSON parse failed from welcome packet")
+						connection_status_message = "Ruleset mismatch with server."
+						show_connect_ui = true
+						allow_offline_mode = false
+						is_connected = false
+						_update_ui_visibility()
+						if enet_peer != null:
+							enet_peer.close()
+							enet_peer = null
+						return
+					var root: Dictionary = json.data
+					var validated := DriftValidate.validate_ruleset(root)
+					if not bool(validated.get("ok", false)):
+						push_error("Ruleset validation failed from welcome packet")
+						connection_status_message = "Ruleset mismatch with server."
+						show_connect_ui = true
+						allow_offline_mode = false
+						is_connected = false
+						_update_ui_visibility()
+						if enet_peer != null:
+							enet_peer.close()
+							enet_peer = null
+						return
+					world.apply_ruleset(validated.get("ruleset", {}))
+				else:
+					# Backward compat: accept wall_restitution-only handshake.
+					var wr: float = float(w.get("wall_restitution", -1.0))
+					if wr >= 0.0:
+						world.wall_restitution = wr
+				# Optional: tangent damping (present in newer handshakes).
+				var td: float = float(w.get("tangent_damping", -1.0))
+				if td >= 0.0:
+					world.tangent_damping = td
 				if DEBUG_NET:
 					print("[NET] assigned ship_id=", local_ship_id)
 				# Reset local baseline.

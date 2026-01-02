@@ -121,7 +121,15 @@ static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Ve
 	return buffer.data_array
 
 
-static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray(), map_path: String = "", map_version: int = 0, wall_restitution: float = -1.0) -> PackedByteArray:
+static func pack_welcome_packet(
+	ship_id: int,
+	map_checksum: PackedByteArray = PackedByteArray(),
+	map_path: String = "",
+	map_version: int = 0,
+	wall_restitution: float = -1.0,
+	ruleset_json: String = "",
+	tangent_damping: float = -1.0,
+) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
 
@@ -164,6 +172,26 @@ static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = Pa
 	if wall_restitution >= 0.0:
 		buffer.put_float(wall_restitution)
 
+	# Ruleset JSON extension (optional; read only if present).
+	# Layout extension:
+	#   u32 ruleset_len (0 or N)
+	#   u8[N] utf8 JSON
+	var rj := String(ruleset_json)
+	if rj.strip_edges() == "":
+		buffer.put_32(0)
+	else:
+		var utf8 := rj.to_utf8_buffer()
+		buffer.put_32(utf8.size())
+		if utf8.size() > 0:
+			for i in range(utf8.size()):
+				buffer.put_u8(int(utf8[i]))
+
+	# Tangent damping extension (optional trailing field; read only if present).
+	#   f32 tangent_damping
+	# If the caller supplies a negative value, omit the field.
+	if tangent_damping >= 0.0:
+		buffer.put_float(tangent_damping)
+
 	return buffer.data_array
 
 
@@ -186,6 +214,8 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 	var map_path: String = ""
 	var map_version: int = 0
 	var wall_restitution: float = -1.0
+	var ruleset_json: String = ""
+	var tangent_damping: float = -1.0
 	# Backward compatible: checksum field may be absent.
 	if bytes.size() >= (1 + 4 + 1):
 		var checksum_len: int = int(buffer.get_u8())
@@ -210,6 +240,18 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 		# wall_restitution is optional; only read if present.
 		if buffer.get_available_bytes() >= 4:
 			wall_restitution = float(buffer.get_float())
+		# ruleset_json is optional; only read if present.
+		if buffer.get_available_bytes() >= 4:
+			var ruleset_len: int = int(buffer.get_32())
+			if ruleset_len > 0 and buffer.get_available_bytes() >= ruleset_len:
+				var ruleset_bytes := PackedByteArray()
+				ruleset_bytes.resize(ruleset_len)
+				for i in range(ruleset_len):
+					ruleset_bytes[i] = int(buffer.get_u8())
+				ruleset_json = ruleset_bytes.get_string_from_utf8()
+		# tangent_damping is optional; only read if present.
+		if buffer.get_available_bytes() >= 4:
+			tangent_damping = float(buffer.get_float())
 	return {
 		"type": pkt_type,
 		"ship_id": ship_id,
@@ -217,6 +259,8 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 		"map_path": map_path,
 		"map_version": map_version,
 		"wall_restitution": wall_restitution,
+		"ruleset_json": ruleset_json,
+		"tangent_damping": tangent_damping,
 	}
 
 

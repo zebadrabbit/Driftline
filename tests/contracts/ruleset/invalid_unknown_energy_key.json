@@ -1,0 +1,12 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "energy": {
+    "max": 100,
+    "regen_per_s": 18,
+    "mystery": 123
+  }
+}
