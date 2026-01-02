@@ -2,7 +2,8 @@
   "format": "driftline.ruleset",
   "schema_version": 1,
   "physics": {
-    "wall_restitution": 0.6,
+    "wall_restitution": 0.85,
+    "tangent_damping": 0.5,
     "ship_turn_rate": 3.5,
     "ship_thrust_accel": 520.0,
     "ship_reverse_accel": 400.0,

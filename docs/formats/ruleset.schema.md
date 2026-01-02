@@ -25,6 +25,7 @@ Top-level object:
   "schema_version": 1,
   "physics": {
     "wall_restitution": 0.6,
+    "tangent_damping": 0.5,
     "ship_turn_rate": 3.5,
     "ship_thrust_accel": 520.0,
     "ship_reverse_accel": 400.0,
@@ -74,6 +75,14 @@ Used for wall bounce response in the shared deterministic simulation. Values:
 - `0.0` = no bounce (normal component is fully killed)
 - `1.0` = perfect elastic reflection (normal speed preserved)
 - `> 1.0` = energy gain (allowed for arcade tuning)
+
+#### `physics.tangent_damping` (optional)
+
+- Type: number
+- Range: `0.0..1.0`
+
+Applies tangential velocity damping on wall collisions to create SubSpace-style wall sliding.
+On impact, the tangential component is multiplied by $(1 - tangent_damping)$.
 
 #### `physics.ship_turn_rate` (optional)
 
