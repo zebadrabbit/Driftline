@@ -45,6 +45,19 @@ var energy_regen_per_s: float = 18.0
 var energy_afterburner_drain_per_s: float = 30.0
 
 
+# Bullets (authoritative + predicted)
+var bullets: Dictionary = {} # Dictionary[int, DriftTypes.DriftBulletState]
+var _next_bullet_id: int = 1
+var _prev_fire_by_ship: Dictionary = {} # Dictionary[int, bool]
+
+# Effective bullet tuning values used by the deterministic sim.
+var bullet_speed: float = 950.0
+var bullet_lifetime_ticks: int = 24
+var bullet_muzzle_offset: float = float(DriftConstants.SHIP_RADIUS) + 10.0
+var bullet_radius: float = 2.0
+var bullet_gun_spacing: float = 8.0
+
+
 func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	# Must only be called with a validated driftline.ruleset dict.
 	ruleset = canonical_ruleset
@@ -74,6 +87,14 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 		ball_knock_impulse = float(weapons.get("ball_knock_impulse", ball_knock_impulse))
 		ball_stick_offset = float(weapons.get("ball_stick_offset", ball_stick_offset))
 		ball_steal_padding = float(weapons.get("ball_steal_padding", ball_steal_padding))
+		if weapons.has("bullet") and typeof(weapons.get("bullet")) == TYPE_DICTIONARY:
+			var b: Dictionary = weapons.get("bullet")
+			bullet_speed = float(b.get("speed", bullet_speed))
+			bullet_muzzle_offset = float(b.get("muzzle_offset", bullet_muzzle_offset))
+			# Lifetime is expressed in seconds in the ruleset; convert to ticks deterministically.
+			if b.has("lifetime_s"):
+				var lifetime_s: float = float(b.get("lifetime_s"))
+				bullet_lifetime_ticks = int(round(lifetime_s / DriftConstants.TICK_DT))
 
 	var energy: Dictionary = canonical_ruleset.get("energy", {})
 	if typeof(energy) == TYPE_DICTIONARY and not energy.is_empty():
@@ -297,7 +318,7 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 
 	for ship_id in ship_ids:
 		var ship_state: DriftTypes.DriftShipState = ships[ship_id]
-		var input_cmd: DriftTypes.DriftInputCmd = inputs.get(ship_id, DriftTypes.DriftInputCmd.new(false, 0.0, false, false))
+		var input_cmd: DriftTypes.DriftInputCmd = inputs.get(ship_id, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		
 		# Store position before movement
 		var old_position := ship_state.position
@@ -496,19 +517,121 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 					break
 
 	# Kick on fire
-	if ball.owner_id != -1 and inputs.has(ball.owner_id) and inputs[ball.owner_id].fire:
+	var kicked_ship_id: int = -1
+	if ball.owner_id != -1 and inputs.has(ball.owner_id) and inputs[ball.owner_id].fire_primary:
+		kicked_ship_id = int(ball.owner_id)
 		var owner = ships[ball.owner_id]
 		ball.owner_id = -1
 		var fwd = Vector2(cos(owner.rotation), sin(owner.rotation))
 		ball.velocity = owner.velocity + fwd * ball_kick_speed
 		ball.position = owner.position + fwd * (DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS + 2.0)
 
+	# --- Bullets ---
+	# Fire bullets only when NOT currently holding the ball.
+	# Edge-triggered fire (no additional weapon state needed in snapshots).
+	for ship_id in ship_ids:
+		if not inputs.has(ship_id):
+			continue
+		var cmd: DriftTypes.DriftInputCmd = inputs[ship_id]
+		var prev_fire: bool = bool(_prev_fire_by_ship.get(ship_id, false))
+		_prev_fire_by_ship[ship_id] = bool(cmd.fire_primary)
+		if not cmd.fire_primary or prev_fire:
+			continue
+		if ship_id == kicked_ship_id:
+			continue
+		if ball.owner_id == ship_id:
+			continue
+		if not ships.has(ship_id):
+			continue
+
+		var ship_state: DriftTypes.DriftShipState = ships[ship_id]
+		var fwd := Vector2(cos(ship_state.rotation), sin(ship_state.rotation))
+		var right := Vector2(-fwd.y, fwd.x)
+
+		# Defaults.
+		var eff_speed: float = bullet_speed
+		var eff_lifetime_ticks: int = bullet_lifetime_ticks
+		var eff_muzzle_offset: float = bullet_muzzle_offset
+		var guns: int = 1
+		var multi_fire: bool = false
+
+		# Per-ship overrides (ruleset is validated canonical).
+		var rs_ships: Dictionary = ruleset.get("ships", {})
+		if typeof(rs_ships) == TYPE_DICTIONARY:
+			var ship_key := str(ship_id)
+			if rs_ships.has(ship_key) and typeof(rs_ships.get(ship_key)) == TYPE_DICTIONARY:
+				var ship_cfg: Dictionary = rs_ships.get(ship_key)
+				if ship_cfg.has("weapons") and typeof(ship_cfg.get("weapons")) == TYPE_DICTIONARY:
+					var ship_weapons: Dictionary = ship_cfg.get("weapons")
+					if ship_weapons.has("bullet") and typeof(ship_weapons.get("bullet")) == TYPE_DICTIONARY:
+						var sb: Dictionary = ship_weapons.get("bullet")
+						guns = int(sb.get("guns", guns))
+						multi_fire = bool(sb.get("multi_fire", multi_fire))
+						eff_speed = float(sb.get("speed", eff_speed))
+						eff_muzzle_offset = float(sb.get("muzzle_offset", eff_muzzle_offset))
+						if sb.has("lifetime_s"):
+							eff_lifetime_ticks = int(round(float(sb.get("lifetime_s")) / DriftConstants.TICK_DT))
+
+		guns = clampi(guns, 1, 8)
+		var fire_guns: Array[int] = []
+		if multi_fire or guns == 1:
+			for gi in range(guns):
+				fire_guns.append(gi)
+		else:
+			# Deterministic single-gun cycling without any extra persistent state.
+			var idx: int = int(posmod(tick + ship_id, guns))
+			fire_guns.append(idx)
+
+		for gi in fire_guns:
+			var centered := float(gi) - (float(guns - 1) * 0.5)
+			var lateral := centered * bullet_gun_spacing
+			var spawn_pos := ship_state.position + fwd * eff_muzzle_offset + right * lateral
+			var vel := ship_state.velocity + fwd * eff_speed
+			var die_tick := tick + maxi(0, eff_lifetime_ticks)
+			var bstate := DriftTypes.DriftBulletState.new(_next_bullet_id, ship_id, spawn_pos, vel, tick, die_tick)
+			bullets[_next_bullet_id] = bstate
+			_next_bullet_id += 1
+
+	# Step bullets (movement + despawn).
+	var bullet_ids: Array = bullets.keys()
+	bullet_ids.sort()
+	var to_remove: Array[int] = []
+	for bid in bullet_ids:
+		var b: DriftTypes.DriftBulletState = bullets.get(bid)
+		if b == null:
+			continue
+		if b.die_tick >= 0 and tick >= b.die_tick:
+			to_remove.append(int(bid))
+			continue
+		var next_pos := b.position + b.velocity * DriftConstants.TICK_DT
+		# Arena bounds check.
+		if next_pos.x < DriftConstants.ARENA_MIN.x or next_pos.x > DriftConstants.ARENA_MAX.x or next_pos.y < DriftConstants.ARENA_MIN.y or next_pos.y > DriftConstants.ARENA_MAX.y:
+			to_remove.append(int(bid))
+			continue
+		# Tile collision check (treat bullets as small circles).
+		if is_position_blocked(next_pos, bullet_radius):
+			to_remove.append(int(bid))
+			continue
+		b.position = next_pos
+
+	for bid in to_remove:
+		bullets.erase(bid)
+
 	# Return a snapshot (deep copy of ship states and ball)
 	var snapshot_ships: Dictionary = {}
 	for ship_id in ship_ids:
 		snapshot_ships[ship_id] = _copy_ship_state(ships[ship_id])
+	# Bullets snapshot (stable by id).
+	var snapshot_bullets: Array = []
+	var snapshot_bullet_ids: Array = bullets.keys()
+	snapshot_bullet_ids.sort()
+	for bid in snapshot_bullet_ids:
+		var b: DriftTypes.DriftBulletState = bullets.get(bid)
+		if b == null:
+			continue
+		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.position, b.velocity, b.spawn_tick, b.die_tick))
 
-	return DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id)
+	return DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id, snapshot_bullets)
 
 
 func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShipState:

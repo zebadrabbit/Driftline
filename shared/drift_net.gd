@@ -56,10 +56,14 @@ static func pack_input_packet(tick: int, ship_id: int, cmd: DriftTypes.DriftInpu
 	buffer.put_u8(PKT_INPUT)
 	buffer.put_32(tick)
 	buffer.put_32(ship_id)
-	buffer.put_u8(1 if cmd.thrust else 0)
-	buffer.put_u8(1 if cmd.reverse else 0)
-	buffer.put_float(cmd.turn)
-	buffer.put_u8(1 if cmd.fire else 0)
+	# Core layout (kept stable): forward bool, reverse bool, rotation scalar, fire_primary bool.
+	buffer.put_u8(1 if cmd.thrust > 0.0 else 0)
+	buffer.put_u8(1 if cmd.thrust < 0.0 else 0)
+	buffer.put_float(cmd.rotation)
+	buffer.put_u8(1 if cmd.fire_primary else 0)
+	# Extensions (optional trailing fields; old servers/clients ignore extra bytes).
+	buffer.put_u8(1 if cmd.fire_secondary else 0)
+	buffer.put_u8(1 if cmd.modifier else 0)
 
 	return buffer.data_array
 
@@ -76,25 +80,40 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 	# Input packet tick refers to the simulation tick that will be stepped next using this input.
 	var tick: int = buffer.get_32()
 	var ship_id: int = buffer.get_32()
-	var thrust: bool = buffer.get_u8() != 0
+	var forward: bool = buffer.get_u8() != 0
 	var reverse: bool = buffer.get_u8() != 0
-	var turn: float = buffer.get_float()
-	var fire: bool = buffer.get_u8() != 0
+	var rotation: float = buffer.get_float()
+	var fire_primary: bool = buffer.get_u8() != 0
+	var fire_secondary: bool = false
+	var modifier: bool = false
+	if buffer.get_available_bytes() >= 1:
+		fire_secondary = buffer.get_u8() != 0
+	if buffer.get_available_bytes() >= 1:
+		modifier = buffer.get_u8() != 0
+	var thrust: float = (1.0 if forward else 0.0) + (-1.0 if reverse else 0.0)
 
 	return {
 		"type": pkt_type,
 		"tick": tick,
 		"ship_id": ship_id,
 		"thrust": thrust,
-		"reverse": reverse,
-		"turn": turn,
-		"fire": fire,
+		"rotation": clampf(rotation, -1.0, 1.0),
+		"fire_primary": fire_primary,
+		"fire_secondary": fire_secondary,
+		"modifier": modifier,
 	}
 
 
 
-# Extended: ships + ball
-static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Vector2.ZERO, ball_vel: Vector2 = Vector2.ZERO, ball_owner_id: int = -1) -> PackedByteArray:
+# Extended: ships + ball (+ optional bullets)
+static func pack_snapshot_packet(
+	tick: int,
+	ships: Array,
+	ball_pos: Vector2 = Vector2.ZERO,
+	ball_vel: Vector2 = Vector2.ZERO,
+	ball_owner_id: int = -1,
+	bullets: Array = [],
+) -> PackedByteArray:
 	# ships: Array[DriftShipState]
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
@@ -117,6 +136,33 @@ static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Ve
 	buffer.put_float(ball_vel.x)
 	buffer.put_float(ball_vel.y)
 	buffer.put_32(ball_owner_id)
+
+	# Bullets extension (optional trailing fields; old clients ignore extra bytes).
+	# Layout:
+	#   u16 bullet_count
+	#   repeated bullet_count times:
+	#     u32 id
+	#     u32 owner_id
+	#     f32 px, py
+	#     f32 vx, vy
+	#     u32 spawn_tick
+	#     u32 die_tick
+	var bullet_count: int = bullets.size()
+	if bullet_count < 0:
+		bullet_count = 0
+	if bullet_count > 65535:
+		bullet_count = 65535
+	buffer.put_u16(bullet_count)
+	for i in range(bullet_count):
+		var b = bullets[i]
+		buffer.put_32(int(b.id))
+		buffer.put_32(int(b.owner_id))
+		buffer.put_float(float(b.position.x))
+		buffer.put_float(float(b.position.y))
+		buffer.put_float(float(b.velocity.x))
+		buffer.put_float(float(b.velocity.y))
+		buffer.put_32(int(b.spawn_tick))
+		buffer.put_32(int(b.die_tick))
 
 	return buffer.data_array
 
@@ -304,6 +350,26 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 	var ball_vy: float = buffer.get_float()
 	var ball_owner_id: int = buffer.get_32()
 
+	# Bullets extension (optional)
+	var bullets: Array = []
+	if buffer.get_available_bytes() >= 2:
+		var bullet_count: int = int(buffer.get_u16())
+		bullets.resize(bullet_count)
+		for i in range(bullet_count):
+			# Each bullet is 4+4+4*4+4+4 = 32 bytes
+			if buffer.get_available_bytes() < 32:
+				# Truncated packet; fail loudly by returning empty.
+				return {}
+			var bid: int = int(buffer.get_32())
+			var owner_id: int = int(buffer.get_32())
+			var bpx: float = buffer.get_float()
+			var bpy: float = buffer.get_float()
+			var bvx: float = buffer.get_float()
+			var bvy: float = buffer.get_float()
+			var spawn_tick: int = int(buffer.get_32())
+			var die_tick: int = int(buffer.get_32())
+			bullets[i] = DriftTypes.DriftBulletState.new(bid, owner_id, Vector2(bpx, bpy), Vector2(bvx, bvy), spawn_tick, die_tick)
+
 	return {
 		"type": pkt_type,
 		"tick": tick,
@@ -311,6 +377,7 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 		"ball_position": Vector2(ball_px, ball_py),
 		"ball_velocity": Vector2(ball_vx, ball_vy),
 		"ball_owner_id": ball_owner_id,
+		"bullets": bullets,
 	}
 
 

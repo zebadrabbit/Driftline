@@ -54,15 +54,15 @@ signal stats_changed(current_speed: float, heading_degrees: float, energy: float
 @export var bounce_sound_min_speed: float = 150.0  # Min speed to trigger bounce sound
 @export var bounce_sound_cooldown: float = 0.1  # Seconds between bounce sounds
 
-# Toggle key for dampening.
+# Toggle key for dampening (offline-only debug feature).
 @export var dampening_toggle_action: StringName = &"toggle_dampening"
 
-# Input actions.
-@export var thrust_action: StringName = &"thrust"
-@export var reverse_thrust_action: StringName = &"brake"  # Still mapped to "brake" key
-@export var turn_left_action: StringName = &"turn_left"
-@export var turn_right_action: StringName = &"turn_right"
-@export var afterburner_action: StringName = &"afterburner"
+# Driftline controls contract actions.
+@export var thrust_action: StringName = &"drift_thrust_forward"
+@export var reverse_thrust_action: StringName = &"drift_thrust_reverse"
+@export var turn_left_action: StringName = &"drift_rotate_left"
+@export var turn_right_action: StringName = &"drift_rotate_right"
+@export var afterburner_action: StringName = &"drift_modifier_ability"
 
 # --- State exposed to HUD ---
 var current_speed: float = 0.0

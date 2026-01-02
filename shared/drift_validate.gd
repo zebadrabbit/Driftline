@@ -521,7 +521,7 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 	# Strict top-level shape.
 	for k in root.keys():
 		var key := String(k)
-		if key not in ["format", "schema_version", "physics", "weapons", "energy"]:
+		if key not in ["format", "schema_version", "physics", "weapons", "energy", "ships"]:
 			errors.append(_err("ruleset", "unknown top-level key '%s'" % key))
 
 	var physics := _require_dict(root.get("physics"), "ruleset.physics", errors)
@@ -568,6 +568,7 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 
 	# Optional weapons section.
 	var weapons: Dictionary = {}
+	var bullet: Dictionary = {}
 	if root.has("weapons"):
 		weapons = _require_dict(root.get("weapons"), "ruleset.weapons", errors)
 		var weapons_allowed := {
@@ -577,6 +578,7 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			"ball_knock_impulse": true,
 			"ball_stick_offset": true,
 			"ball_steal_padding": true,
+			"bullet": true,
 		}
 		for wk in weapons.keys():
 			var wks := String(wk)
@@ -588,6 +590,73 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		_validate_optional_number_range(weapons, "ball_knock_impulse", "ruleset.weapons.ball_knock_impulse", 0.0, 5000.0, errors)
 		_validate_optional_number_range(weapons, "ball_stick_offset", "ruleset.weapons.ball_stick_offset", 0.0, 200.0, errors)
 		_validate_optional_number_range(weapons, "ball_steal_padding", "ruleset.weapons.ball_steal_padding", 0.0, 128.0, errors)
+
+		if weapons.has("bullet"):
+			bullet = _require_dict(weapons.get("bullet"), "ruleset.weapons.bullet", errors)
+			var bullet_allowed := {
+				"speed": true,
+				"lifetime_s": true,
+				"muzzle_offset": true,
+			}
+			for bk in bullet.keys():
+				var bks := String(bk)
+				if not bullet_allowed.has(bks):
+					errors.append(_err("ruleset.weapons.bullet", "unknown key '%s'" % bks))
+			_validate_optional_number_range(bullet, "speed", "ruleset.weapons.bullet.speed", 0.0, 5000.0, errors)
+			_validate_optional_number_range(bullet, "lifetime_s", "ruleset.weapons.bullet.lifetime_s", 0.0, 10.0, errors)
+			_validate_optional_number_range(bullet, "muzzle_offset", "ruleset.weapons.bullet.muzzle_offset", 0.0, 64.0, errors)
+
+	# Optional per-ship overrides.
+	var ships: Dictionary = {}
+	if root.has("ships"):
+		ships = _require_dict(root.get("ships"), "ruleset.ships", errors)
+		for sk in ships.keys():
+			var ship_key := String(sk)
+			if not ship_key.is_valid_int():
+				errors.append(_err("ruleset.ships", "ship id key '%s' must be an integer string" % ship_key))
+				continue
+			var ship_id := int(ship_key)
+			if ship_id <= 0:
+				errors.append(_err("ruleset.ships", "ship id key '%s' must be > 0" % ship_key))
+				continue
+			var ship_obj := _require_dict(ships.get(sk), "ruleset.ships.%s" % ship_key, errors)
+			for k in ship_obj.keys():
+				var ks := String(k)
+				if ks not in ["weapons"]:
+					errors.append(_err("ruleset.ships.%s" % ship_key, "unknown key '%s'" % ks))
+			if ship_obj.has("weapons"):
+				var ship_weapons := _require_dict(ship_obj.get("weapons"), "ruleset.ships.%s.weapons" % ship_key, errors)
+				for wk in ship_weapons.keys():
+					var wks := String(wk)
+					if wks not in ["bullet"]:
+						errors.append(_err("ruleset.ships.%s.weapons" % ship_key, "unknown key '%s'" % wks))
+				if ship_weapons.has("bullet"):
+					var ship_bullet := _require_dict(ship_weapons.get("bullet"), "ruleset.ships.%s.weapons.bullet" % ship_key, errors)
+					var ship_bullet_allowed := {
+						"guns": true,
+						"multi_fire": true,
+						"speed": true,
+						"lifetime_s": true,
+						"muzzle_offset": true,
+					}
+					for bk in ship_bullet.keys():
+						var bks := String(bk)
+						if not ship_bullet_allowed.has(bks):
+							errors.append(_err("ruleset.ships.%s.weapons.bullet" % ship_key, "unknown key '%s'" % bks))
+					if ship_bullet.has("guns"):
+						var guns_t := typeof(ship_bullet.get("guns"))
+						if guns_t not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.guns" % ship_key, "must be a number"))
+						else:
+							var guns_i := int(ship_bullet.get("guns"))
+							if guns_i < 1 or guns_i > 8:
+								errors.append(_err("ruleset.ships.%s.weapons.bullet.guns" % ship_key, "must be in range 1..8"))
+					if ship_bullet.has("multi_fire"):
+						if typeof(ship_bullet.get("multi_fire")) != TYPE_BOOL:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.multi_fire" % ship_key, "must be a boolean"))
+					_validate_optional_number_range(ship_bullet, "speed", "ruleset.ships.%s.weapons.bullet.speed" % ship_key, 0.0, 5000.0, errors)
+					_validate_optional_number_range(ship_bullet, "lifetime_s", "ruleset.ships.%s.weapons.bullet.lifetime_s" % ship_key, 0.0, 10.0, errors)
+					_validate_optional_number_range(ship_bullet, "muzzle_offset", "ruleset.ships.%s.weapons.bullet.muzzle_offset" % ship_key, 0.0, 64.0, errors)
 
 	# Optional energy section.
 	var energy: Dictionary = {}
@@ -624,11 +693,18 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		warnings.append(_err("ruleset.physics", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_physics)))
 	if root.has("weapons"):
 		var missing_weapons: Array[String] = []
-		for k in ["ball_friction", "ball_max_speed", "ball_kick_speed", "ball_knock_impulse", "ball_stick_offset", "ball_steal_padding"]:
+		for k in ["ball_friction", "ball_max_speed", "ball_kick_speed", "ball_knock_impulse", "ball_stick_offset", "ball_steal_padding", "bullet"]:
 			if not weapons.has(k):
 				missing_weapons.append(k)
 		if missing_weapons.size() > 0:
 			warnings.append(_err("ruleset.weapons", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_weapons)))
+		if weapons.has("bullet"):
+			var missing_bullet: Array[String] = []
+			for k in ["speed", "lifetime_s", "muzzle_offset"]:
+				if not bullet.has(k):
+					missing_bullet.append(k)
+			if missing_bullet.size() > 0:
+				warnings.append(_err("ruleset.weapons.bullet", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_bullet)))
 	if root.has("energy"):
 		var missing_energy: Array[String] = []
 		for k in ["max", "regen_per_s", "afterburner_drain_per_s"]:
@@ -646,20 +722,62 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 	# Required
 	(canonical["physics"] as Dictionary)["wall_restitution"] = wall_rest
 	# Optional passthrough
-	for k in physics.keys():
+	var physics_keys: Array = physics.keys()
+	physics_keys.sort()
+	for k in physics_keys:
 		var ks := String(k)
 		if ks != "wall_restitution" and physics_allowed.has(ks):
 			(canonical["physics"] as Dictionary)[ks] = physics.get(ks)
 	if root.has("weapons"):
 		canonical["weapons"] = {}
-		for k in weapons.keys():
+		var weapon_keys: Array = weapons.keys()
+		weapon_keys.sort()
+		for k in weapon_keys:
 			var ks := String(k)
-			(canonical["weapons"] as Dictionary)[ks] = weapons.get(ks)
+			if ks == "bullet" and typeof(weapons.get("bullet")) == TYPE_DICTIONARY:
+				# Canonicalize nested bullet dict.
+				var b: Dictionary = weapons.get("bullet")
+				var out_b := {}
+				var bkeys: Array = b.keys()
+				bkeys.sort()
+				for bk in bkeys:
+					out_b[String(bk)] = b.get(bk)
+				(canonical["weapons"] as Dictionary)[ks] = out_b
+			else:
+				(canonical["weapons"] as Dictionary)[ks] = weapons.get(ks)
 	if root.has("energy"):
 		canonical["energy"] = {}
-		for k in energy.keys():
+		var energy_keys: Array = energy.keys()
+		energy_keys.sort()
+		for k in energy_keys:
 			var ks := String(k)
 			(canonical["energy"] as Dictionary)[ks] = energy.get(ks)
+	if root.has("ships"):
+		canonical["ships"] = {}
+		# Sort ship ids numerically.
+		var ship_ids: Array[int] = []
+		for sk in ships.keys():
+			var ship_key := String(sk)
+			if ship_key.is_valid_int():
+				ship_ids.append(int(ship_key))
+		ship_ids.sort()
+		for ship_id in ship_ids:
+			var ship_key := str(ship_id)
+			var ship_obj: Dictionary = ships.get(ship_key, {})
+			var out_ship := {}
+			if typeof(ship_obj) == TYPE_DICTIONARY and ship_obj.has("weapons"):
+				var ship_weapons: Dictionary = ship_obj.get("weapons")
+				var out_weapons := {}
+				if typeof(ship_weapons) == TYPE_DICTIONARY and ship_weapons.has("bullet") and typeof(ship_weapons.get("bullet")) == TYPE_DICTIONARY:
+					var sb: Dictionary = ship_weapons.get("bullet")
+					var out_sb := {}
+					var sb_keys: Array = sb.keys()
+					sb_keys.sort()
+					for bk in sb_keys:
+						out_sb[String(bk)] = sb.get(bk)
+					out_weapons["bullet"] = out_sb
+				out_ship["weapons"] = out_weapons
+			(canonical["ships"] as Dictionary)[ship_key] = out_ship
 
 	return {
 		"ok": errors.is_empty(),

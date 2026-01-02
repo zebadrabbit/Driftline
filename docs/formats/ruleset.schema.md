@@ -40,7 +40,23 @@ Top-level object:
     "ball_kick_speed": 700.0,
     "ball_knock_impulse": 250.0,
     "ball_stick_offset": 18.0,
-    "ball_steal_padding": 4.0
+    "ball_steal_padding": 4.0,
+    "bullet": {
+      "speed": 950.0,
+      "lifetime_s": 0.8,
+      "muzzle_offset": 28.0
+    }
+  },
+  "ships": {
+    "1": {
+      "weapons": {
+        "bullet": {
+          "guns": 3,
+          "multi_fire": true,
+          "speed": 1200.0
+        }
+      }
+    }
   },
   "energy": {
     "max": 100.0,
@@ -140,6 +156,8 @@ Minimum normal component speed required to bounce; below this, normal velocity i
 
 These parameters currently tune the **ball kick** behavior in the shared deterministic sim.
 
+Ruleset-driven bullet tuning is also declared here; the engine interprets it.
+
 #### `weapons.ball_friction` (optional)
 
 - Type: number
@@ -179,6 +197,57 @@ Distance (px) from ship center along ship forward axis where the ball sticks.
 - Range: `0.0..128.0`
 
 Extra distance (px) beyond `ship_radius + ball_radius` for steal detection.
+
+#### `weapons.bullet` (optional)
+
+- Type: object
+- Unknown keys are rejected.
+
+This block tunes the basic bullet firing in the deterministic sim.
+
+Bullets fire on **edge-triggered** `fire` input (press-to-fire) when the ship is **not currently holding the ball**.
+
+##### `weapons.bullet.speed` (optional)
+
+- Type: number
+- Range: `0.0..5000.0`
+
+##### `weapons.bullet.lifetime_s` (optional)
+
+- Type: number
+- Range: `0.0..10.0`
+
+Converted to integer ticks deterministically.
+
+##### `weapons.bullet.muzzle_offset` (optional)
+
+- Type: number
+- Range: `0.0..64.0`
+
+Distance (px) from ship center along ship forward axis where bullets spawn.
+
+### `ships` (optional)
+
+- Type: object
+- Keys: ship id as a **string integer** (e.g. "1")
+- Unknown keys are rejected at all levels.
+
+Per-ship overrides. Currently supported:
+
+- `ships.<ship_id>.weapons.bullet`
+
+#### `ships.<ship_id>.weapons.bullet` (optional)
+
+- Type: object
+- Unknown keys are rejected.
+
+Supported keys:
+
+- `guns` (optional): integer in range `1..8`
+- `multi_fire` (optional): boolean
+- `speed` (optional): number in range `0.0..5000.0`
+- `lifetime_s` (optional): number in range `0.0..10.0`
+- `muzzle_offset` (optional): number in range `0.0..64.0`
 
 ### `energy` (optional)
 

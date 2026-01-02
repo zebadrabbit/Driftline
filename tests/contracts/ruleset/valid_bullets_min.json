@@ -1,0 +1,14 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "weapons": {
+    "bullet": {
+      "speed": 950.0,
+      "lifetime_s": 0.8,
+      "muzzle_offset": 28.0
+    }
+  }
+}

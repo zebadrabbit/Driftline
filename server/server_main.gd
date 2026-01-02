@@ -303,7 +303,7 @@ func _on_peer_connected(peer_id: int) -> void:
 
 	# Clear buffered inputs for this ship and reset last cmd.
 	_remove_buffered_inputs_for_ship(ship_id)
-	last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(false, 0.0, false, false)
+	last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 
 	_send_welcome(peer_id, ship_id)
 
@@ -370,10 +370,11 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 			inputs_by_tick[tick] = {}
 		var tick_inputs: Dictionary = inputs_by_tick[tick]
 		tick_inputs[ship_id] = DriftTypes.DriftInputCmd.new(
-			input_dict["thrust"],
-			input_dict["turn"],
-			input_dict["fire"],
-			input_dict.get("reverse", false)
+			float(input_dict.get("thrust", 0.0)),
+			float(input_dict.get("rotation", 0.0)),
+			bool(input_dict.get("fire_primary", false)),
+			bool(input_dict.get("fire_secondary", false)),
+			bool(input_dict.get("modifier", false))
 		)
 
 		if DEBUG_NET:
@@ -397,7 +398,7 @@ func _step_authoritative_tick() -> void:
 		elif last_cmd_by_ship.has(ship_id):
 			cmd = last_cmd_by_ship[ship_id]
 		else:
-			cmd = DriftTypes.DriftInputCmd.new(false, 0.0, false, false)
+			cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 			last_cmd_by_ship[ship_id] = cmd
 
 		inputs_for_step[ship_id] = cmd
@@ -445,7 +446,8 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 		ships_array,
 		snapshot.ball_position,
 		snapshot.ball_velocity,
-		snapshot.ball_owner_id
+		snapshot.ball_owner_id,
+		snapshot.bullets
 	)
 
 	# Broadcast to all connected clients.

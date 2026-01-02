@@ -21,19 +21,21 @@ static func apply_input(
 	ship_overspeed_drag: float,
 ) -> void:
 	# Apply rotation
-	if input_cmd.turn != 0.0:
-		ship_state.rotation += input_cmd.turn * ship_turn_rate * delta
+	if input_cmd.rotation != 0.0:
+		ship_state.rotation += input_cmd.rotation * ship_turn_rate * delta
 	
 	# Forward vector from heading
 	var forward := Vector2(cos(ship_state.rotation), sin(ship_state.rotation))
 	
 	# Apply thrust or reverse thrust
 	var accel := Vector2.ZERO
-	if input_cmd.thrust:
-		accel += forward * ship_thrust_accel
-	elif input_cmd.reverse:
-		# Reverse thrust: accelerate opposite to ship forward
-		accel += (-forward) * ship_reverse_accel
+	var fwd_amt: float = maxf(0.0, input_cmd.thrust)
+	var rev_amt: float = maxf(0.0, -input_cmd.thrust)
+	if fwd_amt > 0.0:
+		accel += forward * ship_thrust_accel * fwd_amt
+	if rev_amt > 0.0:
+		# Reverse thrust: accelerate opposite to ship forward (NOT brakes)
+		accel += (-forward) * ship_reverse_accel * rev_amt
 	
 	# Semi-implicit Euler integration
 	ship_state.velocity += accel * delta

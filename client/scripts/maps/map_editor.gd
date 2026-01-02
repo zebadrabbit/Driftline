@@ -255,7 +255,7 @@ func _draw() -> void:
 		var bottom_right_world := map_canvas.to_global(Vector2((max_x + 1) * LevelIO.TILE_SIZE, (max_y + 1) * LevelIO.TILE_SIZE))
 		var rect := Rect2(to_local(top_left_world), bottom_right_world - top_left_world)
 
-		var outline_only := Input.is_key_pressed(KEY_SHIFT)
+		var outline_only := Input.is_action_pressed("drift_modifier_ability")
 		if not outline_only:
 			draw_rect(rect, Color(0.2, 0.8, 1.0, 0.15), true)
 		# Border
@@ -299,51 +299,45 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Load Map dialog blocks map editing input while visible.
 	if load_map_visible:
-		if event is InputEventKey and event.pressed and not event.echo:
-			if event.keycode == KEY_ESCAPE:
-				_hide_load_map_dialog()
-				get_viewport().set_input_as_handled()
-				return
+		if event.is_action_pressed("drift_editor_cancel"):
+			_hide_load_map_dialog()
+			get_viewport().set_input_as_handled()
+			return
 		# Let UI consume events; do not handle editor input.
 		return
 
 	# New Map dialog blocks map editing input while visible.
 	if new_map_visible:
-		if event is InputEventKey and event.pressed and not event.echo:
-			if event.keycode == KEY_ESCAPE:
-				_hide_new_map_dialog()
-				get_viewport().set_input_as_handled()
-				return
+		if event.is_action_pressed("drift_editor_cancel"):
+			_hide_new_map_dialog()
+			get_viewport().set_input_as_handled()
+			return
 		# Let UI consume events; do not handle editor input.
 		return
 
 	# Palette blocks map editing input while visible.
 	if palette_visible:
-		if event is InputEventKey and event.pressed and not event.echo:
-			if event.keycode == KEY_ESCAPE or event.keycode == KEY_Q:
-				_hide_palette()
-				get_viewport().set_input_as_handled()
-				return
+		if event.is_action_pressed("drift_editor_cancel") or event.is_action_pressed("drift_editor_toggle_palette"):
+			_hide_palette()
+			get_viewport().set_input_as_handled()
+			return
 		# Let UI consume events; do not handle editor input.
 		return
 
 	# Ctrl+N opens New Map dialog.
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.ctrl_pressed and event.keycode == KEY_N:
-			_show_new_map_dialog()
-			get_viewport().set_input_as_handled()
-			return
+	if event.is_action_pressed("drift_editor_new_map"):
+		_show_new_map_dialog()
+		get_viewport().set_input_as_handled()
+		return
 
 	# Q toggles tile palette (Shift+Q/E cycle favorites).
-	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_Q and not event.shift_pressed:
-			_show_palette()
-			get_viewport().set_input_as_handled()
-			return
+	if event.is_action_pressed("drift_editor_toggle_palette"):
+		_show_palette()
+		get_viewport().set_input_as_handled()
+		return
 
 	# Ctrl shortcuts should not trigger movement.
-	if event is InputEventKey and event.pressed and event.ctrl_pressed:
-		if event.keycode == KEY_T:
+	if event.is_action_pressed("drift_editor_cycle_tileset"):
 			_refresh_available_tilesets()
 			if _available_tilesets.is_empty():
 				_set_status("No tilesets found in res://assets/tilesets", true, 3.0)
@@ -354,52 +348,52 @@ func _unhandled_input(event: InputEvent) -> void:
 			_set_status("Tileset: %s" % _tileset_name, false, 2.0)
 			get_viewport().set_input_as_handled()
 			return
-		if event.keycode == KEY_V:
+	if event.is_action_pressed("drift_editor_paste"):
 			_paste_map_from_clipboard()
 			get_viewport().set_input_as_handled()
 			return
-		if event.keycode == KEY_S:
+	if event.is_action_pressed("drift_editor_save"):
 			_save_map()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_O:
-			if event.shift_pressed:
-				_load_latest_map()
-			else:
-				_show_load_map_dialog()
-			get_viewport().set_input_as_handled()
-			return
+	if event.is_action_pressed("drift_editor_open_latest"):
+		_load_latest_map()
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("drift_editor_open"):
+		_show_load_map_dialog()
+		get_viewport().set_input_as_handled()
+		return
 
 	# Mode toggle removed (tile-only editor).
-	if event is InputEventKey and event.pressed and not event.echo and not event.ctrl_pressed:
-		if event.keycode == KEY_T:
+	if event.is_action_pressed("drift_editor_toggle_test_mode"):
 			_toggle_test_mode()
 			get_viewport().set_input_as_handled()
 			return
 		# Zoom presets.
-		if event.keycode == KEY_1:
+	if event.is_action_pressed("drift_editor_zoom_2"):
 			editor_zoom = 2.0
 			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_2:
+	elif event.is_action_pressed("drift_editor_zoom_4"):
 			editor_zoom = 4.0
 			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_3:
+	elif event.is_action_pressed("drift_editor_zoom_8"):
 			editor_zoom = 8.0
 			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
 
-		# +/- zoom
-		if event.keycode == KEY_EQUAL or event.keycode == KEY_KP_ADD:
+	# +/- zoom
+	if event.is_action_pressed("drift_editor_zoom_in"):
 			editor_zoom = clampf(editor_zoom + 0.5, 1.0, 12.0)
 			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_MINUS or event.keycode == KEY_KP_SUBTRACT:
+	elif event.is_action_pressed("drift_editor_zoom_out"):
 			editor_zoom = clampf(editor_zoom - 0.5, 1.0, 12.0)
 			_apply_editor_zoom()
 			get_viewport().set_input_as_handled()
@@ -433,7 +427,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 
 		# Pan: MMB drag or Space+LMB drag
-		if event.button_index == MOUSE_BUTTON_MIDDLE or (event.button_index == MOUSE_BUTTON_LEFT and Input.is_key_pressed(KEY_SPACE)):
+		if event.button_index == MOUSE_BUTTON_MIDDLE or (event.button_index == MOUSE_BUTTON_LEFT and Input.is_action_pressed("drift_editor_pan_modifier")):
 			if event.pressed:
 				_panning = true
 				_pan_last_mouse = get_viewport().get_mouse_position()
@@ -462,18 +456,18 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Movement
 	var move_delta := Vector2i.ZERO
-	var speed := cursor_move_speed_fast if Input.is_key_pressed(KEY_SHIFT) else cursor_move_speed
+	var speed := cursor_move_speed_fast if Input.is_action_pressed("drift_modifier_ability") else cursor_move_speed
 	
-	if event.is_action_pressed("ui_up") or (event is InputEventKey and event.pressed and event.keycode == KEY_W and not event.ctrl_pressed):
+	if event.is_action_pressed("drift_editor_camera_up"):
 		move_delta.y -= speed
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ui_down") or (event is InputEventKey and event.pressed and event.keycode == KEY_S and not event.ctrl_pressed):
+	elif event.is_action_pressed("drift_editor_camera_down"):
 		move_delta.y += speed
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ui_left") or (event is InputEventKey and event.pressed and event.keycode == KEY_A and not event.ctrl_pressed):
+	elif event.is_action_pressed("drift_editor_camera_left"):
 		move_delta.x -= speed
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ui_right") or (event is InputEventKey and event.pressed and event.keycode == KEY_D and not event.ctrl_pressed):
+	elif event.is_action_pressed("drift_editor_camera_right"):
 		move_delta.x += speed
 		get_viewport().set_input_as_handled()
 	
@@ -487,10 +481,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		_set_cursor_cell(_get_cell_under_mouse())
 	
 	# Place tile (Space) / Rectangle fill tool (LMB drag)
-	if event.is_action_pressed("ui_accept"):
+	if event.is_action_pressed("drift_editor_place_tile"):
 		_place_tile()
 		get_viewport().set_input_as_handled()
-	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not Input.is_key_pressed(KEY_SPACE):
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not Input.is_action_pressed("drift_editor_pan_modifier"):
 		if event.pressed:
 			dragging = true
 			drag_start_cell = cursor_cell
@@ -500,33 +494,33 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			if dragging:
 				drag_end_cell = cursor_cell
-				_fill_rect(drag_start_cell, drag_end_cell, Input.is_key_pressed(KEY_SHIFT))
+				_fill_rect(drag_start_cell, drag_end_cell, Input.is_action_pressed("drift_modifier_ability"))
 				dragging = false
 				queue_redraw()
 				get_viewport().set_input_as_handled()
 	
 	# Erase tile (Backspace or RMB)
-	if not test_mode and (event.is_action_pressed("ui_cancel") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT)):
+	if not test_mode and (event.is_action_pressed("drift_editor_erase_tile") or (event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT)):
 		_erase_tile()
 		get_viewport().set_input_as_handled()
 	
 	# Cycle layer (Tab)
-	if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
+	if event.is_action_pressed("drift_editor_cycle_layer"):
 		_cycle_layer()
 		get_viewport().set_input_as_handled()
 	
 	# Cycle favorites (Q/E)
-	if event is InputEventKey and event.pressed and event.keycode == KEY_Q and event.shift_pressed:
+	if event.is_action_pressed("drift_editor_prev_favorite"):
 		_cycle_favorite(-1)
 		get_viewport().set_input_as_handled()
-	elif event is InputEventKey and event.pressed and event.keycode == KEY_E and event.shift_pressed:
+	elif event.is_action_pressed("drift_editor_next_favorite"):
 		_cycle_favorite(1)
 		get_viewport().set_input_as_handled()
 	
 	# Save/Load handled above (Ctrl+S / Ctrl+O)
 	
 	# Exit (Esc)
-	if event.is_action_pressed("ui_cancel") and not (event is InputEventMouseButton):
+	if event.is_action_pressed("drift_editor_cancel") and not (event is InputEventMouseButton):
 		_exit_editor()
 		get_viewport().set_input_as_handled()
 
@@ -1380,7 +1374,7 @@ func _save_map() -> void:
 		DisplayServer.clipboard_set(json_str)
 		print("Map saved: " + full_path)
 		print("Map JSON copied to clipboard (", json_str.length(), " chars)")
-		if Input.is_key_pressed(KEY_SHIFT):
+		if Input.is_action_pressed("drift_modifier_ability"):
 			print("----- BEGIN MAP JSON -----")
 			print(json_str)
 			print("----- END MAP JSON -----")

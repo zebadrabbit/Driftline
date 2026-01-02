@@ -167,7 +167,7 @@ func _step_one_tick() -> void:
 	if wander_time_left <= 0.0:
 		_set_new_wander_goal()
 
-	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(wander_thrust, wander_turn, false)
+	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(1.0 if wander_thrust else 0.0, wander_turn, false, false, false)
 	var next_tick: int = world.tick + 1
 
 	input_history[next_tick] = cmd
@@ -290,6 +290,9 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	var snap_tick: int = snap_dict["tick"]
 	if snap_tick <= authoritative_tick:
 		return
+	var auth_bullets: Array = []
+	if snap_dict.has("bullets") and (snap_dict.get("bullets") is Array):
+		auth_bullets = snap_dict.get("bullets")
 
 	var ships: Array = snap_dict["ships"]
 	for ship_state in ships:
@@ -297,11 +300,11 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 			authoritative_tick = snap_tick
 			authoritative_ship_state = ship_state
 			has_authoritative = true
-			_reconcile_to_authoritative_snapshot(snap_tick, ship_state)
+			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, auth_bullets)
 			break
 
 
-func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState) -> void:
+func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array) -> void:
 	var current_tick: int = world.tick
 
 	if not world.ships.has(local_ship_id):
@@ -314,13 +317,25 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 
 	world.tick = snapshot_tick
 
+	# Reset predicted bullets baseline for this bot.
+	if world != null:
+		world.bullets.clear()
+		for b in auth_bullets_for_tick:
+			if b == null:
+				continue
+			if int(b.owner_id) != local_ship_id:
+				continue
+			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick))
+		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
+		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
+
 	# If snapshot is ahead, snap forward and stop.
 	if snapshot_tick >= current_tick:
 		_prune_input_history(authoritative_tick)
 		return
 
 	for t in range(snapshot_tick + 1, current_tick + 1):
-		var cmd: DriftTypes.DriftInputCmd = input_history.get(t, DriftTypes.DriftInputCmd.new(false, 0.0, false))
+		var cmd: DriftTypes.DriftInputCmd = input_history.get(t, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world.step_tick({ local_ship_id: cmd })
 
 	_prune_input_history(authoritative_tick)

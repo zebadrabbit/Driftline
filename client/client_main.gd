@@ -80,6 +80,7 @@ var remote_tick: int = -1
 var latest_snapshot: DriftTypes.DriftWorldSnapshot
 var ball_position: Vector2 = Vector2.ZERO
 var ball_velocity: Vector2 = Vector2.ZERO
+var authoritative_bullets: Array = [] # Array[DriftTypes.DriftBulletState]
 
 # Interpolation state for remote ships and ball
 var snap_a_tick := -1
@@ -410,23 +411,18 @@ func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void
 
 
 func _collect_input_cmd() -> DriftTypes.DriftInputCmd:
-	var turn_left: float = 1.0 if Input.is_key_pressed(KEY_A) else 0.0
-	var turn_right: float = 1.0 if Input.is_key_pressed(KEY_D) else 0.0
-	var turn_axis: float = turn_right - turn_left
-
-	var thrust_pressed: bool = Input.is_key_pressed(KEY_W)
-	var reverse_pressed: bool = Input.is_key_pressed(KEY_S)
-	var fire_pressed: bool = Input.is_key_pressed(KEY_SPACE)
-
-	return DriftTypes.DriftInputCmd.new(thrust_pressed, turn_axis, fire_pressed, reverse_pressed)
+	var rotate_axis: float = Input.get_action_strength("drift_rotate_right") - Input.get_action_strength("drift_rotate_left")
+	var thrust_axis: float = Input.get_action_strength("drift_thrust_forward") - Input.get_action_strength("drift_thrust_reverse")
+	var fire_primary: bool = Input.is_action_pressed("drift_fire_primary")
+	var fire_secondary: bool = Input.is_action_pressed("drift_fire_secondary")
+	var modifier: bool = Input.is_action_pressed("drift_modifier_ability")
+	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier)
 
 
-func _unhandled_input(event):
-	if event.is_action_pressed("toggle_online_mode"):
-		var ship = get_node_or_null("PATH/TO/YOUR/SHIP") # adjust path
-		if ship:
-			ship.online_mode = !ship.online_mode
-			print("Ship online_mode:", ship.online_mode)
+func _unhandled_input(_event):
+	# Intentionally empty: gameplay input is collected via _collect_input_cmd().
+	# UI inputs are handled in _input().
+	return
 
 
 func _draw() -> void:
@@ -538,6 +534,7 @@ func _draw() -> void:
 
 	# Local ship (predicted)
 	_draw_ship_triangle(ship_state)
+	_draw_bullets()
 	
 	# ⚠️ ALWAYS VISIBLE: Draw username and bounty for local ship (blue sprite font)
 	# This element must never be hidden or removed.
@@ -568,6 +565,33 @@ func _draw_ball_at(pos: Vector2) -> void:
 	var radius := 6.0
 	draw_circle(pos, radius, color)
 	draw_circle(pos, radius, outline, 2.0)
+
+
+func _draw_bullets() -> void:
+	# Remote bullets: authoritative snapshots.
+	for b in authoritative_bullets:
+		if b == null:
+			continue
+		if local_ship_id >= 0 and int(b.owner_id) == local_ship_id:
+			continue
+		_draw_bullet_at(Vector2(b.position.x, b.position.y))
+
+	# Local bullets: predicted world state (shows shots immediately).
+	if local_ship_id >= 0 and world != null and typeof(world.bullets) == TYPE_DICTIONARY:
+		var ids: Array = world.bullets.keys()
+		ids.sort()
+		for bid in ids:
+			var pb = world.bullets.get(bid)
+			if pb == null:
+				continue
+			if int(pb.owner_id) != local_ship_id:
+				continue
+			_draw_bullet_at(Vector2(pb.position.x, pb.position.y))
+
+
+func _draw_bullet_at(pos: Vector2) -> void:
+	# Simple, readable bullet marker.
+	draw_circle(pos, 2.5, Color(0.95, 0.95, 1.0, 0.9))
 
 func _draw_ball() -> void:
 	# Draw the authoritative ball from the latest snapshot
@@ -772,20 +796,20 @@ func _draw_connection_ui() -> void:
 
 func _input(event: InputEvent) -> void:
 	# In-game ESC menu toggle (does not pause the sim)
-	if not show_connect_ui and event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_ESCAPE:
+	if not show_connect_ui:
+		if event.is_action_pressed("drift_toggle_pause_menu"):
 			_set_pause_menu_visible(not pause_menu_visible)
 			get_viewport().set_input_as_handled()
 			return
 
-	if show_connect_ui and event is InputEventKey and event.pressed:
-		if event.keycode == KEY_ENTER:
+	if show_connect_ui:
+		if event.is_action_pressed("drift_menu_connect"):
 			_attempt_server_connection()
-		elif event.keycode == KEY_O:
+		elif event.is_action_pressed("drift_menu_offline"):
 			_start_offline_mode()
-		elif event.keycode == KEY_M:
+		elif event.is_action_pressed("drift_open_map_editor"):
 			_open_map_editor()
-		elif event.keycode == KEY_T:
+		elif event.is_action_pressed("drift_open_tilemap_editor"):
 			_open_tilemap_editor()
 
 
@@ -1162,6 +1186,14 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	snap_b_ships = {}
 
 	var ships: Array = snap_dict["ships"]
+	# Authoritative bullets (render remote bullets; local bullets are predicted).
+	authoritative_bullets.clear()
+	if snap_dict.has("bullets") and (snap_dict.get("bullets") is Array):
+		var bs: Array = snap_dict.get("bullets")
+		for b in bs:
+			if b == null:
+				continue
+			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick)))
 	# Track remote ships
 	remote_ships.clear()
 	for ship_state in ships:
@@ -1175,7 +1207,7 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				ship_state.velocity,
 				ship_state.rotation
 			)
-			_reconcile_to_authoritative_snapshot(snap_tick, ship_state)
+			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets)
 		else:
 			# Store a deep copy for remote rendering
 			var state_copy = DriftTypes.DriftShipState.new(
@@ -1201,7 +1233,7 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		ball_velocity = Vector2.ZERO
 
 
-func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState) -> void:
+func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array) -> void:
 	# If the snapshot tick is ahead of our current tick (e.g. after reconnect),
 	# snap to the authoritative tick/state and continue from there.
 	var current_tick: int = world.tick
@@ -1221,6 +1253,19 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	# 2) Rewind/snap world.tick to the snapshot tick.
 	world.tick = snapshot_tick
 
+	# Reset predicted bullets to the authoritative baseline for the LOCAL player.
+	if world != null:
+		world.bullets.clear()
+		for b in auth_bullets_for_tick:
+			if b == null:
+				continue
+			if int(b.owner_id) != local_ship_id:
+				continue
+			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick))
+		# Ensure edge-triggered fire state matches the snapshot baseline.
+		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
+		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
+
 	# If we're snapping forward (snapshot_tick >= previous current_tick), no replay is needed.
 	if snapshot_tick >= current_tick:
 		latest_snapshot = _build_snapshot_from_current_world()
@@ -1231,7 +1276,7 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	# 3) Replay stored inputs from snapshot_tick+1 up to the original current_tick.
 	var replay_snapshot: DriftTypes.DriftWorldSnapshot = DriftTypes.DriftWorldSnapshot.new(world.tick, {})
 	for t in range(snapshot_tick + 1, current_tick + 1):
-		var cmd: DriftTypes.DriftInputCmd = input_history.get(t, DriftTypes.DriftInputCmd.new(false, 0.0, false, false))
+		var cmd: DriftTypes.DriftInputCmd = input_history.get(t, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		replay_snapshot = world.step_tick({ local_ship_id: cmd })
 
 	# After replay, world.tick should equal current_tick again.
@@ -1256,7 +1301,19 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 	var state: DriftTypes.DriftShipState = world.ships.get(local_ship_id)
 	if state != null:
 		ships_dict[local_ship_id] = DriftTypes.DriftShipState.new(state.id, state.position, state.velocity, state.rotation, state.username, state.bounty)
-	return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict)
+	# Include predicted local bullets for debug/prediction.
+	var local_bullets: Array = []
+	if world != null and typeof(world.bullets) == TYPE_DICTIONARY:
+		var ids: Array = world.bullets.keys()
+		ids.sort()
+		for bid in ids:
+			var b = world.bullets.get(bid)
+			if b == null:
+				continue
+			if int(b.owner_id) != local_ship_id:
+				continue
+			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick)))
+	return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict, Vector2.ZERO, Vector2.ZERO, -1, local_bullets)
 
 
 func _prune_input_history(upto_tick_inclusive: int) -> void:

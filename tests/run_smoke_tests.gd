@@ -16,9 +16,113 @@ var _ran: int = 0
 
 
 func _initialize() -> void:
+	_test_controls_actions_present()
+	_test_controls_default_bindings_wasd()
+	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_controls_actions_present() -> void:
+	_ran += 1
+	var required := [
+		"drift_thrust_forward",
+		"drift_thrust_reverse",
+		"drift_rotate_left",
+		"drift_rotate_right",
+		"drift_fire_primary",
+		"drift_fire_secondary",
+		"drift_modifier_ability",
+	]
+	for a in required:
+		if not InputMap.has_action(a):
+			_fail("controls_actions_present (missing action: %s)" % a)
+			return
+	_pass("controls_actions_present")
+
+
+func _test_controls_default_bindings_wasd() -> void:
+	_ran += 1
+	# Strict default bindings (WASD). These are project defaults, not user remaps.
+	# physical_keycode values:
+	#   W=87, A=65, S=83, D=68
+	var expected := {
+		"drift_thrust_forward": 87,
+		"drift_thrust_reverse": 83,
+		"drift_rotate_left": 65,
+		"drift_rotate_right": 68,
+	}
+	for action_name in expected.keys():
+		var events: Array = InputMap.action_get_events(StringName(action_name))
+		if events.size() != 1:
+			_fail("controls_default_bindings_wasd (action %s expected exactly 1 event, got %d)" % [action_name, events.size()])
+			return
+		var ev = events[0]
+		if not (ev is InputEventKey):
+			_fail("controls_default_bindings_wasd (action %s event is not InputEventKey)" % action_name)
+			return
+		var k := ev as InputEventKey
+		if int(k.physical_keycode) != int(expected[action_name]):
+			_fail("controls_default_bindings_wasd (action %s physical_keycode=%d expected %d)" % [action_name, int(k.physical_keycode), int(expected[action_name])])
+			return
+		# Must not require modifiers.
+		if k.shift_pressed or k.ctrl_pressed or k.alt_pressed or k.meta_pressed:
+			_fail("controls_default_bindings_wasd (action %s unexpectedly requires modifiers)" % action_name)
+			return
+	_pass("controls_default_bindings_wasd")
+
+
+func _test_no_hardcoded_keys_in_gameplay() -> void:
+	_ran += 1
+	# Enforcement hammer: fail if hardcoded key checks or default ui_* actions creep into gameplay code.
+	# We scan gameplay-relevant folders only.
+	var scan_roots := [
+		"res://client",
+		"res://shared",
+		"res://server",
+	]
+	var allowlist := {
+		# Designated input layer.
+		"res://client/client_main.gd": true,
+	}
+	var needles := [
+		"Input.is_key_pressed(",
+		"KEY_",
+		"\"ui_left\"",
+		"\"ui_right\"",
+		"\"ui_up\"",
+		"\"ui_down\"",
+		"'ui_left'",
+		"'ui_right'",
+		"'ui_up'",
+		"'ui_down'",
+	]
+	var files: Array = []
+	for r in scan_roots:
+		_collect_gd_files(r, files)
+	files.sort()
+	for p in files:
+		var path: String = String(p)
+		if allowlist.has(path):
+			continue
+		var text := FileAccess.get_file_as_string(path)
+		for n in needles:
+			if text.find(String(n)) != -1:
+				_fail("no_hardcoded_keys_in_gameplay (found %s in %s)" % [String(n), path])
+				return
+	_pass("no_hardcoded_keys_in_gameplay")
+
+
+func _collect_gd_files(root: String, out_files: Array) -> void:
+	var dir := DirAccess.open(root)
+	if dir == null:
+		return
+	for sub in dir.get_directories():
+		_collect_gd_files(root.path_join(sub), out_files)
+	for f in dir.get_files():
+		if String(f).ends_with(".gd"):
+			out_files.append(root.path_join(f))
 
 
 func _test_welcome_includes_ruleset_payload() -> void:

@@ -6,6 +6,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Startup banner (printed before any other logs).
+Write-Host '#    _________      ___________________________             '
+Write-Host '#    ______  /_________(_)__  __/_  /___  /__(_)___________ '
+Write-Host '#    _  __  /__  ___/_  /__  /_ _  __/_  /__  /__  __ \  _ \' 
+Write-Host '#    / /_/ / _  /   _  / _  __/ / /_ _  / _  / _  / / /  __/'
+Write-Host '#    \__,_/  /_/    /_/  /_/    \__/ /_/  /_/  /_/ /_/\___/ '
+Write-Host '#'
+
 function Resolve-ProjectRoot {
 	if ($ProjectRoot -and $ProjectRoot.Trim() -ne "") {
 		return (Resolve-Path $ProjectRoot).Path
@@ -82,7 +90,7 @@ $script:serverProc = $null
 $script:ctrlCCount = 0
 
 $handler = [ConsoleCancelEventHandler]{
-	param($sender, $e)
+	param($src, $e)
 	$script:ctrlCCount++
 	Write-Host "`n[run_server] Ctrl+C received (x$script:ctrlCCount). Requesting graceful shutdown..." -ForegroundColor Yellow
 	try {

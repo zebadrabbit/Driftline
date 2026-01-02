@@ -34,8 +34,8 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Open map editor (F10)
-	if event is InputEventKey and event.pressed and event.keycode == KEY_F10:
+	# Open map editor (InputMap)
+	if event.is_action_pressed(&"drift_open_map_editor"):
 		get_viewport().set_input_as_handled()
 		get_tree().change_scene_to_file("res://client/scenes/editor/MapEditor.tscn")
 		return
@@ -86,28 +86,22 @@ func _on_ship_stats_changed(speed: float, heading_deg: float, energy: float) -> 
 
 
 func _ensure_input_actions() -> void:
-	# Creates actions/bindings if they don't exist.
-	# You can still configure these in Project Settings -> Input Map; this just makes the scene runnable instantly.
-	_ensure_action_key(&"thrust", [KEY_W, KEY_UP])
-	_ensure_action_key(&"brake", [KEY_S, KEY_DOWN])
-	_ensure_action_key(&"turn_left", [KEY_A, KEY_LEFT])
-	_ensure_action_key(&"turn_right", [KEY_D, KEY_RIGHT])
-	_ensure_action_key(&"afterburner", [KEY_SHIFT])
-	_ensure_action_key(&"toggle_dampening", [KEY_SPACE])
+	# Ensure required Driftline actions exist.
+	# Default bindings are configured in Project Settings -> Input Map.
+	for action in [
+		&"drift_thrust_forward",
+		&"drift_thrust_reverse",
+		&"drift_rotate_left",
+		&"drift_rotate_right",
+		&"drift_fire_primary",
+		&"drift_fire_secondary",
+		&"drift_modifier_ability",
+	]:
+		if not InputMap.has_action(action):
+			InputMap.add_action(action)
 
 
-func _ensure_action_key(action: StringName, keycodes: Array[int]) -> void:
-	if not InputMap.has_action(action):
-		InputMap.add_action(action)
 
-	# Only add events if there are none (don't duplicate if user already configured it).
-	if InputMap.action_get_events(action).size() > 0:
-		return
-
-	for kc in keycodes:
-		var ev := InputEventKey.new()
-		ev.physical_keycode = kc
-		InputMap.action_add_event(action, ev)
 
 
 func _load_default_map() -> void:
