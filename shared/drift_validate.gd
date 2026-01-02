@@ -11,11 +11,13 @@ const FORMAT_TILESET_MANIFEST := "driftline.tileset"
 const FORMAT_TILES_DEF := "driftline.tiles_def"
 const FORMAT_MAP := "driftline.map"
 const FORMAT_SERVER_CONFIG := "driftline.server_config"
+const FORMAT_RULESET := "driftline.ruleset"
 
 const SCHEMA_TILESET_MANIFEST := 1
 const SCHEMA_TILES_DEF := 1
 const SCHEMA_MAP := 1
-const SCHEMA_SERVER_CONFIG := 1
+const SCHEMA_SERVER_CONFIG := 2
+const SCHEMA_RULESET := 1
 
 const TILE_SIZE := 16
 
@@ -453,17 +455,25 @@ static func validate_server_config(root: Dictionary) -> Dictionary:
 	# Strict shape.
 	for k in root.keys():
 		var key := String(k)
-		if key not in ["format", "schema_version", "default_map", "default_tileset"]:
+		if key not in ["format", "schema_version", "default_map", "default_tileset", "ruleset"]:
 			errors.append(_err("server_config", "unknown top-level key '%s'" % key))
 
 	if not root.has("default_map"):
 		errors.append(_err("server_config", "missing required field 'default_map'"))
+	if not root.has("ruleset"):
+		errors.append(_err("server_config", "missing required field 'ruleset'"))
 
 	var default_map := _require_string(root.get("default_map"), "server_config.default_map", errors).strip_edges()
 	if default_map == "":
 		errors.append(_err("server_config.default_map", "must be non-empty"))
 	elif not (default_map.begins_with("res://") or default_map.begins_with("user://")):
 		errors.append(_err("server_config.default_map", "must start with res:// or user://"))
+
+	var ruleset_path := _require_string(root.get("ruleset"), "server_config.ruleset", errors).strip_edges()
+	if ruleset_path == "":
+		errors.append(_err("server_config.ruleset", "must be non-empty"))
+	elif not (ruleset_path.begins_with("res://") or ruleset_path.begins_with("user://")):
+		errors.append(_err("server_config.ruleset", "must start with res:// or user://"))
 
 	var default_tileset := ""
 	var has_tileset := root.has("default_tileset")
@@ -478,6 +488,7 @@ static func validate_server_config(root: Dictionary) -> Dictionary:
 		"format": FORMAT_SERVER_CONFIG,
 		"schema_version": SCHEMA_SERVER_CONFIG,
 		"default_map": default_map,
+		"ruleset": ruleset_path,
 	}
 	if has_tileset:
 		canonical["default_tileset"] = default_tileset
@@ -488,6 +499,63 @@ static func validate_server_config(root: Dictionary) -> Dictionary:
 		"warnings": warnings,
 		"server_config": canonical,
 	}
+
+
+static func validate_ruleset(root: Dictionary) -> Dictionary:
+	var errors: Array[String] = []
+	var warnings: Array[String] = []
+	errors.append_array(validate_header(root, FORMAT_RULESET, SCHEMA_RULESET, "ruleset"))
+
+	# Strict top-level shape.
+	for k in root.keys():
+		var key := String(k)
+		if key not in ["format", "schema_version", "physics"]:
+			errors.append(_err("ruleset", "unknown top-level key '%s'" % key))
+
+	var physics := _require_dict(root.get("physics"), "ruleset.physics", errors)
+	for pk in physics.keys():
+		var pks := String(pk)
+		if pks != "wall_restitution":
+			errors.append(_err("ruleset.physics", "unknown key '%s'" % pks))
+
+	var wall_rest: float = 0.0
+	if not physics.has("wall_restitution"):
+		errors.append(_err("ruleset.physics", "missing required field 'wall_restitution'"))
+	else:
+		var tv := typeof(physics.get("wall_restitution"))
+		if tv not in [TYPE_INT, TYPE_FLOAT]:
+			errors.append(_err("ruleset.physics.wall_restitution", "must be a number"))
+		else:
+			wall_rest = float(physics.get("wall_restitution"))
+			if wall_rest < 0.0 or wall_rest > 2.0:
+				errors.append(_err("ruleset.physics.wall_restitution", "must be in range 0.0..2.0"))
+
+	var canonical := {
+		"format": FORMAT_RULESET,
+		"schema_version": SCHEMA_RULESET,
+		"physics": {
+			"wall_restitution": wall_rest,
+		},
+	}
+
+	return {
+		"ok": errors.is_empty(),
+		"errors": errors,
+		"warnings": warnings,
+		"ruleset": canonical,
+	}
+
+
+static func validate_ruleset_dict(d: Dictionary) -> Dictionary:
+	# Minimal wrapper for headless contract tests.
+	# Returns: { ok: bool, error?: String }
+	var res := validate_ruleset(d)
+	if bool(res.get("ok", false)):
+		return {"ok": true}
+	var err_text := "ruleset validation failed"
+	for e in (res.get("errors", []) as Array):
+		err_text += "\n - " + String(e)
+	return {"ok": false, "error": err_text}
 
 
 static func validate_server_config_dict(cfg: Dictionary) -> Dictionary:

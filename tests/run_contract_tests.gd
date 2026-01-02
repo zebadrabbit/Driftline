@@ -108,6 +108,10 @@ func _run_one(path: String) -> void:
 		var res := DriftValidate.validate_tiles_def_dict(root)
 		_assert_expectation(filename, bool(res.get("ok", false)), String(res.get("error", "")), expect_ok)
 		return
+	if contract == "ruleset":
+		var res := DriftValidate.validate_ruleset_dict(root)
+		_assert_expectation(filename, bool(res.get("ok", false)), String(res.get("error", "")), expect_ok)
+		return
 
 	_fail("%s (unknown contract folder '%s' for %s)" % [filename, contract, rel])
 

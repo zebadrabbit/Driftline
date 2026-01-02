@@ -1,0 +1,7 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 3.0
+  }
+}

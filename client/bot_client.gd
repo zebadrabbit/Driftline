@@ -227,6 +227,9 @@ func _poll_network_packets() -> void:
 				authoritative_tick = -1
 				authoritative_ship_state = null
 				has_authoritative = false
+				var wr: float = float(w.get("wall_restitution", -1.0))
+				if wr >= 0.0:
+					world.wall_restitution = wr
 			continue
 
 		if pkt_type == DriftNet.PKT_SNAPSHOT:

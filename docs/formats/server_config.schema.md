@@ -3,7 +3,7 @@
 This document specifies the **server boot configuration contract** used by Driftline.
 
 - Format identity: `"driftline.server_config"`
-- Schema version: `1`
+- Schema version: `2`
 
 This file is consumed by the headless server bootstrap to decide which map to load at startup.
 
@@ -29,8 +29,9 @@ Top-level object:
 ```json
 {
   "format": "driftline.server_config",
-  "schema_version": 1,
+  "schema_version": 2,
   "default_map": "res://maps/default.json",
+  "ruleset": "res://rulesets/base.json",
   "default_tileset": "res://assets/tilesets/subspace_base/tileset.json"
 }
 ```
@@ -43,7 +44,7 @@ Top-level object:
 ### `schema_version` (required)
 
 - Type: integer
-- Must equal `1`
+- Must equal `2`
 
 ### `default_map` (required)
 
@@ -52,6 +53,14 @@ Top-level object:
 - Must be a Godot resource path starting with `res://` or `user://`.
 
 The server loads this map on startup. If the map is missing, invalid JSON, or fails map validation, startup aborts.
+
+### `ruleset` (required)
+
+- Type: string
+- Must be non-empty.
+- Must be a Godot resource path starting with `res://` or `user://`.
+
+The server loads this ruleset on startup. If the ruleset is missing, invalid JSON, or fails ruleset validation, startup aborts.
 
 ### `default_tileset` (optional)
 

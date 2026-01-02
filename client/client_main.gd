@@ -1049,6 +1049,10 @@ func _poll_network_packets() -> void:
 					return
 
 				local_ship_id = w["ship_id"]
+				# Authoritative rules (must match server for prediction).
+				var wr: float = float(w.get("wall_restitution", -1.0))
+				if wr >= 0.0:
+					world.wall_restitution = wr
 				if DEBUG_NET:
 					print("[NET] assigned ship_id=", local_ship_id)
 				# Reset local baseline.

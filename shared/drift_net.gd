@@ -121,7 +121,7 @@ static func pack_snapshot_packet(tick: int, ships: Array, ball_pos: Vector2 = Ve
 	return buffer.data_array
 
 
-static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray(), map_path: String = "", map_version: int = 0) -> PackedByteArray:
+static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = PackedByteArray(), map_path: String = "", map_version: int = 0, wall_restitution: float = -1.0) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
 
@@ -158,6 +158,12 @@ static func pack_welcome_packet(ship_id: int, map_checksum: PackedByteArray = Pa
 			buffer.put_u8(int(path_utf8[i]))
 	buffer.put_32(map_version)
 
+	# Ruleset extension (optional trailing fields; read only if present).
+	#   f32 wall_restitution
+	# If the caller supplies a negative value, omit the field.
+	if wall_restitution >= 0.0:
+		buffer.put_float(wall_restitution)
+
 	return buffer.data_array
 
 
@@ -179,6 +185,7 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 	var checksum: PackedByteArray = PackedByteArray()
 	var map_path: String = ""
 	var map_version: int = 0
+	var wall_restitution: float = -1.0
 	# Backward compatible: checksum field may be absent.
 	if bytes.size() >= (1 + 4 + 1):
 		var checksum_len: int = int(buffer.get_u8())
@@ -200,12 +207,16 @@ static func unpack_welcome_packet(bytes: PackedByteArray) -> Dictionary:
 		# map_version is optional; only read if present.
 		if buffer.get_available_bytes() >= 4:
 			map_version = int(buffer.get_32())
+		# wall_restitution is optional; only read if present.
+		if buffer.get_available_bytes() >= 4:
+			wall_restitution = float(buffer.get_float())
 	return {
 		"type": pkt_type,
 		"ship_id": ship_id,
 		"map_checksum": checksum,
 		"map_path": map_path,
 		"map_version": map_version,
+		"wall_restitution": wall_restitution,
 	}
 
 

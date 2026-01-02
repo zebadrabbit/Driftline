@@ -1,0 +1,5 @@
+{
+  "format": "driftline.server_config",
+  "schema_version": 2,
+  "default_map": "res://maps/default.json"
+}
