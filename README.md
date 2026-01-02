@@ -146,6 +146,20 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Server spawn locations can come from map `entities` with `type="spawn"`.
 - Wall-bounce sound is triggered from shared collision events (client-side audio).
 
+## Prizes (Server Authoritative)
+
+Driftline includes server-authoritative "greens" (prizes): spawn/despawn/pickup are
+deterministic on the server and replicated to clients via snapshots.
+
+Config lives in `server.cfg`:
+
+- `[Prize]`: spawn timing and limits (seconds; converted to ticks on load)
+- `[PrizeWeight]`: relative probability weights per prize kind
+
+Config precedence is layered (defaults then overrides): `res://server.cfg` then `user://server.cfg`.
+
+On pickup, the client plays `res://client/audio/prize.wav`.
+
 ## License
 
 No license specified yet. Add one if/when you want to open-source the project.

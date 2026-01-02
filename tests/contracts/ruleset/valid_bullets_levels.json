@@ -1,0 +1,39 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "weapons": {
+    "bullet": {
+      "speed": 900.0,
+      "lifetime_s": 1.0,
+      "muzzle_offset": 30.0,
+      "levels": {
+        "1": {
+          "guns": 1
+        },
+        "2": {
+          "guns": 2
+        },
+        "3": {
+          "guns": 3,
+          "multi_fire": true,
+          "bounces": 1,
+          "bounce_restitution": 1.0
+        }
+      }
+    }
+  },
+  "ships": {
+    "1": {
+      "weapons": {
+        "bullet": {
+          "level": 3,
+          "multishot": true,
+          "bounce": true
+        }
+      }
+    }
+  }
+}

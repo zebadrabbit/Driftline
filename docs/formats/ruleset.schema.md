@@ -44,13 +44,23 @@ Top-level object:
     "bullet": {
       "speed": 950.0,
       "lifetime_s": 0.8,
-      "muzzle_offset": 28.0
+      "muzzle_offset": 28.0,
+      "bounces": 1,
+      "bounce_restitution": 1.0,
+      "levels": {
+        "1": { "guns": 1 },
+        "2": { "guns": 2 },
+        "3": { "guns": 3, "multi_fire": true, "bounces": 1 }
+      }
     }
   },
   "ships": {
     "1": {
       "weapons": {
         "bullet": {
+          "level": 3,
+          "multishot": true,
+          "bounce": true,
           "guns": 3,
           "multi_fire": true,
           "speed": 1200.0
@@ -226,6 +236,28 @@ Converted to integer ticks deterministically.
 
 Distance (px) from ship center along ship forward axis where bullets spawn.
 
+##### `weapons.bullet.bounces` (optional)
+
+- Type: integer
+- Range: `0..16`
+
+Number of wall bounces a bullet is allowed before it is destroyed.
+
+##### `weapons.bullet.bounce_restitution` (optional)
+
+- Type: number
+- Range: `0.0..2.0`
+
+Restitution applied to the normal component of bullet velocity on wall bounce.
+
+##### `weapons.bullet.levels` (optional)
+
+- Type: object
+- Keys: level as a **string integer** (`"1"`, `"2"`, `"3"`)
+- Unknown keys are rejected at all levels.
+
+Per-level bullet profiles. Each level object supports the same tuning keys as per-ship bullet overrides (see below), plus `bounces` and `bounce_restitution`.
+
 ### `ships` (optional)
 
 - Type: object
@@ -243,11 +275,16 @@ Per-ship overrides. Currently supported:
 
 Supported keys:
 
+- `level` (optional): integer in range `1..3`
+- `multishot` (optional): boolean (forces `multi_fire = true`)
+- `bounce` (optional): boolean (forces `bounces >= 1`)
 - `guns` (optional): integer in range `1..8`
 - `multi_fire` (optional): boolean
 - `speed` (optional): number in range `0.0..5000.0`
 - `lifetime_s` (optional): number in range `0.0..10.0`
 - `muzzle_offset` (optional): number in range `0.0..64.0`
+- `bounces` (optional): integer in range `0..16`
+- `bounce_restitution` (optional): number in range `0.0..2.0`
 
 ### `energy` (optional)
 

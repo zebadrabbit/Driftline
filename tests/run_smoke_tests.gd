@@ -10,6 +10,8 @@ extends SceneTree
 const DriftNet = preload("res://shared/drift_net.gd")
 const DriftRuleset = preload("res://shared/drift_ruleset.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
+const DriftWorld = preload("res://shared/drift_world.gd")
+const DriftTypes = preload("res://shared/drift_types.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -21,6 +23,7 @@ func _initialize() -> void:
 	_test_controls_weapon_defaults_present()
 	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
+	_test_prizes_spawn_walkable()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -201,6 +204,56 @@ func _test_welcome_includes_ruleset_payload() -> void:
 		return
 
 	_pass("welcome_ruleset_payload")
+
+
+func _test_prizes_spawn_walkable() -> void:
+	_ran += 1
+	var world := DriftWorld.new()
+	# Simple empty map with boundary walls.
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(32, 32)
+	world.set_map_dimensions(32, 32)
+
+	# Deterministic prize config in ticks.
+	var cfg := {
+		"prize_delay_ticks": 1,
+		"prize_hide_count": 2,
+		"prize_min_exist_ticks": 10,
+		"prize_max_exist_ticks": 10,
+		"prize_negative_factor": 0,
+		"death_prize_time_ticks": 10,
+		"multi_prize_count": 2,
+		"engine_shutdown_time_ticks": 5,
+		"minimum_virtual": 0,
+		"upgrade_virtual": 0,
+	}
+	var weights := {
+		"Gun": 10,
+		"Bomb": 5,
+		"MultiFire": 5,
+		"BouncingBullets": 5,
+		"MultiPrize": 2,
+	}
+	world.apply_prize_config(cfg, weights)
+	world.set_prize_rng_seed(12345)
+
+	# Step one tick with prize processing; should spawn.
+	var snap: DriftTypes.DriftWorldSnapshot = world.step_tick({}, true, 1)
+	if snap == null:
+		_fail("prizes_spawn_walkable (snapshot null)")
+		return
+	if snap.prizes.size() != 2:
+		_fail("prizes_spawn_walkable (expected 2 prizes, got %d)" % snap.prizes.size())
+		return
+	for p in snap.prizes:
+		if p == null:
+			_fail("prizes_spawn_walkable (null prize in snapshot)")
+			return
+		if world.is_position_blocked(p.pos, 6.0):
+			_fail("prizes_spawn_walkable (prize spawned in blocked position)")
+			return
+	_pass("prizes_spawn_walkable")
 
 
 func _pass(name: String) -> void:

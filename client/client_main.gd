@@ -25,6 +25,13 @@ const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
 
+const PRIZE_TEX: Texture2D = preload("res://client/graphics/entities/prizes.png")
+const PRIZE_FRAME_PX: int = 16
+const PRIZE_FRAME_COUNT: int = 10
+const PRIZE_ANIM_FPS: float = 12.0
+const PRIZE_DRAW_SCALE: float = 1.5
+const PRIZE_PICKUP_SFX_PATH: String = "res://client/audio/prize.wav"
+
 const VELOCITY_DRAW_SCALE: float = 0.10
 
 const SERVER_HOST: String = "127.0.0.1"
@@ -59,6 +66,8 @@ var pause_menu_panel: Panel
 var _last_bounce_time_s: float = -999.0
 @onready var _bounce_audio: AudioStreamPlayer = get_node_or_null("BounceAudio")
 
+var _prize_audio: AudioStreamPlayer = null
+
 var world: DriftWorld
 
 var client_map_checksum: PackedByteArray = PackedByteArray()
@@ -81,6 +90,7 @@ var latest_snapshot: DriftTypes.DriftWorldSnapshot
 var ball_position: Vector2 = Vector2.ZERO
 var ball_velocity: Vector2 = Vector2.ZERO
 var authoritative_bullets: Array = [] # Array[DriftTypes.DriftBulletState]
+var authoritative_prizes: Array = [] # Array[DriftTypes.DriftPrizeState]
 
 # Interpolation state for remote ships and ball
 var snap_a_tick := -1
@@ -148,6 +158,14 @@ func _ready() -> void:
 	# Prime snapshot so _draw() has something immediately.
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
 	queue_redraw()
+
+	# Prize pickup SFX (client-side). Created programmatically to avoid scene edits.
+	_prize_audio = AudioStreamPlayer.new()
+	_prize_audio.name = "PrizeAudio"
+	var sfx = load(PRIZE_PICKUP_SFX_PATH)
+	if sfx is AudioStream:
+		_prize_audio.stream = sfx
+	add_child(_prize_audio)
 
 	# Optional: unlimited redraw rate for testing
 	Engine.max_fps = 0
@@ -335,6 +353,10 @@ func _process(delta: float) -> void:
 					name_value = String(s.username)
 				bounty_value = int(s.bounty)
 		hud.call("set_values", name_value, bounty_value, 0, local_ship_id)
+		if hud.has_method("set_ship_stats") and latest_snapshot != null and latest_snapshot.ships.has(local_ship_id):
+			var ss = latest_snapshot.ships.get(local_ship_id)
+			if ss != null:
+				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ss.energy))
 
 
 func _latest_tick_step() -> void:
@@ -534,6 +556,7 @@ func _draw() -> void:
 
 	# Local ship (predicted)
 	_draw_ship_triangle(ship_state)
+	_draw_prizes()
 	_draw_bullets()
 	
 	# ⚠️ ALWAYS VISIBLE: Draw username and bounty for local ship (blue sprite font)
@@ -592,6 +615,48 @@ func _draw_bullets() -> void:
 func _draw_bullet_at(pos: Vector2) -> void:
 	# Simple, readable bullet marker.
 	draw_circle(pos, 2.5, Color(0.95, 0.95, 1.0, 0.9))
+
+
+func _draw_prizes() -> void:
+	for p in authoritative_prizes:
+		if p == null:
+			continue
+		_draw_prize_at(int(p.id), Vector2(p.pos.x, p.pos.y), int(p.kind), bool(p.is_negative), bool(p.is_death_drop))
+
+
+func _draw_prize_at(prize_id: int, pos: Vector2, _kind: int, is_negative: bool, is_death_drop: bool) -> void:
+	# Sprite sheet: 10 frames, each 16x16, rotating animation.
+	# We do not currently vary icon by kind; this is the classic rotating green.
+	if PRIZE_TEX == null:
+		# Fallback: draw simple marker.
+		draw_circle(pos, 6.0, Color(0.35, 1.0, 0.55, 0.95))
+		return
+
+	var tex_w := int(PRIZE_TEX.get_width())
+	var tex_h := int(PRIZE_TEX.get_height())
+	if tex_w <= 0 or tex_h <= 0:
+		return
+	var cols := maxi(1, tex_w / PRIZE_FRAME_PX)
+	var rows := maxi(1, tex_h / PRIZE_FRAME_PX)
+
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	# Per-prize phase offset so they don't animate in lockstep.
+	var frame: int = int(floor(t_s * PRIZE_ANIM_FPS) + (prize_id * 3)) % PRIZE_FRAME_COUNT
+	var col: int = frame % cols
+	var row: int = (frame / cols) % rows
+	var src := Rect2(float(col * PRIZE_FRAME_PX), float(row * PRIZE_FRAME_PX), float(PRIZE_FRAME_PX), float(PRIZE_FRAME_PX))
+
+	var size := Vector2(float(PRIZE_FRAME_PX), float(PRIZE_FRAME_PX)) * PRIZE_DRAW_SCALE
+	var dst := Rect2(pos - size * 0.5, size)
+
+	var modulate := Color(1.0, 1.0, 1.0, 1.0)
+	if is_negative:
+		modulate = modulate.darkened(0.55)
+	if is_death_drop:
+		# Slight boost so death drops pop.
+		modulate = modulate.lightened(0.25)
+
+	draw_texture_rect_region(PRIZE_TEX, dst, src, modulate)
 
 func _draw_ball() -> void:
 	# Draw the authoritative ball from the latest snapshot
@@ -1125,6 +1190,15 @@ func _poll_network_packets() -> void:
 				has_authoritative = false
 			continue
 
+		if pkt_type == DriftNet.PKT_PRIZE_EVENT:
+			var ev: Dictionary = DriftNet.unpack_prize_event_packet(bytes)
+			if ev.is_empty():
+				continue
+			if int(ev.get("event_type", 0)) == DriftNet.PRIZE_EVENT_PICKUP and int(ev.get("ship_id", -1)) == local_ship_id:
+				if _prize_audio != null and _prize_audio.stream != null:
+					_prize_audio.play()
+				continue
+
 		if pkt_type == DriftNet.PKT_SNAPSHOT:
 			var snap_dict: Dictionary = DriftNet.unpack_snapshot_packet(bytes)
 			if snap_dict.is_empty():
@@ -1186,6 +1260,17 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	snap_b_ships = {}
 
 	var ships: Array = snap_dict["ships"]
+	# Prize pickup SFX: driven by authoritative prize_events when present.
+	if _prize_audio != null and snap_dict.has("prize_events") and (snap_dict.get("prize_events") is Array):
+		for ev in (snap_dict.get("prize_events") as Array):
+			if ev == null or typeof(ev) != TYPE_DICTIONARY:
+				continue
+			var d: Dictionary = ev
+			if String(d.get("type", "")) != "pickup":
+				continue
+			if int(d.get("ship_id", -1)) == local_ship_id:
+				_prize_audio.play()
+				break
 	# Authoritative bullets (render remote bullets; local bullets are predicted).
 	authoritative_bullets.clear()
 	if snap_dict.has("bullets") and (snap_dict.get("bullets") is Array):
@@ -1193,11 +1278,23 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		for b in bs:
 			if b == null:
 				continue
-			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick)))
+			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
+	# Authoritative prizes (render only; no client simulation).
+	authoritative_prizes.clear()
+	if snap_dict.has("prizes") and (snap_dict.get("prizes") is Array):
+		var ps: Array = snap_dict.get("prizes")
+		for p in ps:
+			if p == null:
+				continue
+			authoritative_prizes.append(DriftTypes.DriftPrizeState.new(int(p.id), p.pos, snap_tick, int(p.despawn_tick), int(p.kind), bool(p.is_negative), bool(p.is_death_drop)))
 	# Track remote ships
 	remote_ships.clear()
+	var local_pos_found: bool = false
+	var local_pos: Vector2 = Vector2.ZERO
 	for ship_state in ships:
 		if ship_state.id == local_ship_id:
+			local_pos_found = true
+			local_pos = ship_state.position
 			authoritative_tick = snap_tick
 			authoritative_ship_state = ship_state
 			has_authoritative = true
@@ -1205,7 +1302,18 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				ship_state.id,
 				ship_state.position,
 				ship_state.velocity,
-				ship_state.rotation
+				ship_state.rotation,
+				"",
+				int(ship_state.bounty),
+				int(ship_state.gun_level),
+				int(ship_state.bomb_level),
+				bool(ship_state.multi_fire_enabled),
+				int(ship_state.bullet_bounce_bonus),
+				int(ship_state.engine_shutdown_until_tick),
+				int(ship_state.top_speed_bonus),
+				int(ship_state.thruster_bonus),
+				int(ship_state.recharge_bonus),
+				float(ship_state.energy)
 			)
 			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets)
 		else:
@@ -1214,7 +1322,18 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				ship_state.id,
 				ship_state.position,
 				ship_state.velocity,
-				ship_state.rotation
+				ship_state.rotation,
+				"",
+				int(ship_state.bounty),
+				int(ship_state.gun_level),
+				int(ship_state.bomb_level),
+				bool(ship_state.multi_fire_enabled),
+				int(ship_state.bullet_bounce_bonus),
+				int(ship_state.engine_shutdown_until_tick),
+				int(ship_state.top_speed_bonus),
+				int(ship_state.thruster_bonus),
+				int(ship_state.recharge_bonus),
+				float(ship_state.energy)
 			)
 			remote_ships[ship_state.id] = state_copy
 			snap_b_ships[ship_state.id] = state_copy
@@ -1249,6 +1368,16 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.position = auth_state.position
 	local_state.velocity = auth_state.velocity
 	local_state.rotation = auth_state.rotation
+	local_state.bounty = int(auth_state.bounty)
+	local_state.gun_level = int(auth_state.gun_level)
+	local_state.bomb_level = int(auth_state.bomb_level)
+	local_state.multi_fire_enabled = bool(auth_state.multi_fire_enabled)
+	local_state.bullet_bounce_bonus = int(auth_state.bullet_bounce_bonus)
+	local_state.engine_shutdown_until_tick = int(auth_state.engine_shutdown_until_tick)
+	local_state.top_speed_bonus = int(auth_state.top_speed_bonus)
+	local_state.thruster_bonus = int(auth_state.thruster_bonus)
+	local_state.recharge_bonus = int(auth_state.recharge_bonus)
+	local_state.energy = float(auth_state.energy)
 
 	# 2) Rewind/snap world.tick to the snapshot tick.
 	world.tick = snapshot_tick
@@ -1261,7 +1390,7 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 				continue
 			if int(b.owner_id) != local_ship_id:
 				continue
-			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick))
+			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
 		# Ensure edge-triggered fire state matches the snapshot baseline.
 		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
@@ -1300,7 +1429,23 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 		return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict)
 	var state: DriftTypes.DriftShipState = world.ships.get(local_ship_id)
 	if state != null:
-		ships_dict[local_ship_id] = DriftTypes.DriftShipState.new(state.id, state.position, state.velocity, state.rotation, state.username, state.bounty)
+		ships_dict[local_ship_id] = DriftTypes.DriftShipState.new(
+			state.id,
+			state.position,
+			state.velocity,
+			state.rotation,
+			state.username,
+			state.bounty,
+			state.gun_level,
+			state.bomb_level,
+			state.multi_fire_enabled,
+			state.bullet_bounce_bonus,
+			state.engine_shutdown_until_tick,
+			state.top_speed_bonus,
+			state.thruster_bonus,
+			state.recharge_bonus,
+			state.energy
+		)
 	# Include predicted local bullets for debug/prediction.
 	var local_bullets: Array = []
 	if world != null and typeof(world.bullets) == TYPE_DICTIONARY:
@@ -1312,7 +1457,7 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 				continue
 			if int(b.owner_id) != local_ship_id:
 				continue
-			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick)))
+			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
 	return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict, Vector2.ZERO, Vector2.ZERO, -1, local_bullets)
 
 

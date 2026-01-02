@@ -18,6 +18,7 @@ const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const DriftRuleset = preload("res://shared/drift_ruleset.gd")
+const DriftPrizeConfig = preload("res://server/prize_config.gd")
 
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
@@ -44,6 +45,9 @@ const QUIT_POLL_INTERVAL_SECONDS: float = 0.25
 var world: DriftWorld
 var accumulator_seconds: float = 0.0
 var latest_snapshot: DriftTypes.DriftWorldSnapshot
+
+# Buffer prize events between snapshot sends.
+var _pending_prize_events: Array = []
 
 var enet_peer: ENetMultiplayerPeer
 var next_ship_id: int = 1
@@ -106,6 +110,19 @@ func _initialize() -> void:
 		quit()
 		return
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
+
+	# Load prize config (non-fatal; prizes can be disabled by config).
+	var prize_res: Dictionary = DriftPrizeConfig.load_config()
+	if bool(prize_res.get("ok", false)):
+		world.apply_prize_config(prize_res.get("prize", {}), prize_res.get("weights", {}))
+		print("[PRIZE] cfg paths=", str(prize_res.get("paths", [])))
+		print("[PRIZE] enabled=", world.prize_enabled,
+			" delay_ticks=", world.prize_delay_ticks,
+			" hide_count=", world.prize_hide_count,
+			" next_spawn_tick=", world.next_prize_spawn_tick)
+		print("[PRIZE] loaded from ", str(prize_res.get("path", "")))
+	else:
+		print("[PRIZE] disabled: ", str(prize_res.get("error", "failed to load server.cfg")))
 
 	print("Driftline server listening on port ", SERVER_PORT)
 	print("Soft stop: create ", quit_flag_path, " to quit")
@@ -240,6 +257,16 @@ func _load_selected_map_from_config() -> bool:
 	map_checksum = res.get("checksum", PackedByteArray())
 	map_path = String(res.get("path", ""))
 	map_version = int(res.get("map_version", 0))
+	# Deterministic prize RNG seed (server-only): stable for the same map.
+	var prize_seed: int = 1
+	if map_checksum != null and map_checksum.size() > 0:
+		var acc: int = 0
+		var n: int = mini(8, map_checksum.size())
+		for i in range(n):
+			acc = int((acc * 31 + int(map_checksum[i])) & 0x7fffffff)
+		if acc != 0:
+			prize_seed = acc
+	world.set_prize_rng_seed(prize_seed)
 
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
@@ -266,6 +293,7 @@ func _load_selected_map_from_config() -> bool:
 	var door_start_open: bool = bool(meta.get("door_start_open", DriftConstants.DOOR_START_OPEN))
 	world.configure_doors(door_open_s, door_closed_s, door_frame_s, door_start_open)
 	world.add_boundary_tiles(w_tiles, h_tiles)
+	world.set_map_dimensions(w_tiles, h_tiles)
 
 	print("Loaded map: ", w_tiles, "x", h_tiles, " tiles, ", world.solid_tiles.size(), " solid tiles")
 	print("Map path: ", map_path)
@@ -406,7 +434,11 @@ func _step_authoritative_tick() -> void:
 	if inputs_by_tick.has(intended_tick):
 		inputs_by_tick.erase(intended_tick)
 
-	latest_snapshot = world.step_tick(inputs_for_step)
+	latest_snapshot = world.step_tick(inputs_for_step, true, world.ships.size())
+	# Collect prize events from this tick; snapshots are not sent every tick.
+	if world != null and (world.prize_events is Array) and world.prize_events.size() > 0:
+		for ev in (world.prize_events as Array):
+			_pending_prize_events.append(ev)
 
 	if world.tick % DriftConstants.TICK_RATE == 0 and world.tick != last_printed_tick:
 		last_printed_tick = world.tick
@@ -447,7 +479,9 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 		snapshot.ball_position,
 		snapshot.ball_velocity,
 		snapshot.ball_owner_id,
-		snapshot.bullets
+		snapshot.bullets,
+		snapshot.prizes,
+		_pending_prize_events
 	)
 
 	# Broadcast to all connected clients.
@@ -456,6 +490,36 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 	for peer_id in ship_id_by_peer.keys():
 		enet_peer.set_target_peer(int(peer_id))
 		enet_peer.put_packet(packet)
+
+	# Prize pickup events: send reliably to the owning peer.
+	# Snapshots are unreliable, so event tails may be dropped.
+	if _pending_prize_events.size() > 0:
+		for ev in _pending_prize_events:
+			if ev == null or typeof(ev) != TYPE_DICTIONARY:
+				continue
+			var d: Dictionary = ev
+			if String(d.get("type", "")) != "pickup":
+				continue
+			var sid: int = int(d.get("ship_id", -1))
+			var pid: int = int(d.get("prize_id", -1))
+			if sid < 0 or pid < 0:
+				continue
+			# Find owning peer.
+			var target_peer: int = -1
+			for peer_id in ship_id_by_peer.keys():
+				if int(ship_id_by_peer.get(peer_id, -1)) == sid:
+					target_peer = int(peer_id)
+					break
+			if target_peer < 0:
+				continue
+			var ev_pkt: PackedByteArray = DriftNet.pack_prize_event_packet(DriftNet.PRIZE_EVENT_PICKUP, sid, pid)
+			enet_peer.set_transfer_channel(NET_CHANNEL)
+			enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+			enet_peer.set_target_peer(target_peer)
+			enet_peer.put_packet(ev_pkt)
+
+	# Flush buffered events after snapshot send.
+	_pending_prize_events.clear()
 
 
 func _send_welcome(peer_id: int, ship_id: int) -> void:

@@ -17,6 +17,40 @@ const PKT_INPUT: int = 1
 const PKT_SNAPSHOT: int = 2
 const PKT_WELCOME: int = 3
 const PKT_HELLO: int = 4
+const PKT_PRIZE_EVENT: int = 5
+
+const PRIZE_EVENT_PICKUP: int = 1
+
+
+static func pack_prize_event_packet(event_type: int, ship_id: int, prize_id: int) -> PackedByteArray:
+	var buffer := StreamPeerBuffer.new()
+	buffer.seek(0)
+	buffer.put_u8(PKT_PRIZE_EVENT)
+	buffer.put_u8(int(clampi(int(event_type), 0, 255)))
+	buffer.put_32(int(ship_id))
+	buffer.put_32(int(prize_id))
+	return buffer.data_array
+
+
+static func unpack_prize_event_packet(bytes: PackedByteArray) -> Dictionary:
+	var buffer := StreamPeerBuffer.new()
+	buffer.data_array = bytes
+	buffer.seek(0)
+	var pkt_type: int = buffer.get_u8()
+	if pkt_type != PKT_PRIZE_EVENT:
+		return {}
+	# event_type + ship_id + prize_id = 1 + 4 + 4 bytes
+	if buffer.get_available_bytes() < 9:
+		return {}
+	var event_type: int = int(buffer.get_u8())
+	var ship_id: int = int(buffer.get_32())
+	var prize_id: int = int(buffer.get_32())
+	return {
+		"type": pkt_type,
+		"event_type": event_type,
+		"ship_id": ship_id,
+		"prize_id": prize_id,
+	}
 
 static func pack_hello(username: String) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
@@ -113,6 +147,8 @@ static func pack_snapshot_packet(
 	ball_vel: Vector2 = Vector2.ZERO,
 	ball_owner_id: int = -1,
 	bullets: Array = [],
+	prizes: Array = [],
+	prize_events: Array = [],
 ) -> PackedByteArray:
 	# ships: Array[DriftShipState]
 	var buffer := StreamPeerBuffer.new()
@@ -147,6 +183,38 @@ static func pack_snapshot_packet(
 	#     f32 vx, vy
 	#     u32 spawn_tick
 	#     u32 die_tick
+	#   [optional] u16 bullet_extras_count
+	#   [optional] repeated bullet_extras_count times:
+	#     u32 id
+	#     u16 bounces_left
+	#   [optional] u16 ship_extras_count
+	#   [optional] repeated ship_extras_count times:
+	#     u32 id
+	#     u8 gun_level
+	#     u8 bomb_level
+	#     u8 bullet_bounce_bonus
+	#     u8 flags (bit0=multi_fire_enabled)
+	#     u32 engine_shutdown_until_tick
+	#     u32 bounty
+	#   [optional] u16 prize_count
+	#   [optional] repeated prize_count times:
+	#     u32 id
+	#     f32 px, py
+	#     u16 kind
+	#     u32 despawn_tick
+	#     u8 flags (bit0=is_negative, bit1=is_death_drop)
+	#   [optional] u16 ship_extras_v2_count
+	#   [optional] repeated ship_extras_v2_count times:
+	#     u32 id
+	#     f32 energy
+	#     u8 top_speed_bonus
+	#     u8 thruster_bonus
+	#     u8 recharge_bonus
+	#   [optional] u16 prize_event_count
+	#   [optional] repeated prize_event_count times:
+	#     u8 event_type (1=pickup)
+	#     u32 ship_id
+	#     u32 prize_id
 	var bullet_count: int = bullets.size()
 	if bullet_count < 0:
 		bullet_count = 0
@@ -163,6 +231,87 @@ static func pack_snapshot_packet(
 		buffer.put_float(float(b.velocity.y))
 		buffer.put_32(int(b.spawn_tick))
 		buffer.put_32(int(b.die_tick))
+
+	# Bullet extras (optional trailing section; safe for older clients because it comes
+	# AFTER the fixed-size bullet list).
+	buffer.put_u16(bullet_count)
+	for i in range(bullet_count):
+		var b = bullets[i]
+		buffer.put_32(int(b.id))
+		buffer.put_u16(int(clampi(int(b.bounces_left), 0, 65535)))
+
+	# Ship extras section (optional trailing).
+	var ship_count: int = ships.size()
+	if ship_count < 0:
+		ship_count = 0
+	if ship_count > 65535:
+		ship_count = 65535
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var s = ships[i]
+		buffer.put_32(int(s.id))
+		buffer.put_u8(int(clampi(int(s.gun_level), 1, 3)))
+		buffer.put_u8(int(clampi(int(s.bomb_level), 1, 3)))
+		buffer.put_u8(int(clampi(int(s.bullet_bounce_bonus), 0, 255)))
+		var flags: int = 0
+		if bool(s.multi_fire_enabled):
+			flags |= 1
+		buffer.put_u8(flags)
+		buffer.put_32(int(maxi(0, int(s.engine_shutdown_until_tick))))
+		buffer.put_32(int(maxi(0, int(s.bounty))))
+
+	# Prizes list (optional trailing).
+	var prize_count: int = prizes.size()
+	if prize_count < 0:
+		prize_count = 0
+	if prize_count > 65535:
+		prize_count = 65535
+	buffer.put_u16(prize_count)
+	for i in range(prize_count):
+		var p = prizes[i]
+		buffer.put_32(int(p.id))
+		buffer.put_float(float(p.pos.x))
+		buffer.put_float(float(p.pos.y))
+		buffer.put_u16(int(clampi(int(p.kind), 0, 65535)))
+		buffer.put_32(int(p.despawn_tick))
+		var pflags: int = 0
+		if bool(p.is_negative):
+			pflags |= 1
+		if bool(p.is_death_drop):
+			pflags |= 2
+		buffer.put_u8(pflags)
+
+	# Ship extras v2 (optional trailing).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var s2 = ships[i]
+		buffer.put_32(int(s2.id))
+		buffer.put_float(float(s2.energy))
+		buffer.put_u8(int(clampi(int(s2.top_speed_bonus), 0, 255)))
+		buffer.put_u8(int(clampi(int(s2.thruster_bonus), 0, 255)))
+		buffer.put_u8(int(clampi(int(s2.recharge_bonus), 0, 255)))
+
+	# Prize events (optional trailing).
+	var ev_count: int = prize_events.size()
+	if ev_count < 0:
+		ev_count = 0
+	if ev_count > 65535:
+		ev_count = 65535
+	buffer.put_u16(ev_count)
+	for i in range(ev_count):
+		var e = prize_events[i]
+		var et: int = 0
+		var sid: int = 0
+		var pid: int = 0
+		if typeof(e) == TYPE_DICTIONARY:
+			var d: Dictionary = e
+			if String(d.get("type", "")) == "pickup":
+				et = 1
+			sid = int(d.get("ship_id", 0))
+			pid = int(d.get("prize_id", 0))
+		buffer.put_u8(et)
+		buffer.put_32(sid)
+		buffer.put_32(pid)
 
 	return buffer.data_array
 
@@ -368,7 +517,109 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			var bvy: float = buffer.get_float()
 			var spawn_tick: int = int(buffer.get_32())
 			var die_tick: int = int(buffer.get_32())
-			bullets[i] = DriftTypes.DriftBulletState.new(bid, owner_id, Vector2(bpx, bpy), Vector2(bvx, bvy), spawn_tick, die_tick)
+			bullets[i] = DriftTypes.DriftBulletState.new(bid, owner_id, Vector2(bpx, bpy), Vector2(bvx, bvy), spawn_tick, die_tick, 0)
+
+		# Optional bullet extras section.
+		if buffer.get_available_bytes() >= 2:
+			var extras_count: int = int(buffer.get_u16())
+			# Each extra is 4+2 = 6 bytes.
+			if buffer.get_available_bytes() < (extras_count * 6):
+				return {}
+			var by_id: Dictionary = {}
+			for b in bullets:
+				if b == null:
+					continue
+				by_id[int(b.id)] = b
+			for _i in range(extras_count):
+				var ebid: int = int(buffer.get_32())
+				var bounces_left: int = int(buffer.get_u16())
+				if by_id.has(ebid):
+					(by_id[ebid] as DriftTypes.DriftBulletState).bounces_left = bounces_left
+
+	# Optional ship extras section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_extras_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 1 + 1 + 1 + 1 + 4 + 4 = 16 bytes.
+		if buffer.get_available_bytes() < (ship_extras_count * 16):
+			return {}
+		var ship_by_id: Dictionary = {}
+		for s in ships:
+			if s == null:
+				continue
+			ship_by_id[int(s.id)] = s
+		for _i in range(ship_extras_count):
+			var sid: int = int(buffer.get_32())
+			var gun_level: int = int(buffer.get_u8())
+			var bomb_level: int = int(buffer.get_u8())
+			var bullet_bounce_bonus: int = int(buffer.get_u8())
+			var flags: int = int(buffer.get_u8())
+			var engine_shutdown_until_tick: int = int(buffer.get_32())
+			var bounty: int = int(buffer.get_32())
+			if ship_by_id.has(sid):
+				var ss: DriftTypes.DriftShipState = ship_by_id[sid]
+				ss.gun_level = clampi(gun_level, 1, 3)
+				ss.bomb_level = clampi(bomb_level, 1, 3)
+				ss.bullet_bounce_bonus = clampi(bullet_bounce_bonus, 0, 16)
+				ss.multi_fire_enabled = (flags & 1) != 0
+				ss.engine_shutdown_until_tick = maxi(0, engine_shutdown_until_tick)
+				ss.bounty = maxi(0, bounty)
+
+	# Optional prizes section.
+	var prizes: Array = []
+	if buffer.get_available_bytes() >= 2:
+		var prize_count: int = int(buffer.get_u16())
+		prizes.resize(prize_count)
+		# Each entry is 4 + 4 + 4 + 2 + 4 + 1 = 19 bytes.
+		if buffer.get_available_bytes() < (prize_count * 19):
+			return {}
+		for i in range(prize_count):
+			var pid: int = int(buffer.get_32())
+			var ppx: float = buffer.get_float()
+			var ppy: float = buffer.get_float()
+			var kind: int = int(buffer.get_u16())
+			var despawn_tick: int = int(buffer.get_32())
+			var pflags: int = int(buffer.get_u8())
+			var is_negative: bool = (pflags & 1) != 0
+			var is_death_drop: bool = (pflags & 2) != 0
+			prizes[i] = DriftTypes.DriftPrizeState.new(pid, Vector2(ppx, ppy), 0, despawn_tick, kind, is_negative, is_death_drop)
+
+	# Optional ship extras v2 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_extras2_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 + 1 + 1 + 1 = 11 bytes.
+		if buffer.get_available_bytes() < (ship_extras2_count * 11):
+			return {}
+		var ship_by_id2: Dictionary = {}
+		for s2 in ships:
+			if s2 == null:
+				continue
+			ship_by_id2[int(s2.id)] = s2
+		for _i in range(ship_extras2_count):
+			var sid2: int = int(buffer.get_32())
+			var energy: float = buffer.get_float()
+			var top_speed_bonus: int = int(buffer.get_u8())
+			var thruster_bonus: int = int(buffer.get_u8())
+			var recharge_bonus: int = int(buffer.get_u8())
+			if ship_by_id2.has(sid2):
+				var ss2: DriftTypes.DriftShipState = ship_by_id2[sid2]
+				ss2.energy = maxf(0.0, energy)
+				ss2.top_speed_bonus = clampi(top_speed_bonus, 0, 16)
+				ss2.thruster_bonus = clampi(thruster_bonus, 0, 16)
+				ss2.recharge_bonus = clampi(recharge_bonus, 0, 16)
+
+	# Optional prize events section.
+	var prize_events: Array = []
+	if buffer.get_available_bytes() >= 2:
+		var ev_count: int = int(buffer.get_u16())
+		# Each event is 1 + 4 + 4 = 9 bytes.
+		if buffer.get_available_bytes() < (ev_count * 9):
+			return {}
+		for _i in range(ev_count):
+			var et: int = int(buffer.get_u8())
+			var sid: int = int(buffer.get_32())
+			var pid: int = int(buffer.get_32())
+			if et == 1:
+				prize_events.append({"type": "pickup", "ship_id": sid, "prize_id": pid})
 
 	return {
 		"type": pkt_type,
@@ -378,6 +629,8 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 		"ball_velocity": Vector2(ball_vx, ball_vy),
 		"ball_owner_id": ball_owner_id,
 		"bullets": bullets,
+		"prizes": prizes,
+		"prize_events": prize_events,
 	}
 
 

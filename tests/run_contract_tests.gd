@@ -140,5 +140,11 @@ func _fail(msg: String) -> void:
 
 
 func _finish(exit_code: int) -> void:
-	# Godot 4: quit the SceneTree with an explicit process exit code.
-	quit(int(exit_code))
+	# Some Godot builds expose process-exit helpers under different names.
+	# Use dynamic calls to avoid parse-time errors on older builds.
+	var code := int(exit_code)
+	if OS.has_method("set_exit_code"):
+		OS.call("set_exit_code", code)
+	elif OS.has_method("set_process_exit_code"):
+		OS.call("set_process_exit_code", code)
+	quit(code)

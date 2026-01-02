@@ -1,0 +1,16 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 1,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "ships": {
+    "1": {
+      "weapons": {
+        "bullet": {
+          "level": 0
+        }
+      }
+    }
+  }
+}

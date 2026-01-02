@@ -12,6 +12,11 @@ const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftShip = preload("res://shared/drift_ship.gd")
 const DriftBall = preload("res://shared/drift_ball.gd")
 
+var map_w_tiles: int = 0
+var map_h_tiles: int = 0
+var _main_walkable_tiles: Array = [] # Array[Vector2i]
+var _main_walkable_set: Dictionary = {} # Dictionary[Vector2i, bool]
+
 
 var tick: int = 0
 var ships: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
@@ -43,6 +48,39 @@ var ball_steal_padding: float = 4.0
 var energy_max: float = 100.0
 var energy_regen_per_s: float = 18.0
 var energy_afterburner_drain_per_s: float = 30.0
+var energy_afterburner_multiplier: float = 1.6
+
+const TOP_SPEED_BONUS_PCT: float = 0.04
+const THRUSTER_BONUS_PCT: float = 0.06
+const RECHARGE_BONUS_PCT: float = 0.15
+
+
+# Prizes (server authoritative; replicated to clients via snapshots)
+var prizes: Dictionary = {} # Dictionary[int, DriftTypes.DriftPrizeState]
+var _prize_buckets: Dictionary = {} # Dictionary[Vector2i, Array[int]]
+var next_prize_spawn_tick: int = 0
+var prize_id_counter: int = 1
+
+var prize_enabled: bool = false
+var prize_delay_ticks: int = 0
+var prize_hide_count: int = 0
+var prize_min_exist_ticks: int = 0
+var prize_max_exist_ticks: int = 0
+var prize_negative_factor: int = 0
+var death_prize_time_ticks: int = 0
+var multi_prize_count: int = 0
+var engine_shutdown_time_ticks: int = 0
+var minimum_virtual: int = 0
+var upgrade_virtual: int = 0
+
+var _prize_weights: Array[int] = []
+var _prize_total_weight: int = 0
+
+var _prize_rng := RandomNumberGenerator.new()
+
+const PRIZE_PICKUP_RADIUS: float = float(DriftConstants.SHIP_RADIUS) + 8.0
+const MIN_PRIZE_SPACING_TILES: int = 2
+const PRIZE_SPAWN_ATTEMPTS: int = 200
 
 
 # Bullets (authoritative + predicted)
@@ -56,6 +94,38 @@ var bullet_lifetime_ticks: int = 24
 var bullet_muzzle_offset: float = float(DriftConstants.SHIP_RADIUS) + 10.0
 var bullet_radius: float = 2.0
 var bullet_gun_spacing: float = 8.0
+var bullet_bounces: int = 0
+var bullet_bounce_restitution: float = 1.0
+
+
+func _resolve_bullet_bounce_restitution_for_ship(ship_id: int) -> float:
+	var restitution: float = bullet_bounce_restitution
+
+	# Optional level profiles live under ruleset.weapons.bullet.levels.
+	var rs_weapons: Dictionary = ruleset.get("weapons", {})
+	var levels: Dictionary = {}
+	if typeof(rs_weapons) == TYPE_DICTIONARY and rs_weapons.has("bullet") and typeof(rs_weapons.get("bullet")) == TYPE_DICTIONARY:
+		var rs_bullet: Dictionary = rs_weapons.get("bullet")
+		if rs_bullet.has("levels") and typeof(rs_bullet.get("levels")) == TYPE_DICTIONARY:
+			levels = rs_bullet.get("levels")
+
+	# Per-ship override.
+	var rs_ships: Dictionary = ruleset.get("ships", {})
+	if typeof(rs_ships) == TYPE_DICTIONARY:
+		var ship_key := str(ship_id)
+		if rs_ships.has(ship_key) and typeof(rs_ships.get(ship_key)) == TYPE_DICTIONARY:
+			var ship_cfg: Dictionary = rs_ships.get(ship_key)
+			if ship_cfg.has("weapons") and typeof(ship_cfg.get("weapons")) == TYPE_DICTIONARY:
+				var ship_weapons: Dictionary = ship_cfg.get("weapons")
+				if ship_weapons.has("bullet") and typeof(ship_weapons.get("bullet")) == TYPE_DICTIONARY:
+					var sb: Dictionary = ship_weapons.get("bullet")
+					var level: int = int(sb.get("level", 1))
+					if typeof(levels) == TYPE_DICTIONARY and levels.has(str(level)) and typeof(levels.get(str(level))) == TYPE_DICTIONARY:
+						var level_cfg: Dictionary = levels.get(str(level))
+						restitution = float(level_cfg.get("bounce_restitution", restitution))
+					restitution = float(sb.get("bounce_restitution", restitution))
+
+	return clampf(restitution, 0.0, 2.0)
 
 
 func apply_ruleset(canonical_ruleset: Dictionary) -> void:
@@ -91,6 +161,8 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 			var b: Dictionary = weapons.get("bullet")
 			bullet_speed = float(b.get("speed", bullet_speed))
 			bullet_muzzle_offset = float(b.get("muzzle_offset", bullet_muzzle_offset))
+			bullet_bounces = int(b.get("bounces", bullet_bounces))
+			bullet_bounce_restitution = float(b.get("bounce_restitution", bullet_bounce_restitution))
 			# Lifetime is expressed in seconds in the ruleset; convert to ticks deterministically.
 			if b.has("lifetime_s"):
 				var lifetime_s: float = float(b.get("lifetime_s"))
@@ -101,6 +173,410 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 		energy_max = float(energy.get("max", energy_max))
 		energy_regen_per_s = float(energy.get("regen_per_s", energy_regen_per_s))
 		energy_afterburner_drain_per_s = float(energy.get("afterburner_drain_per_s", energy_afterburner_drain_per_s))
+
+
+func set_map_dimensions(w_tiles: int, h_tiles: int) -> void:
+	map_w_tiles = maxi(0, int(w_tiles))
+	map_h_tiles = maxi(0, int(h_tiles))
+	_recompute_main_walkable_component()
+	# Reset spawn schedule when map changes.
+	next_prize_spawn_tick = maxi(0, tick + prize_delay_ticks)
+	# Clear any existing prizes from a previous map.
+	prizes.clear()
+	_prize_buckets.clear()
+	prize_id_counter = 1
+
+
+func apply_prize_config(prize_cfg: Dictionary, weights_by_key: Dictionary) -> void:
+	# prize_cfg is a plain config dictionary from server.cfg (not a versioned contract).
+	prize_delay_ticks = maxi(0, int(prize_cfg.get("prize_delay_ticks", 0)))
+	prize_hide_count = clampi(int(prize_cfg.get("prize_hide_count", 0)), 0, 256)
+	minimum_virtual = maxi(0, int(prize_cfg.get("minimum_virtual", 0)))
+	upgrade_virtual = maxi(0, int(prize_cfg.get("upgrade_virtual", 0)))
+	prize_min_exist_ticks = maxi(0, int(prize_cfg.get("prize_min_exist_ticks", 0)))
+	prize_max_exist_ticks = maxi(prize_min_exist_ticks, int(prize_cfg.get("prize_max_exist_ticks", 0)))
+	prize_negative_factor = maxi(0, int(prize_cfg.get("prize_negative_factor", 0)))
+	death_prize_time_ticks = maxi(0, int(prize_cfg.get("death_prize_time_ticks", 0)))
+	multi_prize_count = clampi(int(prize_cfg.get("multi_prize_count", 0)), 0, 16)
+	engine_shutdown_time_ticks = maxi(0, int(prize_cfg.get("engine_shutdown_time_ticks", 0)))
+
+	# Build weights table in enum order (deterministic).
+	_prize_weights.clear()
+	_prize_total_weight = 0
+	var keys_in_order: Array[String] = DriftTypes.prize_kind_keys_in_order()
+	_prize_weights.resize(keys_in_order.size())
+	for i in range(keys_in_order.size()):
+		var key := keys_in_order[i]
+		var w: int = 0
+		if typeof(weights_by_key) == TYPE_DICTIONARY and weights_by_key.has(key):
+			w = int(weights_by_key.get(key, 0))
+		w = maxi(0, w)
+		_prize_weights[i] = w
+		_prize_total_weight += w
+
+	prize_enabled = (prize_delay_ticks > 0 and prize_hide_count > 0 and _prize_total_weight > 0)
+	# Schedule next spawn relative to current tick.
+	next_prize_spawn_tick = tick + prize_delay_ticks
+
+
+func _prize_target_count_for_players(player_count: int) -> int:
+	# Keep prize supply roughly proportional to players so large matches don't feel starved.
+	# PrizeHideCount is treated as a *base* target capacity, then scaled up by player count.
+	# Clamp defensively to keep CPU/memory bounded.
+	var base_target: int = maxi(0, int(prize_hide_count))
+	if base_target <= 0:
+		return 0
+	if player_count <= 1:
+		return base_target
+	const PLAYERS_PER_STEP: int = 5
+	var steps: int = int(ceil(float(player_count) / float(PLAYERS_PER_STEP)))
+	return clampi(base_target * maxi(1, steps), base_target, 256)
+
+
+func _prize_spawn_delay_for_players(player_count: int) -> int:
+	# Scale spawn delay down with player count, but clamp to avoid runaway spam.
+	if prize_delay_ticks <= 0:
+		return 0
+	var p: int = maxi(1, int(player_count))
+	var desired: int = int(round(float(prize_delay_ticks) / float(p)))
+	# Never faster than 10x baseline (i.e., delay >= baseline/10).
+	var min_delay: int = maxi(1, int(round(float(prize_delay_ticks) / 10.0)))
+	var max_delay: int = maxi(1, int(prize_delay_ticks))
+	return clampi(desired, min_delay, max_delay)
+
+
+func set_prize_rng_seed(seed_value: int) -> void:
+	_prize_rng.seed = int(seed_value)
+
+
+func _tile_for_world_pos(pos: Vector2) -> Vector2i:
+	return Vector2i(int(floor(pos.x / float(TILE_SIZE))), int(floor(pos.y / float(TILE_SIZE))))
+
+
+func _world_pos_for_tile(t: Vector2i) -> Vector2:
+	return Vector2((float(t.x) + 0.5) * float(TILE_SIZE), (float(t.y) + 0.5) * float(TILE_SIZE))
+
+
+func _center_tile() -> Vector2i:
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		return Vector2i(int(floor(map_w_tiles * 0.5)), int(floor(map_h_tiles * 0.5)))
+	return _tile_for_world_pos(DriftConstants.ARENA_CENTER)
+
+
+func _recompute_main_walkable_component() -> void:
+	_main_walkable_tiles.clear()
+	_main_walkable_set.clear()
+	if map_w_tiles <= 0 or map_h_tiles <= 0:
+		return
+
+	# Use static solids (doors are dynamic); treat doors as walkable for reachability.
+	var dirs: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	var visited: Dictionary = {}
+	var components: Array = [] # Array[Array[Vector2i]]
+	for y in range(map_h_tiles):
+		for x in range(map_w_tiles):
+			var start := Vector2i(x, y)
+			if visited.has(start):
+				continue
+			if _static_solid_tiles.has(start):
+				visited[start] = true
+				continue
+			# Flood fill 4-neighborhood.
+			var comp: Array = []
+			var q: Array = [start]
+			visited[start] = true
+			while not q.is_empty():
+				var cur: Vector2i = q.pop_back()
+				comp.append(cur)
+				for d: Vector2i in dirs:
+					var n: Vector2i = cur + d
+					if n.x < 0 or n.y < 0 or n.x >= map_w_tiles or n.y >= map_h_tiles:
+						continue
+					if visited.has(n):
+						continue
+					visited[n] = true
+					if _static_solid_tiles.has(n):
+						continue
+					q.append(n)
+			components.append(comp)
+
+	if components.is_empty():
+		return
+
+	# Prefer the component containing the center tile; else pick the largest.
+	var center := _center_tile()
+	var chosen: Array = []
+	var largest: Array = []
+	for comp in components:
+		if comp.size() > largest.size():
+			largest = comp
+		if chosen.is_empty():
+			# quick membership: linear scan is ok for this size.
+			for t in comp:
+				if t == center:
+					chosen = comp
+					break
+	if chosen.is_empty():
+		chosen = largest
+
+	_main_walkable_tiles = chosen
+	for t in _main_walkable_tiles:
+		_main_walkable_set[t] = true
+
+
+func _prize_bucket_add(prize_id: int, pos: Vector2) -> void:
+	var t := _tile_for_world_pos(pos)
+	if not _prize_buckets.has(t):
+		_prize_buckets[t] = []
+	(_prize_buckets[t] as Array).append(prize_id)
+
+
+func _prize_bucket_remove(prize_id: int, pos: Vector2) -> void:
+	var t := _tile_for_world_pos(pos)
+	if not _prize_buckets.has(t):
+		return
+	var arr: Array = _prize_buckets[t]
+	arr.erase(prize_id)
+	if arr.is_empty():
+		_prize_buckets.erase(t)
+
+
+func _pick_weighted_prize_kind(exclude_multiprize: bool) -> int:
+	if _prize_total_weight <= 0:
+		return -1
+	# Compute total, optionally excluding MultiPrize.
+	var total: int = 0
+	for i in range(_prize_weights.size()):
+		var kind: int = i
+		if exclude_multiprize and kind == DriftTypes.PrizeKind.MultiPrize:
+			continue
+		var w: int = int(_prize_weights[i])
+		if w <= 0:
+			continue
+		total += w
+	if total <= 0:
+		return -1
+	var r: int = _prize_rng.randi_range(1, total)
+	var acc: int = 0
+	for i in range(_prize_weights.size()):
+		var kind2: int = i
+		if exclude_multiprize and kind2 == DriftTypes.PrizeKind.MultiPrize:
+			continue
+		var w2: int = int(_prize_weights[i])
+		if w2 <= 0:
+			continue
+		acc += w2
+		if r <= acc:
+			return kind2
+	return -1
+
+
+func _is_negative_roll() -> bool:
+	if prize_negative_factor <= 0:
+		return false
+	if prize_negative_factor == 1:
+		return true
+	return _prize_rng.randi_range(1, prize_negative_factor) == 1
+
+
+func _spawn_prize_batch(player_count: int) -> void:
+	if not prize_enabled:
+		return
+	if _main_walkable_tiles.is_empty():
+		return
+	var target_count: int = _prize_target_count_for_players(player_count)
+	if target_count <= 0:
+		return
+	var missing: int = target_count - int(prizes.size())
+	if missing <= 0:
+		return
+	const MAX_SPAWN_PER_EVENT: int = 4
+	var spawn_budget: int = clampi(missing, 1, MAX_SPAWN_PER_EVENT)
+	var center := _center_tile()
+	var min_radius_tiles: float = float(minimum_virtual + upgrade_virtual * maxi(0, int(player_count)))
+
+	for _i in range(spawn_budget):
+		var kind: int = _pick_weighted_prize_kind(false)
+		if kind < 0:
+			return
+		var is_negative: bool = _is_negative_roll()
+		var lifetime_ticks: int = prize_min_exist_ticks
+		if prize_max_exist_ticks > prize_min_exist_ticks:
+			lifetime_ticks = _prize_rng.randi_range(prize_min_exist_ticks, prize_max_exist_ticks)
+		var despawn_tick := tick + maxi(0, lifetime_ticks)
+
+		var chosen_tile := Vector2i(-1, -1)
+		for _attempt in range(PRIZE_SPAWN_ATTEMPTS):
+			var idx: int = _prize_rng.randi_range(0, _main_walkable_tiles.size() - 1)
+			var t: Vector2i = _main_walkable_tiles[idx]
+			# Radius constraint.
+			var dist_tiles: float = Vector2(t.x - center.x, t.y - center.y).length()
+			if dist_tiles < min_radius_tiles:
+				continue
+			# Clump prevention: avoid spawning too close to an existing prize.
+			var ok_spacing: bool = true
+			for pid in prizes.keys():
+				var p: DriftTypes.DriftPrizeState = prizes.get(pid)
+				if p == null:
+					continue
+				var pt := _tile_for_world_pos(p.pos)
+				if absi(pt.x - t.x) <= MIN_PRIZE_SPACING_TILES and absi(pt.y - t.y) <= MIN_PRIZE_SPACING_TILES:
+					ok_spacing = false
+					break
+			if not ok_spacing:
+				continue
+			chosen_tile = t
+			break
+
+		if chosen_tile.x < 0:
+			continue
+		var pos := _world_pos_for_tile(chosen_tile)
+		# Ensure not inside solid (paranoia).
+		if is_position_blocked(pos, 6.0):
+			continue
+		var pid: int = prize_id_counter
+		prize_id_counter += 1
+		var ps := DriftTypes.DriftPrizeState.new(pid, pos, tick, despawn_tick, kind, is_negative, false)
+		prizes[pid] = ps
+		_prize_bucket_add(pid, pos)
+
+
+func spawn_death_prize_at(pos: Vector2) -> void:
+	if not prize_enabled:
+		return
+	if death_prize_time_ticks <= 0:
+		return
+	var kind: int = _pick_weighted_prize_kind(false)
+	if kind < 0:
+		return
+	var pid: int = prize_id_counter
+	prize_id_counter += 1
+	var despawn_tick := tick + death_prize_time_ticks
+	var ps := DriftTypes.DriftPrizeState.new(pid, pos, tick, despawn_tick, kind, false, true)
+	prizes[pid] = ps
+	_prize_bucket_add(pid, pos)
+
+
+func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_negative: bool) -> void:
+	# Always increment bounty for visibility.
+	ship_state.bounty = maxi(0, int(ship_state.bounty) + 1)
+	var applied_effect: bool = false
+
+	# Minimal viable set with safe stubs.
+	match kind:
+		DriftTypes.PrizeKind.Energy:
+			applied_effect = true
+			if is_negative:
+				ship_state.energy = maxf(0.0, float(ship_state.energy) - 25.0)
+			else:
+				ship_state.energy = minf(energy_max, float(ship_state.energy) + 25.0)
+		DriftTypes.PrizeKind.Recharge:
+			applied_effect = true
+			if is_negative:
+				ship_state.recharge_bonus = maxi(0, int(ship_state.recharge_bonus) - 1)
+			else:
+				ship_state.recharge_bonus = mini(16, int(ship_state.recharge_bonus) + 1)
+		DriftTypes.PrizeKind.TopSpeed:
+			applied_effect = true
+			if is_negative:
+				ship_state.top_speed_bonus = maxi(0, int(ship_state.top_speed_bonus) - 1)
+			else:
+				ship_state.top_speed_bonus = mini(16, int(ship_state.top_speed_bonus) + 1)
+		DriftTypes.PrizeKind.Thruster:
+			applied_effect = true
+			if is_negative:
+				ship_state.thruster_bonus = maxi(0, int(ship_state.thruster_bonus) - 1)
+			else:
+				ship_state.thruster_bonus = mini(16, int(ship_state.thruster_bonus) + 1)
+		DriftTypes.PrizeKind.Gun:
+			applied_effect = true
+			if is_negative:
+				ship_state.gun_level = maxi(1, int(ship_state.gun_level) - 1)
+			else:
+				ship_state.gun_level = mini(3, int(ship_state.gun_level) + 1)
+		DriftTypes.PrizeKind.Bomb:
+			applied_effect = true
+			if is_negative:
+				ship_state.bomb_level = maxi(1, int(ship_state.bomb_level) - 1)
+			else:
+				ship_state.bomb_level = mini(3, int(ship_state.bomb_level) + 1)
+		DriftTypes.PrizeKind.MultiFire:
+			applied_effect = true
+			if is_negative:
+				ship_state.multi_fire_enabled = false
+			else:
+				ship_state.multi_fire_enabled = true
+		DriftTypes.PrizeKind.BouncingBullets:
+			applied_effect = true
+			if is_negative:
+				ship_state.bullet_bounce_bonus = maxi(0, int(ship_state.bullet_bounce_bonus) - 1)
+			else:
+				ship_state.bullet_bounce_bonus = mini(16, int(ship_state.bullet_bounce_bonus) + 1)
+		DriftTypes.PrizeKind.MultiPrize:
+			# Apply multiple positive prizes; never recurse into MultiPrize.
+			for _i in range(multi_prize_count):
+				var sub_kind: int = _pick_weighted_prize_kind(true)
+				if sub_kind < 0:
+					break
+				_apply_prize_effect(ship_state, sub_kind, false)
+		_:
+			# Other prizes are currently stubs; must not crash.
+			pass
+
+	# Negative fallback: if negative prize would do nothing, apply EngineShutdown.
+	if is_negative and not applied_effect:
+		if engine_shutdown_time_ticks > 0:
+			ship_state.engine_shutdown_until_tick = maxi(int(ship_state.engine_shutdown_until_tick), tick + engine_shutdown_time_ticks)
+
+
+func _process_prize_despawns() -> void:
+	if prizes.is_empty():
+		return
+	var ids: Array = prizes.keys()
+	ids.sort()
+	for pid in ids:
+		var p: DriftTypes.DriftPrizeState = prizes.get(pid)
+		if p == null:
+			continue
+		if int(p.despawn_tick) >= 0 and tick >= int(p.despawn_tick):
+			_prize_bucket_remove(int(p.id), p.pos)
+			prizes.erase(pid)
+
+
+func _process_prize_pickups() -> void:
+	if prizes.is_empty():
+		return
+	var pickup_r2: float = PRIZE_PICKUP_RADIUS * PRIZE_PICKUP_RADIUS
+	var ship_ids: Array = ships.keys()
+	ship_ids.sort()
+	for sid in ship_ids:
+		var s: DriftTypes.DriftShipState = ships.get(sid)
+		if s == null:
+			continue
+		var st := _tile_for_world_pos(s.position)
+		for dx in [-1, 0, 1]:
+			for dy in [-1, 0, 1]:
+				var cell := Vector2i(st.x + dx, st.y + dy)
+				if not _prize_buckets.has(cell):
+					continue
+				# Copy to avoid mutation during iteration.
+				var cand: Array = (_prize_buckets[cell] as Array).duplicate(false)
+				for pid in cand:
+					if not prizes.has(pid):
+						continue
+					var p: DriftTypes.DriftPrizeState = prizes.get(pid)
+					if p == null:
+						continue
+					if s.position.distance_squared_to(p.pos) <= pickup_r2:
+						# Remove and apply.
+						_prize_bucket_remove(int(p.id), p.pos)
+						prizes.erase(pid)
+						_apply_prize_effect(s, int(p.kind), bool(p.is_negative))
+						prize_events.append({
+							"type": "pickup",
+							"ship_id": int(s.id),
+							"prize_id": int(p.id),
+						})
 
 # Doors (dynamic tile solids)
 var _static_solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool]
@@ -119,6 +595,10 @@ const SEPARATION_EPSILON: float = 0.05
 # Each entry is a Dictionary: {type, ship_id, pos, normal, impact_speed}
 var collision_events: Array = []
 
+# Transient (server-auth): per-tick prize events for client-side audio/FX.
+# Each entry is a Dictionary: {type, ship_id, prize_id}
+var prize_events: Array = []
+
 
 func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_speed: float) -> void:
 	collision_events.append({
@@ -131,7 +611,9 @@ func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_spe
 
 
 func add_ship(id: int, position: Vector2) -> void:
-	ships[id] = DriftTypes.DriftShipState.new(id, position)
+	var s: DriftTypes.DriftShipState = DriftTypes.DriftShipState.new(id, position)
+	s.energy = energy_max
+	ships[id] = s
 
 func get_spawn_position(ship_id: int) -> Vector2:
 	# Example: spread ships horizontally from center
@@ -304,12 +786,13 @@ func get_collision_normal(old_pos: Vector2, new_pos: Vector2, radius: float) -> 
 
 
 
-func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
+func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_for_prizes: int = 0) -> DriftTypes.DriftWorldSnapshot:
 	# Advance world tick.
 	tick += 1
 	_update_doors_for_current_tick()
 	# Clear transient events each tick.
 	collision_events.clear()
+	prize_events.clear()
 
 	# Stable update order for determinism.
 	var ship_ids: Array = ships.keys()
@@ -319,6 +802,9 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 	for ship_id in ship_ids:
 		var ship_state: DriftTypes.DriftShipState = ships[ship_id]
 		var input_cmd: DriftTypes.DriftInputCmd = inputs.get(ship_id, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
+		# Engine shutdown (negative prize effect): thrust/rotation disabled, firing allowed.
+		if int(ship_state.engine_shutdown_until_tick) > 0 and tick < int(ship_state.engine_shutdown_until_tick):
+			input_cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, bool(input_cmd.fire_primary), bool(input_cmd.fire_secondary), bool(input_cmd.modifier))
 		
 		# Store position before movement
 		var old_position := ship_state.position
@@ -328,9 +814,9 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 			input_cmd,
 			DriftConstants.TICK_DT,
 			ship_turn_rate,
-			ship_thrust_accel,
-			ship_reverse_accel,
-			ship_max_speed,
+			_ship_effective_thrust_accel(ship_state, input_cmd),
+			_ship_effective_reverse_accel(ship_state),
+			_ship_effective_max_speed(ship_state),
 			ship_base_drag,
 			ship_overspeed_drag,
 		)
@@ -554,6 +1040,22 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		var eff_muzzle_offset: float = bullet_muzzle_offset
 		var guns: int = 1
 		var multi_fire: bool = false
+		var eff_bounces: int = bullet_bounces
+		var eff_bounce_restitution: float = bullet_bounce_restitution
+		var eff_level: int = clampi(int(ship_state.gun_level), 1, 3)
+		var toggle_multishot: bool = bool(ship_state.multi_fire_enabled)
+		var toggle_bounce: bool = (int(ship_state.bullet_bounce_bonus) > 0)
+
+		# Optional level profiles (ruleset.weapons.bullet.levels).
+		var level_cfg: Dictionary = {}
+		var rs_weapons: Dictionary = ruleset.get("weapons", {})
+		var levels: Dictionary = {}
+		if typeof(rs_weapons) == TYPE_DICTIONARY and rs_weapons.has("bullet") and typeof(rs_weapons.get("bullet")) == TYPE_DICTIONARY:
+			var rs_bullet: Dictionary = rs_weapons.get("bullet")
+			if rs_bullet.has("levels") and typeof(rs_bullet.get("levels")) == TYPE_DICTIONARY:
+				levels = rs_bullet.get("levels")
+				if levels.has(str(eff_level)) and typeof(levels.get(str(eff_level))) == TYPE_DICTIONARY:
+					level_cfg = levels.get(str(eff_level))
 
 		# Per-ship overrides (ruleset is validated canonical).
 		var rs_ships: Dictionary = ruleset.get("ships", {})
@@ -565,14 +1067,44 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 					var ship_weapons: Dictionary = ship_cfg.get("weapons")
 					if ship_weapons.has("bullet") and typeof(ship_weapons.get("bullet")) == TYPE_DICTIONARY:
 						var sb: Dictionary = ship_weapons.get("bullet")
+						# New (optional): gun level + toggles.
+						eff_level = int(sb.get("level", eff_level))
+						# Re-resolve level profile after applying the per-ship level.
+						if typeof(levels) == TYPE_DICTIONARY and levels.has(str(eff_level)) and typeof(levels.get(str(eff_level))) == TYPE_DICTIONARY:
+							level_cfg = levels.get(str(eff_level))
+						toggle_multishot = bool(sb.get("multishot", toggle_multishot))
+						toggle_bounce = bool(sb.get("bounce", toggle_bounce))
+
+						# Apply level profile first (if present), then explicit per-ship overrides.
+						if typeof(level_cfg) == TYPE_DICTIONARY and not level_cfg.is_empty():
+							guns = int(level_cfg.get("guns", guns))
+							multi_fire = bool(level_cfg.get("multi_fire", multi_fire))
+							eff_speed = float(level_cfg.get("speed", eff_speed))
+							eff_muzzle_offset = float(level_cfg.get("muzzle_offset", eff_muzzle_offset))
+							eff_bounces = int(level_cfg.get("bounces", eff_bounces))
+							eff_bounce_restitution = float(level_cfg.get("bounce_restitution", eff_bounce_restitution))
+							if level_cfg.has("lifetime_s"):
+								eff_lifetime_ticks = int(round(float(level_cfg.get("lifetime_s")) / DriftConstants.TICK_DT))
+
 						guns = int(sb.get("guns", guns))
 						multi_fire = bool(sb.get("multi_fire", multi_fire))
 						eff_speed = float(sb.get("speed", eff_speed))
 						eff_muzzle_offset = float(sb.get("muzzle_offset", eff_muzzle_offset))
+						eff_bounces = int(sb.get("bounces", eff_bounces))
+						eff_bounce_restitution = float(sb.get("bounce_restitution", eff_bounce_restitution))
 						if sb.has("lifetime_s"):
 							eff_lifetime_ticks = int(round(float(sb.get("lifetime_s")) / DriftConstants.TICK_DT))
 
+		# Apply toggles (if present) as final modifiers.
+		if toggle_multishot:
+			multi_fire = true
+		if toggle_bounce and eff_bounces <= 0:
+			eff_bounces = 1
+		eff_bounces += clampi(int(ship_state.bullet_bounce_bonus), 0, 16)
+
 		guns = clampi(guns, 1, 8)
+		eff_bounces = clampi(eff_bounces, 0, 16)
+		eff_bounce_restitution = clampf(eff_bounce_restitution, 0.0, 2.0)
 		var fire_guns: Array[int] = []
 		if multi_fire or guns == 1:
 			for gi in range(guns):
@@ -588,7 +1120,7 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 			var spawn_pos := ship_state.position + fwd * eff_muzzle_offset + right * lateral
 			var vel := ship_state.velocity + fwd * eff_speed
 			var die_tick := tick + maxi(0, eff_lifetime_ticks)
-			var bstate := DriftTypes.DriftBulletState.new(_next_bullet_id, ship_id, spawn_pos, vel, tick, die_tick)
+			var bstate := DriftTypes.DriftBulletState.new(_next_bullet_id, ship_id, spawn_pos, vel, tick, die_tick, eff_bounces)
 			bullets[_next_bullet_id] = bstate
 			_next_bullet_id += 1
 
@@ -610,12 +1142,51 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 			continue
 		# Tile collision check (treat bullets as small circles).
 		if is_position_blocked(next_pos, bullet_radius):
-			to_remove.append(int(bid))
+			if int(b.bounces_left) <= 0:
+				to_remove.append(int(bid))
+				continue
+			var n: Vector2 = get_collision_normal(b.position, next_pos, bullet_radius)
+			if n == Vector2.ZERO:
+				to_remove.append(int(bid))
+				continue
+			# Sweep to last non-colliding point to avoid tunneling/jitter.
+			const SWEEP_ITERS_BULLET: int = 10
+			var t_lo := 0.0
+			var t_hi := 1.0
+			for _i in range(SWEEP_ITERS_BULLET):
+				var t_mid := (t_lo + t_hi) * 0.5
+				var cand := b.position.lerp(next_pos, t_mid)
+				if is_position_blocked(cand, bullet_radius):
+					t_hi = t_mid
+				else:
+					t_lo = t_mid
+			var contact_pos := b.position.lerp(next_pos, t_lo)
+			b.position = contact_pos - n * SEPARATION_EPSILON
+			if is_position_blocked(b.position, bullet_radius):
+				to_remove.append(int(bid))
+				continue
+			# Reflect velocity with optional restitution.
+			var vdotn: float = b.velocity.dot(n)
+			if vdotn < 0.0:
+				var v_t: Vector2 = b.velocity - n * vdotn
+				var normal_speed: float = -vdotn
+				var restitution: float = _resolve_bullet_bounce_restitution_for_ship(int(b.owner_id))
+				b.velocity = v_t + n * (normal_speed * restitution)
+			b.bounces_left = int(b.bounces_left) - 1
 			continue
 		b.position = next_pos
 
 	for bid in to_remove:
 		bullets.erase(bid)
+
+	# Server-only prize simulation (authoritative). Must not run in client prediction.
+	if include_prizes and prize_enabled:
+		_process_prize_despawns()
+		_process_prize_pickups()
+		if tick >= next_prize_spawn_tick:
+			_spawn_prize_batch(player_count_for_prizes)
+			var dt: int = _prize_spawn_delay_for_players(player_count_for_prizes)
+			next_prize_spawn_tick = tick + dt
 
 	# Return a snapshot (deep copy of ship states and ball)
 	var snapshot_ships: Dictionary = {}
@@ -629,9 +1200,46 @@ func step_tick(inputs: Dictionary) -> DriftTypes.DriftWorldSnapshot:
 		var b: DriftTypes.DriftBulletState = bullets.get(bid)
 		if b == null:
 			continue
-		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.position, b.velocity, b.spawn_tick, b.die_tick))
+		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.position, b.velocity, b.spawn_tick, b.die_tick, b.bounces_left))
 
-	return DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id, snapshot_bullets)
+	var snapshot_prizes: Array = []
+	if include_prizes:
+		var snapshot_prize_ids: Array = prizes.keys()
+		snapshot_prize_ids.sort()
+		for pid in snapshot_prize_ids:
+			var p: DriftTypes.DriftPrizeState = prizes.get(pid)
+			if p == null:
+				continue
+			snapshot_prizes.append(p)
+
+	return DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id, snapshot_bullets, snapshot_prizes)
+
+
+func _ship_effective_max_speed(ship_state: DriftTypes.DriftShipState) -> float:
+	var bonus: int = int(ship_state.top_speed_bonus)
+	return ship_max_speed * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+
+
+func _ship_effective_reverse_accel(_ship_state: DriftTypes.DriftShipState) -> float:
+	# Thruster affects forward thrust only; keep reverse stable.
+	return ship_reverse_accel
+
+
+func _ship_effective_thrust_accel(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTypes.DriftInputCmd) -> float:
+	# Update energy each tick (regen unless afterburner is active).
+	var eff_regen: float = energy_regen_per_s * (1.0 + RECHARGE_BONUS_PCT * float(int(ship_state.recharge_bonus)))
+	var drain: float = energy_afterburner_drain_per_s
+	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
+	if wants_afterburner and ship_state.energy > 0.0 and drain > 0.0:
+		ship_state.energy = maxf(0.0, ship_state.energy - drain * DriftConstants.TICK_DT)
+	else:
+		ship_state.energy = minf(energy_max, ship_state.energy + eff_regen * DriftConstants.TICK_DT)
+
+	var thrust_bonus: int = int(ship_state.thruster_bonus)
+	var base: float = ship_thrust_accel * (1.0 + THRUSTER_BONUS_PCT * float(thrust_bonus))
+	if wants_afterburner and ship_state.energy > 0.0:
+		return base * energy_afterburner_multiplier
+	return base
 
 
 func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShipState:
@@ -641,5 +1249,14 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 		source.velocity,
 		source.rotation,
 		source.username,
-		source.bounty
+		source.bounty,
+		source.gun_level,
+		source.bomb_level,
+		source.multi_fire_enabled,
+		source.bullet_bounce_bonus,
+		source.engine_shutdown_until_tick,
+		source.top_speed_bonus,
+		source.thruster_bonus,
+		source.recharge_bonus,
+		source.energy
 	)

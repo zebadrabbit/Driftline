@@ -26,6 +26,25 @@ This project didn’t previously have a formal changelog. The entries below were
 - Editor test puck sandbox (deterministic fixed-step) driven by the live collision cache.
 - Zoom and pan controls for editing at high DPI.
 
+## 0.5.5 - 2026-01-02
+
+### Added
+
+- Server-authoritative prize system (spawn/despawn/pickup) replicated to clients.
+- Prize configuration via `server.cfg` (`[Prize]` + `[PrizeWeight]`) with layered defaults (`res://`) and overrides (`user://`).
+- Rotating 10-frame prize sprite sheet rendering and pickup SFX (`res://client/audio/prize.wav`).
+- Reliable prize pickup event packet (`PKT_PRIZE_EVENT`) to ensure client-side SFX/FX delivery.
+- Headless smoke test: `prizes_spawn_walkable`.
+
+### Changed
+
+- Bullet ruleset supports optional bounce controls (`bounces`, `bounce_restitution`) and per-level profiles.
+- Prize availability scales with player count (clamped) so larger matches don’t feel starved.
+
+### Fixed
+
+- Prize pickup SFX could be missed due to event timing; server now buffers prize events between snapshot sends.
+
 ## Unreleased
 
 ### Added

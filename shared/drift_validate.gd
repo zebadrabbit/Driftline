@@ -597,6 +597,9 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				"speed": true,
 				"lifetime_s": true,
 				"muzzle_offset": true,
+				"bounces": true,
+				"bounce_restitution": true,
+				"levels": true,
 			}
 			for bk in bullet.keys():
 				var bks := String(bk)
@@ -605,6 +608,63 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			_validate_optional_number_range(bullet, "speed", "ruleset.weapons.bullet.speed", 0.0, 5000.0, errors)
 			_validate_optional_number_range(bullet, "lifetime_s", "ruleset.weapons.bullet.lifetime_s", 0.0, 10.0, errors)
 			_validate_optional_number_range(bullet, "muzzle_offset", "ruleset.weapons.bullet.muzzle_offset", 0.0, 64.0, errors)
+			if bullet.has("bounces"):
+				var bt := typeof(bullet.get("bounces"))
+				if bt not in [TYPE_INT, TYPE_FLOAT]:
+					errors.append(_err("ruleset.weapons.bullet.bounces", "must be a number"))
+				else:
+					var bi := int(bullet.get("bounces"))
+					if bi < 0 or bi > 16:
+						errors.append(_err("ruleset.weapons.bullet.bounces", "must be in range 0..16"))
+			_validate_optional_number_range(bullet, "bounce_restitution", "ruleset.weapons.bullet.bounce_restitution", 0.0, 2.0, errors)
+			# Optional: bullet level profiles
+			if bullet.has("levels"):
+				var levels := _require_dict(bullet.get("levels"), "ruleset.weapons.bullet.levels", errors)
+				for lk in levels.keys():
+					var lks := String(lk)
+					if not lks.is_valid_int():
+						errors.append(_err("ruleset.weapons.bullet.levels", "level key '%s' must be an integer string" % lks))
+						continue
+					var level_i := int(lks)
+					if level_i < 1 or level_i > 3:
+						errors.append(_err("ruleset.weapons.bullet.levels", "level key '%s' must be in range 1..3" % lks))
+						continue
+					var lvl := _require_dict(levels.get(lk), "ruleset.weapons.bullet.levels.%s" % lks, errors)
+					var lvl_allowed := {
+						"guns": true,
+						"multi_fire": true,
+						"speed": true,
+						"lifetime_s": true,
+						"muzzle_offset": true,
+						"bounces": true,
+						"bounce_restitution": true,
+					}
+					for k2 in lvl.keys():
+						var k2s := String(k2)
+						if not lvl_allowed.has(k2s):
+							errors.append(_err("ruleset.weapons.bullet.levels.%s" % lks, "unknown key '%s'" % k2s))
+					if lvl.has("guns"):
+						var guns_t := typeof(lvl.get("guns"))
+						if guns_t not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.weapons.bullet.levels.%s.guns" % lks, "must be a number"))
+						else:
+							var guns_i := int(lvl.get("guns"))
+							if guns_i < 1 or guns_i > 8:
+								errors.append(_err("ruleset.weapons.bullet.levels.%s.guns" % lks, "must be in range 1..8"))
+					if lvl.has("multi_fire") and typeof(lvl.get("multi_fire")) != TYPE_BOOL:
+						errors.append(_err("ruleset.weapons.bullet.levels.%s.multi_fire" % lks, "must be a boolean"))
+					_validate_optional_number_range(lvl, "speed", "ruleset.weapons.bullet.levels.%s.speed" % lks, 0.0, 5000.0, errors)
+					_validate_optional_number_range(lvl, "lifetime_s", "ruleset.weapons.bullet.levels.%s.lifetime_s" % lks, 0.0, 10.0, errors)
+					_validate_optional_number_range(lvl, "muzzle_offset", "ruleset.weapons.bullet.levels.%s.muzzle_offset" % lks, 0.0, 64.0, errors)
+					if lvl.has("bounces"):
+						var lbt := typeof(lvl.get("bounces"))
+						if lbt not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.weapons.bullet.levels.%s.bounces" % lks, "must be a number"))
+						else:
+							var lbi := int(lvl.get("bounces"))
+							if lbi < 0 or lbi > 16:
+								errors.append(_err("ruleset.weapons.bullet.levels.%s.bounces" % lks, "must be in range 0..16"))
+					_validate_optional_number_range(lvl, "bounce_restitution", "ruleset.weapons.bullet.levels.%s.bounce_restitution" % lks, 0.0, 2.0, errors)
 
 	# Optional per-ship overrides.
 	var ships: Dictionary = {}
@@ -633,11 +693,16 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				if ship_weapons.has("bullet"):
 					var ship_bullet := _require_dict(ship_weapons.get("bullet"), "ruleset.ships.%s.weapons.bullet" % ship_key, errors)
 					var ship_bullet_allowed := {
+						"level": true,
+						"multishot": true,
+						"bounce": true,
 						"guns": true,
 						"multi_fire": true,
 						"speed": true,
 						"lifetime_s": true,
 						"muzzle_offset": true,
+						"bounces": true,
+						"bounce_restitution": true,
 					}
 					for bk in ship_bullet.keys():
 						var bks := String(bk)
@@ -654,6 +719,27 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 					if ship_bullet.has("multi_fire"):
 						if typeof(ship_bullet.get("multi_fire")) != TYPE_BOOL:
 							errors.append(_err("ruleset.ships.%s.weapons.bullet.multi_fire" % ship_key, "must be a boolean"))
+					if ship_bullet.has("level"):
+						var lt := typeof(ship_bullet.get("level"))
+						if lt not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.level" % ship_key, "must be a number"))
+						else:
+							var li := int(ship_bullet.get("level"))
+							if li < 1 or li > 3:
+								errors.append(_err("ruleset.ships.%s.weapons.bullet.level" % ship_key, "must be in range 1..3"))
+					if ship_bullet.has("multishot") and typeof(ship_bullet.get("multishot")) != TYPE_BOOL:
+						errors.append(_err("ruleset.ships.%s.weapons.bullet.multishot" % ship_key, "must be a boolean"))
+					if ship_bullet.has("bounce") and typeof(ship_bullet.get("bounce")) != TYPE_BOOL:
+						errors.append(_err("ruleset.ships.%s.weapons.bullet.bounce" % ship_key, "must be a boolean"))
+					if ship_bullet.has("bounces"):
+						var bt := typeof(ship_bullet.get("bounces"))
+						if bt not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.bounces" % ship_key, "must be a number"))
+						else:
+							var bi := int(ship_bullet.get("bounces"))
+							if bi < 0 or bi > 16:
+								errors.append(_err("ruleset.ships.%s.weapons.bullet.bounces" % ship_key, "must be in range 0..16"))
+					_validate_optional_number_range(ship_bullet, "bounce_restitution", "ruleset.ships.%s.weapons.bullet.bounce_restitution" % ship_key, 0.0, 2.0, errors)
 					_validate_optional_number_range(ship_bullet, "speed", "ruleset.ships.%s.weapons.bullet.speed" % ship_key, 0.0, 5000.0, errors)
 					_validate_optional_number_range(ship_bullet, "lifetime_s", "ruleset.ships.%s.weapons.bullet.lifetime_s" % ship_key, 0.0, 10.0, errors)
 					_validate_optional_number_range(ship_bullet, "muzzle_offset", "ruleset.ships.%s.weapons.bullet.muzzle_offset" % ship_key, 0.0, 64.0, errors)
@@ -741,7 +827,29 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				var bkeys: Array = b.keys()
 				bkeys.sort()
 				for bk in bkeys:
-					out_b[String(bk)] = b.get(bk)
+					var bks := String(bk)
+					if bks == "levels" and typeof(b.get("levels")) == TYPE_DICTIONARY:
+						var levels_in: Dictionary = b.get("levels")
+						var out_levels := {}
+						var level_ids: Array[int] = []
+						for lk in levels_in.keys():
+							var lks := String(lk)
+							if lks.is_valid_int():
+								level_ids.append(int(lks))
+						level_ids.sort()
+						for lid in level_ids:
+							var lid_key := str(lid)
+							var lvl_dict: Dictionary = levels_in.get(lid_key, {})
+							var out_lvl := {}
+							if typeof(lvl_dict) == TYPE_DICTIONARY:
+								var lvl_keys: Array = lvl_dict.keys()
+								lvl_keys.sort()
+								for k2 in lvl_keys:
+									out_lvl[String(k2)] = lvl_dict.get(k2)
+							out_levels[lid_key] = out_lvl
+						out_b[bks] = out_levels
+					else:
+						out_b[bks] = b.get(bk)
 				(canonical["weapons"] as Dictionary)[ks] = out_b
 			else:
 				(canonical["weapons"] as Dictionary)[ks] = weapons.get(ks)

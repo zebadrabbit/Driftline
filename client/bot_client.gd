@@ -325,7 +325,7 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 				continue
 			if int(b.owner_id) != local_ship_id:
 				continue
-			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick))
+			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
 		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
 
