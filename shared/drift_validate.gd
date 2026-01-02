@@ -134,6 +134,12 @@ static func validate_tiles_def(defs: Dictionary) -> Dictionary:
 	var warnings: Array[String] = []
 	errors.append_array(validate_header(defs, FORMAT_TILES_DEF, SCHEMA_TILES_DEF, "tiles_def"))
 
+	# Strict root shape.
+	for k in defs.keys():
+		var key := String(k)
+		if key not in ["format", "schema_version", "defaults", "tiles", "reserved"]:
+			errors.append(_err("tiles_def", "unknown top-level key '%s'" % key))
+
 	# Required objects.
 	var defaults := _require_dict(defs.get("defaults"), "tiles_def.defaults", errors)
 	var tiles := _require_dict(defs.get("tiles"), "tiles_def.tiles", errors)
@@ -151,6 +157,12 @@ static func validate_tiles_def(defs: Dictionary) -> Dictionary:
 
 	if layer_default not in ["bg", "mid", "fg"]:
 		errors.append(_err("tiles_def.defaults.layer", "must be one of: bg, mid, fg"))
+
+	# Defaults may only include known keys.
+	for dk in defaults.keys():
+		var dks := String(dk)
+		if dks not in ["solid", "layer", "render_layer"]:
+			errors.append(_err("tiles_def.defaults", "unknown key '%s'" % dks))
 
 	# Validate tile overrides.
 	var canonical_tiles: Dictionary = {}
@@ -179,7 +191,14 @@ static func validate_tiles_def(defs: Dictionary) -> Dictionary:
 		# Normalize dialect: render_layer -> layer.
 		if canon_o.has("render_layer") and not canon_o.has("layer"):
 			canon_o["layer"] = _render_layer_to_layer(String(canon_o.get("render_layer")))
+		if canon_o.has("render_layer"):
 			canon_o.erase("render_layer")
+
+		# Unknown tile override keys are forbidden (schema is versioned).
+		for okk in canon_o.keys():
+			var okks := String(okk)
+			if okks not in ["solid", "layer", "door", "safe_zone"]:
+				errors.append(_err("tiles_def.tiles['%s']" % key, "unknown key '%s'" % okks))
 
 		# Validate known fields when present.
 		if canon_o.has("solid") and typeof(canon_o["solid"]) != TYPE_BOOL:
@@ -199,9 +218,17 @@ static func validate_tiles_def(defs: Dictionary) -> Dictionary:
 	var reserved_out: Dictionary = {}
 	if defs.has("reserved"):
 		var reserved := _require_dict(defs.get("reserved"), "tiles_def.reserved", errors)
+		for rk in reserved.keys():
+			var rks := String(rk)
+			if rks != "doors":
+				errors.append(_err("tiles_def.reserved", "unknown key '%s'" % rks))
 		# Only validate the reserved.doors shape if present.
 		if reserved.has("doors"):
 			var doors := _require_dict(reserved.get("doors"), "tiles_def.reserved.doors", errors)
+			for dk in doors.keys():
+				var dks := String(dk)
+				if dks not in ["frames", "solid_when_closed", "comment"]:
+					errors.append(_err("tiles_def.reserved.doors", "unknown key '%s'" % dks))
 			if doors.has("frames"):
 				var frames := _require_array(doors.get("frames"), "tiles_def.reserved.doors.frames", errors)
 				for i in range(frames.size()):
@@ -209,6 +236,8 @@ static func validate_tiles_def(defs: Dictionary) -> Dictionary:
 						errors.append(_err("tiles_def.reserved.doors.frames[%d]" % i, "must be a string 'ax,ay'"))
 			if doors.has("solid_when_closed") and typeof(doors.get("solid_when_closed")) != TYPE_BOOL:
 				errors.append(_err("tiles_def.reserved.doors.solid_when_closed", "must be a boolean"))
+			if doors.has("comment") and typeof(doors.get("comment")) != TYPE_STRING:
+				errors.append(_err("tiles_def.reserved.doors.comment", "must be a string"))
 			reserved_out["doors"] = doors
 		reserved_out = reserved
 
@@ -328,6 +357,10 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 			errors.append(_err("map.entities[%d]" % i, "must be an object"))
 			continue
 		var d: Dictionary = e
+		for ek in d.keys():
+			var eks := String(ek)
+			if eks not in ["type", "x", "y", "team"]:
+				errors.append(_err("map.entities[%d]" % i, "unknown key '%s'" % eks))
 		var t := _require_string(d.get("type"), "map.entities[%d].type" % i, errors)
 		if not allowed.has(t):
 			errors.append(_err("map.entities[%d].type" % i, "invalid type '%s'" % t))
@@ -386,6 +419,30 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 		"warnings": warnings,
 		"map": canonical,
 	}
+
+
+static func validate_tiles_def_dict(defs: Dictionary) -> Dictionary:
+	# Minimal wrapper for headless contract tests.
+	# Returns: { ok: bool, error?: String }
+	var res := validate_tiles_def(defs)
+	if bool(res.get("ok", false)):
+		return {"ok": true}
+	var err_text := "tiles_def validation failed"
+	for e in (res.get("errors", []) as Array):
+		err_text += "\n - " + String(e)
+	return {"ok": false, "error": err_text}
+
+
+static func validate_map_dict(map_root: Dictionary) -> Dictionary:
+	# Minimal wrapper for headless contract tests.
+	# Returns: { ok: bool, error?: String }
+	var res := validate_map(map_root)
+	if bool(res.get("ok", false)):
+		return {"ok": true}
+	var err_text := "map validation failed"
+	for e in (res.get("errors", []) as Array):
+		err_text += "\n - " + String(e)
+	return {"ok": false, "error": err_text}
 
 
 static func validate_server_config(root: Dictionary) -> Dictionary:

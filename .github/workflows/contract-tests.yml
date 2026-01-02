@@ -25,6 +25,12 @@ jobs:
           unzip -q godot.zip -d godot
           chmod +x godot/Godot_v${GODOT_VERSION}_linux.x86_64
 
+      - name: Import warm-up
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./godot/Godot_v4.5.1-stable_linux.x86_64 --headless --editor --quit --path .
+          
       - name: Run contract tests
         shell: bash
         run: |

@@ -3,6 +3,10 @@
 ## Run:
 ##   godot --headless --quit --script res://tests/run_contract_tests.gd
 
+# This runner enforces the Testing Policy in docs/testing.md
+# valid_* MUST pass, invalid_* MUST fail. No exceptions.
+
+
 extends SceneTree
 
 const DriftValidate = preload("res://shared/drift_validate.gd")
@@ -89,14 +93,23 @@ func _run_one(path: String) -> void:
 
 	var root: Dictionary = parsed
 
-	# Dispatch based on folder. (Keeps this runner simple as we add more contracts.)
+	# Dispatch based on the immediate contract folder.
 	var rel := path.replace("res://tests/contracts/", "")
-	if rel.begins_with("server_config/"):
+	var contract := rel.split("/", false, 1)[0]
+	if contract == "server_config":
 		var res := DriftValidate.validate_server_config_dict(root)
 		_assert_expectation(filename, bool(res.get("ok", false)), String(res.get("error", "")), expect_ok)
 		return
+	if contract == "map":
+		var res := DriftValidate.validate_map_dict(root)
+		_assert_expectation(filename, bool(res.get("ok", false)), String(res.get("error", "")), expect_ok)
+		return
+	if contract == "tiles_def":
+		var res := DriftValidate.validate_tiles_def_dict(root)
+		_assert_expectation(filename, bool(res.get("ok", false)), String(res.get("error", "")), expect_ok)
+		return
 
-	_fail("%s (no validator wired for %s)" % [filename, rel])
+	_fail("%s (unknown contract folder '%s' for %s)" % [filename, contract, rel])
 
 
 func _assert_expectation(filename: String, got_ok: bool, error_text: String, expect_ok: bool) -> void:

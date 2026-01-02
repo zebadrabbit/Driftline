@@ -1,0 +1,7 @@
+{
+  "format": "driftline.map",
+  "schema_version": 999,
+  "meta": {"w": 2, "h": 2, "tile_size": 16, "tileset": "subspace_base"},
+  "layers": {"bg": [], "solid": [], "fg": []},
+  "entities": []
+}

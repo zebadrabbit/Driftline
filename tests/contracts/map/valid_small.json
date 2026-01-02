@@ -1,0 +1,28 @@
+{
+  "format": "driftline.map",
+  "schema_version": 1,
+  "meta": {
+    "w": 5,
+    "h": 5,
+    "tile_size": 16,
+    "tileset": "subspace_base",
+    "name": "Contract Test Map",
+    "door_open_seconds": 1.25,
+    "door_closed_seconds": 2.0,
+    "door_frame_seconds": 0.1,
+    "door_start_open": false
+  },
+  "layers": {
+    "bg": [
+      [2, 2, 0, 8]
+    ],
+    "solid": [
+      [2, 3, 10, 8]
+    ],
+    "fg": []
+  },
+  "entities": [
+    {"type": "spawn", "x": 3, "y": 3, "team": 1},
+    {"type": "flag", "x": 1, "y": 1, "team": 2}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "format": "driftline.tiles_def",
+  "schema_version": 999,
+  "defaults": {"layer": "mid", "solid": true},
+  "tiles": {}
+}

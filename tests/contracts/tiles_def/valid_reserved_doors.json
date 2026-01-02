@@ -1,0 +1,19 @@
+{
+  "format": "driftline.tiles_def",
+  "schema_version": 1,
+  "defaults": {
+    "layer": "mid",
+    "solid": true
+  },
+  "reserved": {
+    "doors": {
+      "comment": "Door frames are engine-reserved.",
+      "frames": ["9,8", "10,8"],
+      "solid_when_closed": true
+    }
+  },
+  "tiles": {
+    "0,8": {"layer": "bg", "solid": false},
+    "9,8": {"door": true}
+  }
+}

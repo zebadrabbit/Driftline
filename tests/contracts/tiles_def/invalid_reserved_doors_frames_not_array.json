@@ -1,0 +1,12 @@
+{
+  "format": "driftline.tiles_def",
+  "schema_version": 1,
+  "defaults": {"layer": "mid", "solid": true},
+  "reserved": {
+    "doors": {
+      "frames": 1,
+      "solid_when_closed": true
+    }
+  },
+  "tiles": {}
+}
