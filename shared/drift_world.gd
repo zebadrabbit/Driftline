@@ -45,14 +45,25 @@ var ball_knock_impulse: float = DriftConstants.BALL_KNOCK_IMPULSE
 var ball_stick_offset: float = 18.0
 var ball_steal_padding: float = 4.0
 
-var energy_max: float = 100.0
-var energy_regen_per_s: float = 18.0
-var energy_afterburner_drain_per_s: float = 30.0
+## Deterministic energy system tuning (integer, tick-based).
+## Units:
+## - energy_*_per_sec: integer energy points per second
+## - costs: integer energy points
+var energy_max_points: int = DriftConstants.DEFAULT_ENERGY_MAX
+var energy_recharge_rate_per_sec: int = DriftConstants.DEFAULT_RECHARGE_RATE_PER_SEC
+var energy_recharge_delay_ticks: int = DriftConstants.DEFAULT_RECHARGE_DELAY_TICKS
+var energy_afterburner_drain_per_sec: int = 0 # optional, can be configured by ruleset
+var bullet_energy_cost: int = DriftConstants.DEFAULT_BULLET_ENERGY_COST
+var bullet_multifire_energy_cost: int = DriftConstants.DEFAULT_MULTIFIRE_ENERGY_COST
+var bomb_energy_cost: int = DriftConstants.DEFAULT_BOMB_ENERGY_COST
 var energy_afterburner_multiplier: float = 1.6
 
 const TOP_SPEED_BONUS_PCT: float = 0.04
 const THRUSTER_BONUS_PCT: float = 0.06
 const RECHARGE_BONUS_PCT: float = 0.15
+
+const RECHARGE_BONUS_PCT_NUM: int = 15
+const RECHARGE_BONUS_PCT_DEN: int = 100
 
 
 # Prizes (server authoritative; replicated to clients via snapshots)
@@ -163,16 +174,57 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 			bullet_muzzle_offset = float(b.get("muzzle_offset", bullet_muzzle_offset))
 			bullet_bounces = int(b.get("bounces", bullet_bounces))
 			bullet_bounce_restitution = float(b.get("bounce_restitution", bullet_bounce_restitution))
-			# Lifetime is expressed in seconds in the ruleset; convert to ticks deterministically.
 			if b.has("lifetime_s"):
 				var lifetime_s: float = float(b.get("lifetime_s"))
 				bullet_lifetime_ticks = int(round(lifetime_s / DriftConstants.TICK_DT))
 
 	var energy: Dictionary = canonical_ruleset.get("energy", {})
 	if typeof(energy) == TYPE_DICTIONARY and not energy.is_empty():
-		energy_max = float(energy.get("max", energy_max))
-		energy_regen_per_s = float(energy.get("regen_per_s", energy_regen_per_s))
-		energy_afterburner_drain_per_s = float(energy.get("afterburner_drain_per_s", energy_afterburner_drain_per_s))
+		# Legacy keys (schema v1): max, regen_per_s, afterburner_drain_per_s.
+		# New keys (optional): recharge_rate_per_sec, recharge_delay_ms, bullet_energy_cost, multifire_energy_cost, bomb_energy_cost.
+		if energy.has("max"):
+			var m = energy.get("max")
+			if typeof(m) in [TYPE_INT, TYPE_FLOAT]:
+				energy_max_points = maxi(0, int(round(float(m))))
+
+		# Prefer new name if present; fall back to legacy.
+		if energy.has("recharge_rate_per_sec"):
+			var r = energy.get("recharge_rate_per_sec")
+			if typeof(r) in [TYPE_INT, TYPE_FLOAT]:
+				energy_recharge_rate_per_sec = maxi(0, int(round(float(r))))
+		elif energy.has("regen_per_s"):
+			var rr = energy.get("regen_per_s")
+			if typeof(rr) in [TYPE_INT, TYPE_FLOAT]:
+				energy_recharge_rate_per_sec = maxi(0, int(round(float(rr))))
+
+		if energy.has("recharge_delay_ms"):
+			var ms = energy.get("recharge_delay_ms")
+			if typeof(ms) in [TYPE_INT, TYPE_FLOAT]:
+				var ms_i: int = maxi(0, int(round(float(ms))))
+				energy_recharge_delay_ticks = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
+
+		# Prefer new name if present; fall back to legacy.
+		if energy.has("afterburner_drain_per_sec"):
+			var d2 = energy.get("afterburner_drain_per_sec")
+			if typeof(d2) in [TYPE_INT, TYPE_FLOAT]:
+				energy_afterburner_drain_per_sec = maxi(0, int(round(float(d2))))
+		elif energy.has("afterburner_drain_per_s"):
+			var d = energy.get("afterburner_drain_per_s")
+			if typeof(d) in [TYPE_INT, TYPE_FLOAT]:
+				energy_afterburner_drain_per_sec = maxi(0, int(round(float(d))))
+
+		if energy.has("bullet_energy_cost"):
+			var bc = energy.get("bullet_energy_cost")
+			if typeof(bc) in [TYPE_INT, TYPE_FLOAT]:
+				bullet_energy_cost = maxi(0, int(round(float(bc))))
+		if energy.has("multifire_energy_cost"):
+			var mc = energy.get("multifire_energy_cost")
+			if typeof(mc) in [TYPE_INT, TYPE_FLOAT]:
+				bullet_multifire_energy_cost = maxi(0, int(round(float(mc))))
+		if energy.has("bomb_energy_cost"):
+			var boc = energy.get("bomb_energy_cost")
+			if typeof(boc) in [TYPE_INT, TYPE_FLOAT]:
+				bomb_energy_cost = maxi(0, int(round(float(boc))))
 
 
 func set_map_dimensions(w_tiles: int, h_tiles: int) -> void:
@@ -243,6 +295,53 @@ func _prize_spawn_delay_for_players(player_count: int) -> int:
 	var min_delay: int = maxi(1, int(round(float(prize_delay_ticks) / 10.0)))
 	var max_delay: int = maxi(1, int(prize_delay_ticks))
 	return clampi(desired, min_delay, max_delay)
+
+
+func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTypes.DriftInputCmd) -> void:
+	# Deterministic, tick-based energy update.
+	# - Recharge is linear and begins only after energy_recharge_wait_ticks reaches 0.
+	# - Any drain event resets energy_recharge_wait_ticks to energy_recharge_delay_ticks.
+	# - No float accumulation: recharge and continuous drains use integer remainder accumulators.
+
+	# Tick down recharge wait.
+	# Important: if the ship was waiting at the start of the tick, we do NOT allow recharge
+	# to begin on the same tick the counter reaches 0 (avoids an off-by-one early recharge).
+	var was_waiting: bool = int(ship_state.energy_recharge_wait_ticks) > 0
+	if was_waiting:
+		ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_wait_ticks) - 1
+		if int(ship_state.energy_recharge_wait_ticks) < 0:
+			ship_state.energy_recharge_wait_ticks = 0
+
+	# Optional continuous drain: afterburner (Shift + forward thrust).
+	# This keeps existing boost behavior while using deterministic integer math.
+	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
+	if wants_afterburner and int(ship_state.energy_current) > 0 and int(energy_afterburner_drain_per_sec) > 0:
+		# Distribute per-second drain across ticks deterministically.
+		ship_state.energy_drain_fp_accum += int(energy_afterburner_drain_per_sec)
+		var drain_this_tick: int = int(ship_state.energy_drain_fp_accum) / DriftConstants.TICK_RATE
+		ship_state.energy_drain_fp_accum = int(ship_state.energy_drain_fp_accum) % DriftConstants.TICK_RATE
+		if drain_this_tick > 0:
+			# Afterburner should not be blocked by "insufficient" energy; clamp to 0.
+			ship_state.energy_current = maxi(0, int(ship_state.energy_current) - drain_this_tick)
+			ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_delay_ticks)
+
+	# Recharge (only when wait is zero, and we were not waiting at tick start).
+	if (not was_waiting) and int(ship_state.energy_recharge_wait_ticks) == 0 and int(ship_state.energy_current) < int(ship_state.energy_max):
+		var base_rate: int = maxi(0, int(ship_state.energy_recharge_rate_per_sec))
+		# Apply recharge bonus deterministically as a rational percentage.
+		var bonus: int = maxi(0, int(ship_state.recharge_bonus))
+		var eff_rate: int = base_rate
+		if bonus > 0 and base_rate > 0:
+			eff_rate = base_rate + int((base_rate * RECHARGE_BONUS_PCT_NUM * bonus) / RECHARGE_BONUS_PCT_DEN)
+		# Distribute per-second recharge across ticks deterministically.
+		ship_state.energy_recharge_fp_accum += eff_rate
+		var add_this_tick: int = int(ship_state.energy_recharge_fp_accum) / DriftConstants.TICK_RATE
+		ship_state.energy_recharge_fp_accum = int(ship_state.energy_recharge_fp_accum) % DriftConstants.TICK_RATE
+		if add_this_tick > 0:
+			ship_state.energy_current = mini(int(ship_state.energy_max), int(ship_state.energy_current) + add_this_tick)
+
+	# Keep legacy mirror updated.
+	ship_state.energy = float(ship_state.energy_current)
 
 
 func set_prize_rng_seed(seed_value: int) -> void:
@@ -466,10 +565,14 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 	match kind:
 		DriftTypes.PrizeKind.Energy:
 			applied_effect = true
+			var amt: int = 25
 			if is_negative:
-				ship_state.energy = maxf(0.0, float(ship_state.energy) - 25.0)
+				# Negative prize drains energy (clamped) and resets recharge delay.
+				ship_state.energy_current = maxi(0, int(ship_state.energy_current) - amt)
+				ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_delay_ticks)
 			else:
-				ship_state.energy = minf(energy_max, float(ship_state.energy) + 25.0)
+				add_energy(ship_state, amt)
+			ship_state.energy = float(ship_state.energy_current)
 		DriftTypes.PrizeKind.Recharge:
 			applied_effect = true
 			if is_negative:
@@ -612,8 +715,37 @@ func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_spe
 
 func add_ship(id: int, position: Vector2) -> void:
 	var s: DriftTypes.DriftShipState = DriftTypes.DriftShipState.new(id, position)
-	s.energy = energy_max
+	s.energy_max = maxi(0, int(energy_max_points))
+	s.energy_current = s.energy_max
+	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
+	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
+	s.energy_recharge_wait_ticks = 0
+	s.energy_recharge_fp_accum = 0
+	s.energy_drain_fp_accum = 0
+	# Legacy mirror for older UI/debug.
+	s.energy = float(s.energy_current)
 	ships[id] = s
+
+
+func drain_energy(ship: DriftTypes.DriftShipState, amount: int) -> bool:
+	# Weapon-style drain: block if insufficient energy.
+	var amt: int = maxi(0, int(amount))
+	if amt <= 0:
+		return true
+	if int(ship.energy_current) < amt:
+		return false
+	ship.energy_current = int(ship.energy_current) - amt
+	ship.energy_recharge_wait_ticks = int(ship.energy_recharge_delay_ticks)
+	ship.energy = float(ship.energy_current)
+	return true
+
+
+func add_energy(ship: DriftTypes.DriftShipState, amount: int) -> void:
+	var amt: int = maxi(0, int(amount))
+	if amt <= 0:
+		return
+	ship.energy_current = mini(int(ship.energy_max), int(ship.energy_current) + amt)
+	ship.energy = float(ship.energy_current)
 
 func get_spawn_position(ship_id: int) -> Vector2:
 	# Example: spread ships horizontally from center
@@ -802,6 +934,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	for ship_id in ship_ids:
 		var ship_state: DriftTypes.DriftShipState = ships[ship_id]
 		var input_cmd: DriftTypes.DriftInputCmd = inputs.get(ship_id, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
+		_step_ship_energy(ship_state, input_cmd)
 		# Engine shutdown (negative prize effect): thrust/rotation disabled, firing allowed.
 		if int(ship_state.engine_shutdown_until_tick) > 0 and tick < int(ship_state.engine_shutdown_until_tick):
 			input_cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, bool(input_cmd.fire_primary), bool(input_cmd.fire_secondary), bool(input_cmd.modifier))
@@ -1114,6 +1247,14 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			var idx: int = int(posmod(tick + ship_id, guns))
 			fire_guns.append(idx)
 
+		# Energy gate: firing drains energy and blocks if insufficient.
+		var shots: int = fire_guns.size()
+		var cost: int = int(bullet_energy_cost)
+		if shots > 1:
+			cost = int(bullet_multifire_energy_cost)
+		if cost > 0 and not drain_energy(ship_state, cost):
+			continue
+
 		for gi in fire_guns:
 			var centered := float(gi) - (float(guns - 1) * 0.5)
 			var lateral := centered * bullet_gun_spacing
@@ -1226,18 +1367,10 @@ func _ship_effective_reverse_accel(_ship_state: DriftTypes.DriftShipState) -> fl
 
 
 func _ship_effective_thrust_accel(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTypes.DriftInputCmd) -> float:
-	# Update energy each tick (regen unless afterburner is active).
-	var eff_regen: float = energy_regen_per_s * (1.0 + RECHARGE_BONUS_PCT * float(int(ship_state.recharge_bonus)))
-	var drain: float = energy_afterburner_drain_per_s
-	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
-	if wants_afterburner and ship_state.energy > 0.0 and drain > 0.0:
-		ship_state.energy = maxf(0.0, ship_state.energy - drain * DriftConstants.TICK_DT)
-	else:
-		ship_state.energy = minf(energy_max, ship_state.energy + eff_regen * DriftConstants.TICK_DT)
-
 	var thrust_bonus: int = int(ship_state.thruster_bonus)
 	var base: float = ship_thrust_accel * (1.0 + THRUSTER_BONUS_PCT * float(thrust_bonus))
-	if wants_afterburner and ship_state.energy > 0.0:
+	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
+	if wants_afterburner and int(ship_state.energy_current) > 0:
 		return base * energy_afterburner_multiplier
 	return base
 
@@ -1258,5 +1391,12 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 		source.top_speed_bonus,
 		source.thruster_bonus,
 		source.recharge_bonus,
-		source.energy
+		source.energy,
+		source.energy_current,
+		source.energy_max,
+		source.energy_recharge_rate_per_sec,
+		source.energy_recharge_delay_ticks,
+		source.energy_recharge_wait_ticks,
+		source.energy_recharge_fp_accum,
+		source.energy_drain_fp_accum
 	)

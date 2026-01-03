@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      GODOT_VERSION: 4.5.1-stable
+      GODOT_ZIP: Godot_v4.5.1-stable_linux.x86_64.zip
+      GODOT_BIN: Godot_v4.5.1-stable_linux.x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Godot download
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            godot/
+            godot.zip
+          key: godot-${{ runner.os }}-${{ env.GODOT_VERSION }}
+
+      - name: Download Godot (headless)
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${GODOT_ZIP}"
+          echo "Downloading $URL"
+          curl -L "$URL" -o godot.zip
+          unzip -q godot.zip -d godot
+
+      - name: Ensure Godot executable bit
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "godot/${GODOT_BIN}"
+
+      - name: Cache .godot import cache
+        uses: actions/cache@v4
+        with:
+          path: .godot/
+          key: godot-import-${{ runner.os }}-${{ env.GODOT_VERSION }}-${{ hashFiles('project.godot', 'VERSION', 'assets/**/*.import', 'client/**/*.tscn', 'client/**/*.gd', 'shared/**/*.gd', 'server/**/*.gd') }}
+          restore-keys: |
+            godot-import-${{ runner.os }}-${{ env.GODOT_VERSION }}-
+
+      - name: Import warm-up
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./godot/${GODOT_BIN} --headless --editor --quit --path .
+
+      - name: Run contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./godot/${GODOT_BIN} --headless --quit --path . --script res://tests/run_contract_tests.gd
+
+      - name: Run smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./godot/${GODOT_BIN} --headless --quit --path . --script res://tests/run_smoke_tests.gd

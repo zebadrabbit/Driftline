@@ -210,6 +210,16 @@ static func pack_snapshot_packet(
 	#     u8 top_speed_bonus
 	#     u8 thruster_bonus
 	#     u8 recharge_bonus
+	#   [optional] u16 ship_energy_v3_count
+	#   [optional] repeated ship_energy_v3_count times:
+	#     u32 id
+	#     u32 energy_current
+	#     u32 energy_max
+	#     u32 energy_recharge_rate_per_sec
+	#     u16 energy_recharge_delay_ticks
+	#     u16 energy_recharge_wait_ticks
+	#     u16 energy_recharge_fp_accum
+	#     u16 energy_drain_fp_accum
 	#   [optional] u16 prize_event_count
 	#   [optional] repeated prize_event_count times:
 	#     u8 event_type (1=pickup)
@@ -290,6 +300,19 @@ static func pack_snapshot_packet(
 		buffer.put_u8(int(clampi(int(s2.top_speed_bonus), 0, 255)))
 		buffer.put_u8(int(clampi(int(s2.thruster_bonus), 0, 255)))
 		buffer.put_u8(int(clampi(int(s2.recharge_bonus), 0, 255)))
+
+	# Ship energy v3 (optional trailing).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var s3 = ships[i]
+		buffer.put_32(int(s3.id))
+		buffer.put_32(int(maxi(0, int(s3.energy_current))))
+		buffer.put_32(int(maxi(0, int(s3.energy_max))))
+		buffer.put_32(int(maxi(0, int(s3.energy_recharge_rate_per_sec))))
+		buffer.put_u16(int(clampi(int(s3.energy_recharge_delay_ticks), 0, 65535)))
+		buffer.put_u16(int(clampi(int(s3.energy_recharge_wait_ticks), 0, 65535)))
+		buffer.put_u16(int(clampi(int(s3.energy_recharge_fp_accum), 0, 65535)))
+		buffer.put_u16(int(clampi(int(s3.energy_drain_fp_accum), 0, 65535)))
 
 	# Prize events (optional trailing).
 	var ev_count: int = prize_events.size()
@@ -606,6 +629,38 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 				ss2.top_speed_bonus = clampi(top_speed_bonus, 0, 16)
 				ss2.thruster_bonus = clampi(thruster_bonus, 0, 16)
 				ss2.recharge_bonus = clampi(recharge_bonus, 0, 16)
+
+	# Optional ship energy v3 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_energy3_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 + 4 + 4 + 2 + 2 + 2 + 2 = 24 bytes.
+		if buffer.get_available_bytes() < (ship_energy3_count * 24):
+			return {}
+		var ship_by_id3: Dictionary = {}
+		for s3 in ships:
+			if s3 == null:
+				continue
+			ship_by_id3[int(s3.id)] = s3
+		for _i in range(ship_energy3_count):
+			var sid3: int = int(buffer.get_32())
+			var energy_current: int = int(buffer.get_32())
+			var energy_max: int = int(buffer.get_32())
+			var recharge_rate_per_sec: int = int(buffer.get_32())
+			var recharge_delay_ticks: int = int(buffer.get_u16())
+			var recharge_wait_ticks: int = int(buffer.get_u16())
+			var recharge_fp_accum: int = int(buffer.get_u16())
+			var drain_fp_accum: int = int(buffer.get_u16())
+			if ship_by_id3.has(sid3):
+				var ss3: DriftTypes.DriftShipState = ship_by_id3[sid3]
+				ss3.energy_current = maxi(0, energy_current)
+				ss3.energy_max = maxi(0, energy_max)
+				ss3.energy_recharge_rate_per_sec = maxi(0, recharge_rate_per_sec)
+				ss3.energy_recharge_delay_ticks = maxi(0, recharge_delay_ticks)
+				ss3.energy_recharge_wait_ticks = maxi(0, recharge_wait_ticks)
+				ss3.energy_recharge_fp_accum = maxi(0, recharge_fp_accum)
+				ss3.energy_drain_fp_accum = maxi(0, drain_fp_accum)
+				# Keep legacy mirror consistent.
+				ss3.energy = float(ss3.energy_current)
 
 	# Optional prize events section.
 	var prize_events: Array = []

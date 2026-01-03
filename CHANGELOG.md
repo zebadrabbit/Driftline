@@ -75,6 +75,9 @@ This project didn’t previously have a formal changelog. The entries below were
 - Map format spec: `docs/map_format_v1.md`.
 - Server-driven map selection via `server.cfg` (single/rotation/random) using `ConfigFile`.
 - MapManifest in welcome handshake (`map_path`, `map_hash`, optional `map_version`).
+- Deterministic tick-based energy system (integer points + recharge delay) replicated in snapshots.
+- Ruleset schema v2 requiring explicit energy/cost tuning keys (legacy v1 rulesets still supported).
+- Smoke test: `energy_deterministic_recharge_and_costs`.
 
 ### Changed
 
@@ -83,6 +86,7 @@ This project didn’t previously have a formal changelog. The entries below were
 - Server spawn selection now prefers map `entities` with `type="spawn"` when present.
 - Collision handling in the shared world simulation iterated to address wall-phasing and bounce feel.
 - UI polish: connection/menu screen centered and map visuals hidden underneath while the overlay is visible.
+- HUD energy readout now reports `energy_current/energy_max` and recharge wait ticks.
 
 ### Fixed
 

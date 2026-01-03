@@ -17,7 +17,9 @@ const SCHEMA_TILESET_MANIFEST := 1
 const SCHEMA_TILES_DEF := 1
 const SCHEMA_MAP := 1
 const SCHEMA_SERVER_CONFIG := 2
-const SCHEMA_RULESET := 1
+const SCHEMA_RULESET_V1 := 1
+const SCHEMA_RULESET_V2 := 2
+const SCHEMA_RULESET_LATEST := SCHEMA_RULESET_V2
 
 const TILE_SIZE := 16
 
@@ -516,7 +518,23 @@ static func validate_server_config(root: Dictionary) -> Dictionary:
 static func validate_ruleset(root: Dictionary) -> Dictionary:
 	var errors: Array[String] = []
 	var warnings: Array[String] = []
-	errors.append_array(validate_header(root, FORMAT_RULESET, SCHEMA_RULESET, "ruleset"))
+
+	# Rulesets support multiple schema versions (legacy + latest).
+	# Unknown schema versions must fail loudly.
+	var schema_version: int = 0
+	if not root.has("format"):
+		errors.append(_err("ruleset", "missing required field 'format'"))
+	else:
+		var fmt := _require_string(root.get("format"), "ruleset.format", errors)
+		if fmt != "" and fmt != FORMAT_RULESET:
+			errors.append(_err("ruleset", "unknown format '%s' (expected '%s')" % [fmt, FORMAT_RULESET]))
+
+	if not root.has("schema_version"):
+		errors.append(_err("ruleset", "missing required field 'schema_version'"))
+	else:
+		schema_version = _require_int(root.get("schema_version"), "ruleset.schema_version", errors)
+		if schema_version not in [SCHEMA_RULESET_V1, SCHEMA_RULESET_V2]:
+			errors.append(_err("ruleset", "unsupported schema_version %d (supported: %d, %d)" % [schema_version, SCHEMA_RULESET_V1, SCHEMA_RULESET_V2]))
 
 	# Strict top-level shape.
 	for k in root.keys():
@@ -744,22 +762,51 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 					_validate_optional_number_range(ship_bullet, "lifetime_s", "ruleset.ships.%s.weapons.bullet.lifetime_s" % ship_key, 0.0, 10.0, errors)
 					_validate_optional_number_range(ship_bullet, "muzzle_offset", "ruleset.ships.%s.weapons.bullet.muzzle_offset" % ship_key, 0.0, 64.0, errors)
 
-	# Optional energy section.
+	# Energy section.
 	var energy: Dictionary = {}
+	if schema_version == SCHEMA_RULESET_V2 and not root.has("energy"):
+		errors.append(_err("ruleset", "missing required field 'energy'"))
 	if root.has("energy"):
 		energy = _require_dict(root.get("energy"), "ruleset.energy", errors)
 		var energy_allowed := {
+			# Legacy (schema v1)
 			"max": true,
 			"regen_per_s": true,
 			"afterburner_drain_per_s": true,
+			# New (optional)
+			"recharge_rate_per_sec": true,
+			"recharge_delay_ms": true,
+			"bullet_energy_cost": true,
+			"multifire_energy_cost": true,
+			"bomb_energy_cost": true,
 		}
 		for ek in energy.keys():
 			var eks := String(ek)
 			if not energy_allowed.has(eks):
 				errors.append(_err("ruleset.energy", "unknown key '%s'" % eks))
-		_validate_optional_number_range(energy, "max", "ruleset.energy.max", 0.0, 1000.0, errors)
-		_validate_optional_number_range(energy, "regen_per_s", "ruleset.energy.regen_per_s", 0.0, 1000.0, errors)
-		_validate_optional_number_range(energy, "afterburner_drain_per_s", "ruleset.energy.afterburner_drain_per_s", 0.0, 1000.0, errors)
+
+		# In schema v2, energy tuning must be explicit (no silent fallbacks).
+		if schema_version == SCHEMA_RULESET_V2:
+			for req in [
+				"max",
+				"recharge_rate_per_sec",
+				"recharge_delay_ms",
+				"afterburner_drain_per_s",
+				"bullet_energy_cost",
+				"multifire_energy_cost",
+				"bomb_energy_cost",
+			]:
+				if not energy.has(req):
+					errors.append(_err("ruleset.energy", "missing required field '%s'" % req))
+
+		_validate_optional_number_range(energy, "max", "ruleset.energy.max", 0.0, 100000.0, errors)
+		_validate_optional_number_range(energy, "regen_per_s", "ruleset.energy.regen_per_s", 0.0, 100000.0, errors)
+		_validate_optional_number_range(energy, "afterburner_drain_per_s", "ruleset.energy.afterburner_drain_per_s", 0.0, 100000.0, errors)
+		_validate_optional_number_range(energy, "recharge_rate_per_sec", "ruleset.energy.recharge_rate_per_sec", 0.0, 100000.0, errors)
+		_validate_optional_number_range(energy, "recharge_delay_ms", "ruleset.energy.recharge_delay_ms", 0.0, 10000.0, errors)
+		_validate_optional_number_range(energy, "bullet_energy_cost", "ruleset.energy.bullet_energy_cost", 0.0, 10000.0, errors)
+		_validate_optional_number_range(energy, "multifire_energy_cost", "ruleset.energy.multifire_energy_cost", 0.0, 10000.0, errors)
+		_validate_optional_number_range(energy, "bomb_energy_cost", "ruleset.energy.bomb_energy_cost", 0.0, 10000.0, errors)
 
 	# Warnings for omitted optional knobs (no silent defaults).
 	var missing_physics: Array[String] = []
@@ -791,18 +838,31 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 					missing_bullet.append(k)
 			if missing_bullet.size() > 0:
 				warnings.append(_err("ruleset.weapons.bullet", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_bullet)))
-	if root.has("energy"):
-		var missing_energy: Array[String] = []
-		for k in ["max", "regen_per_s", "afterburner_drain_per_s"]:
-			if not energy.has(k):
-				missing_energy.append(k)
-		if missing_energy.size() > 0:
-			warnings.append(_err("ruleset.energy", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_energy)))
+	# In schema v1, missing tuning is permitted but must produce warnings (no silent defaults).
+	if schema_version == SCHEMA_RULESET_V1:
+		if not root.has("energy"):
+			warnings.append(_err("ruleset.energy", "missing optional section (engine defaults will be used)"))
+		else:
+			var missing_energy: Array[String] = []
+			for k in [
+				"max",
+				"regen_per_s",
+				"afterburner_drain_per_s",
+				"recharge_rate_per_sec",
+				"recharge_delay_ms",
+				"bullet_energy_cost",
+				"multifire_energy_cost",
+				"bomb_energy_cost",
+			]:
+				if not energy.has(k):
+					missing_energy.append(k)
+			if missing_energy.size() > 0:
+				warnings.append(_err("ruleset.energy", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_energy)))
 
 	# Canonical (no auto-fill).
 	var canonical := {
 		"format": FORMAT_RULESET,
-		"schema_version": SCHEMA_RULESET,
+		"schema_version": schema_version,
 		"physics": {},
 	}
 	# Required

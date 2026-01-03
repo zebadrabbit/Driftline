@@ -26,7 +26,33 @@ const BALL_KNOCK_IMPULSE := 250.0
 
 ## Fixed simulation tick rate.
 const TICK_RATE: int = 60
+const TICK_HZ: int = TICK_RATE
 const TICK_DT: float = 1.0 / float(TICK_RATE)
+
+
+## Deterministic energy system constants.
+##
+## Units:
+## - energy_current/energy_max are integer "energy points".
+## - recharge_rate_per_sec is integer points per second.
+## - recharge math is done with integer tick-based remainder to avoid float drift.
+##
+## Fixed-point scale for future use (e.g. milli-energy) if needed.
+const ENERGY_FP_SCALE: int = 1000
+
+## Safe starter values (not final balance).
+const DEFAULT_ENERGY_MAX: int = 1200
+const DEFAULT_RECHARGE_RATE_PER_SEC: int = 150
+const DEFAULT_RECHARGE_DELAY_MS: int = 300
+
+# Convert ms to ticks deterministically using ceil(ms * TICK_RATE / 1000).
+const DEFAULT_RECHARGE_DELAY_TICKS: int = int((DEFAULT_RECHARGE_DELAY_MS * TICK_RATE + 999) / 1000)
+
+const DEFAULT_BULLET_ENERGY_COST: int = 30
+const DEFAULT_BOMB_ENERGY_COST: int = 150
+
+# Multi-fire (multiple bullets per trigger) uses a separate cost by default.
+const DEFAULT_MULTIFIRE_ENERGY_COST: int = DEFAULT_BULLET_ENERGY_COST * 3
 
 ## Placeholder tile size for future map/grid work.
 const TILE_SIZE: int = 32

@@ -3,7 +3,9 @@
 This document specifies the **ruleset contract** used by Driftline to hold gameplay tuning values.
 
 - Format identity: `"driftline.ruleset"`
-- Schema version: `1`
+- Schema version: `2` (latest)
+
+The validator also supports schema version `1` for legacy rulesets.
 
 Rulesets are **data only**. They declare parameters; the engine interprets them. Unknown keys are rejected.
 
@@ -22,7 +24,7 @@ Top-level object:
 ```json
 {
   "format": "driftline.ruleset",
-  "schema_version": 1,
+  "schema_version": 2,
   "physics": {
     "wall_restitution": 0.6,
     "tangent_damping": 0.5,
@@ -69,9 +71,13 @@ Top-level object:
     }
   },
   "energy": {
-    "max": 100.0,
-    "regen_per_s": 18.0,
-    "afterburner_drain_per_s": 30.0
+    "max": 1200,
+    "recharge_rate_per_sec": 150,
+    "recharge_delay_ms": 300,
+    "afterburner_drain_per_s": 30,
+    "bullet_energy_cost": 30,
+    "multifire_energy_cost": 90,
+    "bomb_energy_cost": 150
   }
 }
 ```
@@ -84,7 +90,9 @@ Top-level object:
 ### `schema_version` (required)
 
 - Type: integer
-- Must equal `1`
+- Supported values: `1` (legacy) or `2` (latest)
+
+Schema version `2` is stricter and requires explicit energy tuning keys.
 
 ### `physics` (required)
 
@@ -286,7 +294,7 @@ Supported keys:
 - `bounces` (optional): integer in range `0..16`
 - `bounce_restitution` (optional): number in range `0.0..2.0`
 
-### `energy` (optional)
+### `energy` (required in schema v2; optional in schema v1)
 
 - Type: object
 - Unknown keys are rejected.
@@ -296,17 +304,54 @@ Energy is currently a tuning block shared to clients during handshake for consis
 #### `energy.max` (optional)
 
 - Type: number
-- Range: `0.0..1000.0`
+- Range: `0.0..100000.0`
 
 #### `energy.regen_per_s` (optional)
 
 - Type: number
-- Range: `0.0..1000.0`
+- Range: `0.0..100000.0`
+
+Legacy name for `energy.recharge_rate_per_sec`. If both are present, `recharge_rate_per_sec` wins.
+
+#### `energy.recharge_rate_per_sec` (optional)
+
+- Type: number
+- Range: `0.0..100000.0`
+
+Recharge rate in **energy points per second**.
+
+#### `energy.recharge_delay_ms` (optional)
+
+- Type: number
+- Range: `0.0..10000.0`
+
+Recharge delay in **milliseconds** after energy is spent. Converted to integer ticks deterministically.
 
 #### `energy.afterburner_drain_per_s` (optional)
 
 - Type: number
-- Range: `0.0..1000.0`
+- Range: `0.0..100000.0`
+
+#### `energy.bullet_energy_cost` (optional)
+
+- Type: number
+- Range: `0.0..10000.0`
+
+Energy cost per bullet trigger.
+
+#### `energy.multifire_energy_cost` (optional)
+
+- Type: number
+- Range: `0.0..10000.0`
+
+Energy cost for multi-fire trigger.
+
+#### `energy.bomb_energy_cost` (optional)
+
+- Type: number
+- Range: `0.0..10000.0`
+
+Energy cost per bomb (when implemented).
 
 ## Defaults
 

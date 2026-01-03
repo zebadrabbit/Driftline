@@ -48,6 +48,24 @@ class DriftShipState:
 	var top_speed_bonus: int = 0
 	var thruster_bonus: int = 0
 	var recharge_bonus: int = 0
+
+	# Deterministic energy system (tick-based).
+	# Units:
+	# - energy_current/energy_max: integer energy points.
+	# - energy_recharge_rate_per_sec: integer points per second.
+	# - energy_recharge_wait_ticks: countdown until recharge begins.
+	# - energy_recharge_fp_accum: remainder accumulator in "points per tick" space (see DriftWorld).
+	# - energy_drain_fp_accum: remainder accumulator for continuous drains (e.g., afterburner).
+	var energy_current: int = 0
+	var energy_max: int = 0
+	var energy_recharge_rate_per_sec: int = 0
+	var energy_recharge_delay_ticks: int = 0
+	var energy_recharge_wait_ticks: int = 0
+	var energy_recharge_fp_accum: int = 0
+	var energy_drain_fp_accum: int = 0
+
+	# Legacy field kept for backward compatibility with older UI/debug.
+	# New code should prefer energy_current/energy_max.
 	var energy: float = 100.0
 
 	func _init(
@@ -65,7 +83,14 @@ class DriftShipState:
 		top_speed_bonus_value: int = 0,
 		thruster_bonus_value: int = 0,
 		recharge_bonus_value: int = 0,
-		energy_value: float = 100.0
+		energy_value: float = 100.0,
+		energy_current_value: int = 0,
+		energy_max_value: int = 0,
+		energy_recharge_rate_per_sec_value: int = 0,
+		energy_recharge_delay_ticks_value: int = 0,
+		energy_recharge_wait_ticks_value: int = 0,
+		energy_recharge_fp_accum_value: int = 0,
+		energy_drain_fp_accum_value: int = 0
 	) -> void:
 		id = ship_id
 		position = position_value
@@ -81,6 +106,15 @@ class DriftShipState:
 		top_speed_bonus = clampi(int(top_speed_bonus_value), 0, 16)
 		thruster_bonus = clampi(int(thruster_bonus_value), 0, 16)
 		recharge_bonus = clampi(int(recharge_bonus_value), 0, 16)
+
+		energy_current = maxi(0, int(energy_current_value))
+		energy_max = maxi(0, int(energy_max_value))
+		energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec_value))
+		energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks_value))
+		energy_recharge_wait_ticks = maxi(0, int(energy_recharge_wait_ticks_value))
+		energy_recharge_fp_accum = maxi(0, int(energy_recharge_fp_accum_value))
+		energy_drain_fp_accum = maxi(0, int(energy_drain_fp_accum_value))
+
 		energy = clampf(float(energy_value), 0.0, 1000000.0)
 
 

@@ -314,6 +314,23 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.position = auth_state.position
 	local_state.velocity = auth_state.velocity
 	local_state.rotation = auth_state.rotation
+	# Deterministic energy state (v3 snapshot extras).
+	if "energy_current" in auth_state:
+		local_state.energy_current = int(auth_state.energy_current)
+	if "energy_max" in auth_state:
+		local_state.energy_max = int(auth_state.energy_max)
+	if "energy_recharge_rate_per_sec" in auth_state:
+		local_state.energy_recharge_rate_per_sec = int(auth_state.energy_recharge_rate_per_sec)
+	if "energy_recharge_delay_ticks" in auth_state:
+		local_state.energy_recharge_delay_ticks = int(auth_state.energy_recharge_delay_ticks)
+	if "energy_recharge_wait_ticks" in auth_state:
+		local_state.energy_recharge_wait_ticks = int(auth_state.energy_recharge_wait_ticks)
+	if "energy_recharge_fp_accum" in auth_state:
+		local_state.energy_recharge_fp_accum = int(auth_state.energy_recharge_fp_accum)
+	if "energy_drain_fp_accum" in auth_state:
+		local_state.energy_drain_fp_accum = int(auth_state.energy_drain_fp_accum)
+	if "energy" in auth_state:
+		local_state.energy = float(auth_state.energy)
 
 	world.tick = snapshot_tick
 

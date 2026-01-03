@@ -1,9 +1,11 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" uid="uid://bjwl2w68e402h" path="res://client/client_main.gd" id="1"]
 [ext_resource type="PackedScene" path="res://client/Starfield.tscn" id="2_fnhm5"]
 [ext_resource type="PackedScene" path="res://client/HUD.tscn" id="3_hud"]
 [ext_resource type="AudioStream" path="res://client/audio/bounce.wav" id="4_bounce"]
+[ext_resource type="AudioStream" path="res://client/audio/rev.wav" id="5_rev"]
+[ext_resource type="AudioStream" path="res://client/audio/thrust.wav" id="6_thrust"]
 [ext_resource type="TileSet" uid="uid://covf7445kc8ex" path="res://client/graphics/tilesets/subspace_base/tileset.tres" id="5_tileset"]
 
 [node name="Main" type="Node2D"]
@@ -36,3 +38,9 @@ position_smoothing_speed = 8.0
 
 [node name="BounceAudio" type="AudioStreamPlayer" parent="."]
 stream = ExtResource("4_bounce")
+
+[node name="RevAudio" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("5_rev")
+
+[node name="ThrustAudio" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("6_thrust")

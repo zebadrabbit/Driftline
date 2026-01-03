@@ -23,9 +23,88 @@ func _initialize() -> void:
 	_test_controls_weapon_defaults_present()
 	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
+	_test_energy_deterministic_recharge_and_costs()
 	_test_prizes_spawn_walkable()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_energy_deterministic_recharge_and_costs() -> void:
+	_ran += 1
+	# Goal: assert energy behavior without relying on floats:
+	# - weapon firing drains energy and sets recharge delay
+	# - energy does not recharge during delay
+	# - energy starts recharging deterministically after delay
+	# - firing with insufficient energy does not spawn bullets
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("energy_deterministic (failed to load base ruleset)")
+		return
+
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var ship_id := 1
+	world.add_ship(ship_id, Vector2(64, 64))
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("energy_deterministic (ship missing)")
+		return
+	if int(s.energy_max) <= 0 or int(s.energy_current) != int(s.energy_max):
+		_fail("energy_deterministic (expected ship start full energy)")
+		return
+
+	# Fire once; must drain energy and set recharge wait.
+	var start_energy := int(s.energy_current)
+	var start_bullets := int(world.bullets.size())
+	var fire_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)
+	world.step_tick({ ship_id: fire_cmd })
+	var after_fire_energy := int(s.energy_current)
+	if after_fire_energy >= start_energy:
+		_fail("energy_deterministic (energy did not decrease on fire)")
+		return
+	if int(s.energy_recharge_wait_ticks) <= 0:
+		_fail("energy_deterministic (expected recharge wait ticks after drain)")
+		return
+	if int(world.bullets.size()) <= start_bullets:
+		_fail("energy_deterministic (expected bullet spawn on fire)")
+		return
+
+	# During the wait period, energy must not increase.
+	var wait_ticks := int(s.energy_recharge_wait_ticks)
+	var idle_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	for _i in range(wait_ticks):
+		var before := int(s.energy_current)
+		world.step_tick({ ship_id: idle_cmd })
+		var after := int(s.energy_current)
+		if after != before:
+			_fail("energy_deterministic (energy changed during recharge delay)")
+			return
+	# Next tick should begin recharge (unless already at max).
+	var before_recharge := int(s.energy_current)
+	world.step_tick({ ship_id: idle_cmd })
+	var after_recharge := int(s.energy_current)
+	if after_recharge <= before_recharge and before_recharge < int(s.energy_max):
+		_fail("energy_deterministic (energy did not recharge after delay elapsed)")
+		return
+
+	# Gating: with zero energy, firing should NOT spawn bullets.
+	s.energy_current = 0
+	s.energy_recharge_wait_ticks = 0
+	var bullets_before_gate := int(world.bullets.size())
+	world.step_tick({ ship_id: fire_cmd })
+	var bullets_after_gate := int(world.bullets.size())
+	if bullets_after_gate != bullets_before_gate:
+		_fail("energy_deterministic (bullet spawned with insufficient energy)")
+		return
+
+	_pass("energy_deterministic_recharge_and_costs")
 
 
 func _test_controls_actions_present() -> void:
@@ -208,7 +287,7 @@ func _test_welcome_includes_ruleset_payload() -> void:
 
 func _test_prizes_spawn_walkable() -> void:
 	_ran += 1
-	var world := DriftWorld.new()
+	var world = DriftWorld.new()
 	# Simple empty map with boundary walls.
 	world.set_solid_tiles([])
 	world.set_door_tiles([])

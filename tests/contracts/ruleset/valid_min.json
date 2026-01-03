@@ -1,7 +1,16 @@
 {
   "format": "driftline.ruleset",
-  "schema_version": 1,
+  "schema_version": 2,
   "physics": {
     "wall_restitution": 0.6
+  },
+  "energy": {
+    "max": 1200,
+    "recharge_rate_per_sec": 150,
+    "recharge_delay_ms": 300,
+    "afterburner_drain_per_s": 30,
+    "bullet_energy_cost": 30,
+    "multifire_energy_cost": 90,
+    "bomb_energy_cost": 150
   }
 }

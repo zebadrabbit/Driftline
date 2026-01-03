@@ -174,5 +174,13 @@ Driftline uses two testing layers:
 Run contract tests:
 
 ```bash
-godot --headless --quit --script res://tests/run_contract_tests.gd
+godot --headless --quit --path . --script res://tests/run_contract_tests.gd
 ```
+
+Run smoke (sanity) tests:
+
+```bash
+godot --headless --quit --path . --script res://tests/run_smoke_tests.gd
+```
+
+CI runs both contract tests and smoke tests on push and pull requests.

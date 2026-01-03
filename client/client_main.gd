@@ -31,6 +31,8 @@ const PRIZE_FRAME_COUNT: int = 10
 const PRIZE_ANIM_FPS: float = 12.0
 const PRIZE_DRAW_SCALE: float = 1.5
 const PRIZE_PICKUP_SFX_PATH: String = "res://client/audio/prize.wav"
+const THRUSTER_LOOP_SFX_PATH: String = "res://client/audio/rev.wav"
+const BOOST_LOOP_SFX_PATH: String = "res://client/audio/thrust.wav"
 
 const VELOCITY_DRAW_SCALE: float = 0.10
 
@@ -65,6 +67,9 @@ var pause_menu_panel: Panel
 @export var bounce_sound_cooldown: float = 0.10
 var _last_bounce_time_s: float = -999.0
 @onready var _bounce_audio: AudioStreamPlayer = get_node_or_null("BounceAudio")
+
+@onready var _rev_audio: AudioStreamPlayer = get_node_or_null("RevAudio")
+@onready var _thrust_audio: AudioStreamPlayer = get_node_or_null("ThrustAudio")
 
 var _prize_audio: AudioStreamPlayer = null
 
@@ -166,6 +171,30 @@ func _ready() -> void:
 	if sfx is AudioStream:
 		_prize_audio.stream = sfx
 	add_child(_prize_audio)
+
+	# Thruster loop SFX (W/S). Prefer scene-provided player, but ensure stream loops.
+	if _rev_audio != null:
+		if _rev_audio.stream == null:
+			var rev_sfx := load(THRUSTER_LOOP_SFX_PATH)
+			if rev_sfx is AudioStream:
+				_rev_audio.stream = rev_sfx
+		if _rev_audio.stream is AudioStreamWAV:
+			var wav: AudioStreamWAV = _rev_audio.stream
+			wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		# Ensure we start silent.
+		_rev_audio.stop()
+
+	# Boost loop SFX (Shift + thrust). Prefer scene-provided player, but ensure stream loops.
+	if _thrust_audio != null:
+		if _thrust_audio.stream == null:
+			var boost_sfx := load(BOOST_LOOP_SFX_PATH)
+			if boost_sfx is AudioStream:
+				_thrust_audio.stream = boost_sfx
+		if _thrust_audio.stream is AudioStreamWAV:
+			var wav2: AudioStreamWAV = _thrust_audio.stream
+			wav2.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		# Ensure we start silent.
+		_thrust_audio.stop()
 
 	# Optional: unlimited redraw rate for testing
 	Engine.max_fps = 0
@@ -306,6 +335,37 @@ func _setup_networking() -> void:
 	last_connection_status = enet_peer.get_connection_status()
 
 
+func _update_thruster_audio() -> void:
+	# Only play while in-game and thrusting.
+	var thrust_axis: float = 0.0
+	var boosting: bool = false
+	if not show_connect_ui and (is_connected or allow_offline_mode):
+		thrust_axis = Input.get_action_strength("drift_thrust_forward") - Input.get_action_strength("drift_thrust_reverse")
+		boosting = Input.is_action_pressed("drift_modifier_ability")
+	var is_thrusting: bool = absf(thrust_axis) > 0.01
+
+	# When boosting, play thrust.wav and stop rev.wav.
+	if boosting and is_thrusting and _thrust_audio != null and _thrust_audio.stream != null:
+		if _rev_audio != null and _rev_audio.playing:
+			_rev_audio.stop()
+		if not _thrust_audio.playing:
+			_thrust_audio.play()
+		return
+
+	# Otherwise, stop boost loop and (optionally) play normal rev loop.
+	if _thrust_audio != null and _thrust_audio.playing:
+		_thrust_audio.stop()
+
+	if _rev_audio == null or _rev_audio.stream == null:
+		return
+	if is_thrusting:
+		if not _rev_audio.playing:
+			_rev_audio.play()
+	else:
+		if _rev_audio.playing:
+			_rev_audio.stop()
+
+
 func _process(delta: float) -> void:
 	# Always poll network even when showing UI
 	if enet_peer != null:
@@ -316,13 +376,17 @@ func _process(delta: float) -> void:
 	
 	# Show connection UI if not connected and not in offline mode
 	if show_connect_ui:
+		_update_thruster_audio()
 		queue_redraw()
 		return
 	
 	# Only run game simulation when connected or in offline mode
 	if not is_connected and not allow_offline_mode:
+		_update_thruster_audio()
 		queue_redraw()
 		return
+
+	_update_thruster_audio()
 
 	accumulator_seconds += delta
 
@@ -356,7 +420,10 @@ func _process(delta: float) -> void:
 		if hud.has_method("set_ship_stats") and latest_snapshot != null and latest_snapshot.ships.has(local_ship_id):
 			var ss = latest_snapshot.ships.get(local_ship_id)
 			if ss != null:
-				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ss.energy))
+				var ec: int = int(ss.energy_current) if ("energy_current" in ss) else int(round(float(ss.energy)))
+				var em: int = int(ss.energy_max) if ("energy_max" in ss) else 0
+				var wt: int = int(ss.energy_recharge_wait_ticks) if ("energy_recharge_wait_ticks" in ss) else 0
+				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ec), float(em), wt)
 
 
 func _latest_tick_step() -> void:
@@ -1313,7 +1380,14 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				int(ship_state.top_speed_bonus),
 				int(ship_state.thruster_bonus),
 				int(ship_state.recharge_bonus),
-				float(ship_state.energy)
+					float(ship_state.energy),
+					int(ship_state.energy_current),
+					int(ship_state.energy_max),
+					int(ship_state.energy_recharge_rate_per_sec),
+					int(ship_state.energy_recharge_delay_ticks),
+					int(ship_state.energy_recharge_wait_ticks),
+					int(ship_state.energy_recharge_fp_accum),
+					int(ship_state.energy_drain_fp_accum)
 			)
 			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets)
 		else:
@@ -1333,7 +1407,14 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				int(ship_state.top_speed_bonus),
 				int(ship_state.thruster_bonus),
 				int(ship_state.recharge_bonus),
-				float(ship_state.energy)
+				float(ship_state.energy),
+				int(ship_state.energy_current),
+				int(ship_state.energy_max),
+				int(ship_state.energy_recharge_rate_per_sec),
+				int(ship_state.energy_recharge_delay_ticks),
+				int(ship_state.energy_recharge_wait_ticks),
+				int(ship_state.energy_recharge_fp_accum),
+				int(ship_state.energy_drain_fp_accum)
 			)
 			remote_ships[ship_state.id] = state_copy
 			snap_b_ships[ship_state.id] = state_copy
@@ -1378,6 +1459,13 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.thruster_bonus = int(auth_state.thruster_bonus)
 	local_state.recharge_bonus = int(auth_state.recharge_bonus)
 	local_state.energy = float(auth_state.energy)
+	local_state.energy_current = int(auth_state.energy_current)
+	local_state.energy_max = int(auth_state.energy_max)
+	local_state.energy_recharge_rate_per_sec = int(auth_state.energy_recharge_rate_per_sec)
+	local_state.energy_recharge_delay_ticks = int(auth_state.energy_recharge_delay_ticks)
+	local_state.energy_recharge_wait_ticks = int(auth_state.energy_recharge_wait_ticks)
+	local_state.energy_recharge_fp_accum = int(auth_state.energy_recharge_fp_accum)
+	local_state.energy_drain_fp_accum = int(auth_state.energy_drain_fp_accum)
 
 	# 2) Rewind/snap world.tick to the snapshot tick.
 	world.tick = snapshot_tick

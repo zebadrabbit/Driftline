@@ -14,7 +14,9 @@ extends CanvasLayer
 
 @export var ship_speed: float = 0.0
 @export var ship_heading_degrees: float = 0.0
-@export_range(0.0, 100.0, 0.1) var ship_energy: float = 100.0
+@export var ship_energy_current: int = 0
+@export var ship_energy_max: int = 0
+@export var ship_energy_recharge_wait_ticks: int = 0
 
 const SpriteFontLabelScript := preload("res://client/SpriteFontLabel.gd")
 
@@ -56,10 +58,12 @@ func set_values(p_name: String, p_bounty: int, p_stars: int, p_ship_id: int) -> 
 	ship_id = p_ship_id
 
 
-func set_ship_stats(p_speed: float, p_heading_degrees: float, p_energy: float) -> void:
+func set_ship_stats(p_speed: float, p_heading_degrees: float, p_energy_current: float, p_energy_max: float = 0.0, p_recharge_wait_ticks: int = 0) -> void:
 	ship_speed = p_speed
 	ship_heading_degrees = p_heading_degrees
-	ship_energy = clampf(p_energy, 0.0, 100.0)
+	ship_energy_current = maxi(0, int(round(p_energy_current)))
+	ship_energy_max = maxi(0, int(round(p_energy_max)))
+	ship_energy_recharge_wait_ticks = maxi(0, int(p_recharge_wait_ticks))
 
 
 func _process(delta: float) -> void:
@@ -87,7 +91,10 @@ func _process(delta: float) -> void:
 			var spacing_px := 8
 			rest_label.position.x = float(name_bounty.get_text_width_px() + spacing_px)
 
-	var stats_text := "SPD:%3.0f  HDG:%3.0f  ENG:%3.0f" % [ship_speed, ship_heading_degrees, ship_energy]
+	var eng_text := "%d" % ship_energy_current
+	if ship_energy_max > 0:
+		eng_text = "%d/%d" % [ship_energy_current, ship_energy_max]
+	var stats_text := "SPD:%3.0f  HDG:%3.0f  ENG:%s  R:%d" % [ship_speed, ship_heading_degrees, eng_text, ship_energy_recharge_wait_ticks]
 	if stats_text != _last_stats_text:
 		_last_stats_text = stats_text
 		if stats_label != null:
@@ -120,5 +127,12 @@ func _poll_player_ship_stats() -> void:
 		ship_speed = float(s.current_speed)
 	if "heading_degrees" in s:
 		ship_heading_degrees = float(s.heading_degrees)
-	if "energy" in s:
-		ship_energy = clampf(float(s.energy), 0.0, 100.0)
+	if "energy_current" in s:
+		ship_energy_current = maxi(0, int(s.energy_current))
+	if "energy_max" in s:
+		ship_energy_max = maxi(0, int(s.energy_max))
+	if "energy_recharge_wait_ticks" in s:
+		ship_energy_recharge_wait_ticks = maxi(0, int(s.energy_recharge_wait_ticks))
+	elif "energy" in s:
+		# Fallback for older ship nodes.
+		ship_energy_current = maxi(0, int(round(float(s.energy))))
