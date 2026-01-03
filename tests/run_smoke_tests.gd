@@ -24,9 +24,163 @@ func _initialize() -> void:
 	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
 	_test_energy_deterministic_recharge_and_costs()
+	_test_determinism_checksum_fixed_input()
 	_test_prizes_spawn_walkable()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _sha256_hex_bytes(bytes: PackedByteArray) -> String:
+	var ctx = HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	ctx.update(bytes)
+	var digest: PackedByteArray = ctx.finish()
+	return digest.hex_encode()
+
+
+func _q(f: float, scale: int) -> int:
+	return int(round(f * float(scale)))
+
+
+func _determinism_state_bytes(world) -> PackedByteArray:
+	# Quantize floats before hashing to reduce cross-platform noise.
+	const Q_POS: int = 1000
+	const Q_VEL: int = 1000
+	const Q_ANG: int = 100000
+
+	var buf = StreamPeerBuffer.new()
+	buf.big_endian = true
+
+	buf.put_32(int(world.tick))
+
+	# Ships (sorted by id)
+	var ship_ids: Array = world.ships.keys()
+	ship_ids.sort()
+	buf.put_32(int(ship_ids.size()))
+	for sid in ship_ids:
+		var ship_id: int = int(sid)
+		var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+		if s == null:
+			continue
+		buf.put_32(ship_id)
+		buf.put_64(_q(float(s.position.x), Q_POS))
+		buf.put_64(_q(float(s.position.y), Q_POS))
+		buf.put_64(_q(float(s.velocity.x), Q_VEL))
+		buf.put_64(_q(float(s.velocity.y), Q_VEL))
+		buf.put_64(_q(float(s.rotation), Q_ANG))
+		buf.put_32(int(s.energy_current))
+		buf.put_32(int(s.energy_max))
+		buf.put_32(int(s.energy_recharge_wait_ticks))
+		buf.put_32(int(s.energy_recharge_fp_accum))
+		buf.put_32(int(s.energy_drain_fp_accum))
+
+	# Bullets (sorted by id)
+	var bullet_ids: Array = world.bullets.keys()
+	bullet_ids.sort()
+	buf.put_32(int(bullet_ids.size()))
+	for bid in bullet_ids:
+		var bullet_id: int = int(bid)
+		var b: DriftTypes.DriftBulletState = world.bullets.get(bullet_id)
+		if b == null:
+			continue
+		buf.put_32(bullet_id)
+		buf.put_32(int(b.owner_ship_id))
+		buf.put_64(_q(float(b.position.x), Q_POS))
+		buf.put_64(_q(float(b.position.y), Q_POS))
+		buf.put_64(_q(float(b.velocity.x), Q_VEL))
+		buf.put_64(_q(float(b.velocity.y), Q_VEL))
+		buf.put_32(int(b.spawn_tick))
+		buf.put_32(int(b.die_tick))
+		buf.put_32(int(b.bounces_remaining))
+
+	# Ball
+	buf.put_64(_q(float(world.ball.position.x), Q_POS))
+	buf.put_64(_q(float(world.ball.position.y), Q_POS))
+	buf.put_64(_q(float(world.ball.velocity.x), Q_VEL))
+	buf.put_64(_q(float(world.ball.velocity.y), Q_VEL))
+
+	return buf.data_array
+
+
+func _test_determinism_checksum_fixed_input() -> void:
+	_ran += 1
+	# "Final boss" determinism test: fixed input script -> fixed state hash.
+	# This is meant to catch accidental nondeterminism from refactors.
+
+	var ruleset := {
+		"format": "driftline.ruleset",
+		"schema_version": 2,
+		"physics": {
+			"wall_restitution": 0.85,
+			"tangent_damping": 0.5,
+			"ship_turn_rate": 3.5,
+			"ship_thrust_accel": 520.0,
+			"ship_reverse_accel": 400.0,
+			"ship_max_speed": 720.0,
+			"ship_base_drag": 0.35,
+			"ship_overspeed_drag": 2.0,
+			"ship_bounce_min_normal_speed": 160.0,
+		},
+		"weapons": {
+			"ball_friction": 0.98,
+			"ball_max_speed": 600.0,
+			"ball_kick_speed": 700.0,
+			"ball_knock_impulse": 250.0,
+			"ball_stick_offset": 18.0,
+			"ball_steal_padding": 4.0,
+			"bullet": {
+				"speed": 950.0,
+				"lifetime_s": 0.8,
+				"muzzle_offset": 28.0,
+				"bounces": 1,
+				"bounce_restitution": 1.0,
+			},
+		},
+		"energy": {
+			"max": 1200,
+			"recharge_rate_per_sec": 150,
+			"recharge_delay_ms": 300,
+			"afterburner_drain_per_s": 30,
+			"bullet_energy_cost": 30,
+			"multifire_energy_cost": 90,
+			"bomb_energy_cost": 150,
+		},
+	}
+
+	var valid := DriftValidate.validate_ruleset_dict(ruleset)
+	if not bool(valid.get("ok", false)):
+		_fail("determinism_checksum (ruleset validation failed)")
+		return
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(128, 128)
+	world.set_map_dimensions(128, 128)
+	world.add_ship(1, Vector2(1024, 1024))
+
+	# Fixed input script (120 ticks @ 60 Hz = 2 seconds)
+	var idle := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	for t in range(120):
+		var thrust := 1.0 if t < 40 else 0.0
+		var turn := 0.35 if (t >= 10 and t < 30) else 0.0
+		var fire := (t == 5 or t == 25 or t == 60)
+		var modifier := (t >= 15 and t < 20)
+		var cmd := DriftTypes.DriftInputCmd.new(thrust, turn, fire, false, modifier)
+		world.step_tick({ 1: cmd })
+
+	var state_bytes: PackedByteArray = _determinism_state_bytes(world)
+	var got := _sha256_hex_bytes(state_bytes)
+
+	# If this changes unexpectedly, determinism likely broke.
+	# Update only when you intentionally change sim semantics.
+	const EXPECTED := "935345939f2555efdc0aa7cbe4fd3b0adb101a7da23dddb85cec787cd1d92340"
+	if got != EXPECTED:
+		_fail("determinism_checksum (got %s expected %s)" % [got, EXPECTED])
+		return
+
+	_pass("determinism_checksum_fixed_input")
 
 
 func _test_energy_deterministic_recharge_and_costs() -> void:

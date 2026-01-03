@@ -46,8 +46,10 @@ jobs:
       - name: Cache .godot import cache
         uses: actions/cache@v4
         with:
-          path: .godot/
-          key: godot-import-${{ runner.os }}-${{ env.GODOT_VERSION }}-${{ hashFiles('project.godot', 'VERSION', 'assets/**/*.import', 'client/**/*.tscn', 'client/**/*.gd', 'shared/**/*.gd', 'server/**/*.gd') }}
+          path: |
+            .godot/
+            .import/
+          key: godot-import-${{ runner.os }}-${{ env.GODOT_VERSION }}-${{ hashFiles('**/*.png', '**/*.tscn', '**/*.tres', '**/*.gd', 'project.godot') }}
           restore-keys: |
             godot-import-${{ runner.os }}-${{ env.GODOT_VERSION }}-
 
