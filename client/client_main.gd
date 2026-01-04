@@ -22,6 +22,8 @@ const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
+const DriftShipAtlas = preload("res://client/ship_atlas.gd")
+const SHIPS_TEX: Texture2D = preload("res://client/graphics/ships/ships.png")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
@@ -834,33 +836,52 @@ func _draw_ball() -> void:
 	var vel_end := ball_position + ball_velocity * VELOCITY_DRAW_SCALE
 	draw_line(ball_position, vel_end, Color(1.0, 0.7, 0.2, 1.0), 2.0)
 func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_color: Color) -> void:
-	# Smaller triangle for remote ships
-	var local_points: PackedVector2Array = PackedVector2Array([
-		Vector2(10.0, 0.0),
-		Vector2(-7.0, -6.0),
-		Vector2(-7.0, 6.0),
-	])
-	var world_points: PackedVector2Array = PackedVector2Array()
-	world_points.resize(local_points.size())
-	for i in range(local_points.size()):
-		world_points[i] = local_points[i].rotated(ship_state.rotation) + ship_state.position
-	draw_colored_polygon(world_points, fill_color)
+	# Atlas-based ship sprite (no SpriteFrames assets).
+	# Ship selection is currently a single default (0=Warbird) until ship choice is replicated.
+	var ship_index := 0
+	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
+	var heading_deg := -rad_to_deg(float(ship_state.rotation))
+	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	if src.size.x <= 0.0 or src.size.y <= 0.0:
+		# Fallback to old triangle if the atlas is invalid.
+		var local_points: PackedVector2Array = PackedVector2Array([
+			Vector2(10.0, 0.0),
+			Vector2(-7.0, -6.0),
+			Vector2(-7.0, 6.0),
+		])
+		var world_points: PackedVector2Array = PackedVector2Array()
+		world_points.resize(local_points.size())
+		for i in range(local_points.size()):
+			world_points[i] = local_points[i].rotated(ship_state.rotation) + ship_state.position
+		draw_colored_polygon(world_points, fill_color)
+		return
+
+	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
+	draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
 
 
 func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
-	# Local triangle points pointing to +X (Vector2.RIGHT).
-	var local_points: PackedVector2Array = PackedVector2Array([
-		Vector2(18.0, 0.0),
-		Vector2(-12.0, -10.0),
-		Vector2(-12.0, 10.0),
-	])
+	# Atlas-based ship sprite (no SpriteFrames assets).
+	var ship_index := 0
+	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
+	var heading_deg := -rad_to_deg(float(ship_state.rotation))
+	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	if src.size.x <= 0.0 or src.size.y <= 0.0:
+		# Fallback to old triangle if the atlas is invalid.
+		var local_points: PackedVector2Array = PackedVector2Array([
+			Vector2(18.0, 0.0),
+			Vector2(-12.0, -10.0),
+			Vector2(-12.0, 10.0),
+		])
+		var world_points: PackedVector2Array = PackedVector2Array()
+		world_points.resize(local_points.size())
+		for i in range(local_points.size()):
+			world_points[i] = local_points[i].rotated(ship_state.rotation) + ship_state.position
+		draw_colored_polygon(world_points, Color(0.9, 0.9, 0.9, 1.0))
+		return
 
-	var world_points: PackedVector2Array = PackedVector2Array()
-	world_points.resize(local_points.size())
-	for i in range(local_points.size()):
-		world_points[i] = local_points[i].rotated(ship_state.rotation) + ship_state.position
-
-	draw_colored_polygon(world_points, Color(0.9, 0.9, 0.9, 1.0))
+	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
+	draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
 
 
 func _draw_authoritative_ghost_ship() -> void:

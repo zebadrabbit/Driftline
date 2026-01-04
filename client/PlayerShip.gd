@@ -2,6 +2,8 @@ extends CharacterBody2D
 
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
+const DriftShipAtlas = preload("res://client/ship_atlas.gd")
+const SHIPS_TEX: Texture2D = preload("res://client/graphics/ships/ships.png")
 
 ## Placeholder SubSpace-like ship movement.
 ## - Top-down 2D, inertial (velocity persists)
@@ -123,15 +125,24 @@ func _emit_stats_if_changed() -> void:
 
 
 func _draw() -> void:
-	# Simple triangle ship pointing forward (Vector2.RIGHT).
-	var tip := Vector2(14, 0)
-	var left := Vector2(-10, -8)
-	var right := Vector2(-10, 8)
-	var pts: PackedVector2Array = PackedVector2Array([tip, right, left])
-	var fill := Color(0.9, 0.9, 1.0, 0.9)
-	var outline := Color(0.2, 0.6, 1.0, 1.0)
-	draw_colored_polygon(pts, fill)
-	draw_polyline(PackedVector2Array([tip, right, left, tip]), outline, 2.0)
+	# Atlas-based ship sprite (no SpriteFrames assets).
+	var ship_index := 0
+	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
+	var heading_deg := -rad_to_deg(float(rotation))
+	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	if src.size.x > 0.0 and src.size.y > 0.0:
+		var dst := Rect2(-src.size * 0.5, src.size)
+		draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
+	else:
+		# Fallback triangle if atlas is invalid.
+		var tip := Vector2(14, 0)
+		var left := Vector2(-10, -8)
+		var right := Vector2(-10, 8)
+		var pts: PackedVector2Array = PackedVector2Array([tip, right, left])
+		var fill := Color(0.9, 0.9, 1.0, 0.9)
+		var outline := Color(0.2, 0.6, 1.0, 1.0)
+		draw_colored_polygon(pts, fill)
+		draw_polyline(PackedVector2Array([tip, right, left, tip]), outline, 2.0)
 
 	# ⚠️ ALWAYS VISIBLE: Ship-attached player name and bounty tag (blue sprite font)
 	# This element must never be hidden or removed.

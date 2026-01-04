@@ -13,6 +13,7 @@ const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
+const DriftShipAtlas = preload("res://client/ship_atlas.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -44,8 +45,39 @@ func _initialize() -> void:
 	_test_death_safe_zone_damage_impossible()
 	_test_determinism_checksum_fixed_input()
 	_test_prizes_spawn_walkable()
+	_test_ship_sprite_atlas_mapping()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_ship_sprite_atlas_mapping() -> void:
+	_ran += 1
+	# Validate strict spritesheet mapping math.
+	# - 4 rows per ship, 10 cols per row
+	# - sheet_row = ship_index*4 + dir_row
+	# - dir_row/col derived from global frame 0..39
+
+	var ship_index := 3
+	var heading_deg := 0.0
+	var coords := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index, heading_deg)
+	if coords != Vector2i(0, ship_index * 4):
+		_fail("ship_atlas (expected heading 0 => col0,row%d got %s)" % [ship_index * 4, str(coords)])
+		return
+
+	# A half-turn should land in dir_row=2, col=0.
+	var coords2 := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index, 180.0)
+	if coords2.x != 0 or coords2.y != (ship_index * 4 + 2):
+		_fail("ship_atlas (expected heading 180 => col0,row%d got %s)" % [ship_index * 4 + 2, str(coords2)])
+		return
+
+	# Verify ship block separation.
+	var ship_index_b := 4
+	var coords3 := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index_b, 0.0)
+	if coords3.y != ship_index_b * 4:
+		_fail("ship_atlas (expected ship %d row base %d got %d)" % [ship_index_b, ship_index_b * 4, coords3.y])
+		return
+
+	_pass("ship_sprite_atlas_mapping")
 
 
 func _test_team_color_mapping_flips_with_freq() -> void:
