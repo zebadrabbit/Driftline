@@ -19,13 +19,36 @@
     "ball_stick_offset": 18.0,
     "ball_steal_padding": 4.0
   },
+  "abilities": {
+    "afterburner": {
+      "drain_per_sec": 30,
+      "speed_mult_pct": 100,
+      "thrust_mult_pct": 160
+    },
+    "stealth": {
+      "drain_per_sec": 20
+    },
+    "cloak": {
+      "drain_per_sec": 25
+    },
+    "xradar": {
+      "drain_per_sec": 15
+    },
+    "antiwarp": {
+      "drain_per_sec": 35,
+      "radius_px": 200
+    }
+  },
   "energy": {
     "max": 1200,
     "recharge_rate_per_sec": 150,
     "recharge_delay_ms": 300,
-    "afterburner_drain_per_s": 30,
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150
+  },
+  "combat": {
+    "spawn_protect_ms": 1500,
+    "respawn_delay_ms": 1500
   }
 }

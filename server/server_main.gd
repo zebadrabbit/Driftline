@@ -267,6 +267,12 @@ func _load_selected_map_from_config() -> bool:
 		if acc != 0:
 			prize_seed = acc
 	world.set_prize_rng_seed(prize_seed)
+	# Deterministic spawn RNG seed (server-auth): separate stream from prizes.
+	# Mixed constant to avoid coupling spawn randomness to prize randomness.
+	var spawn_seed: int = int((prize_seed ^ 0x2f7a3d19) & 0x7fffffff)
+	if spawn_seed == 0:
+		spawn_seed = 1
+	world.set_spawn_rng_seed(spawn_seed)
 
 	var w_tiles: int = int(meta.get("w", 64))
 	var h_tiles: int = int(meta.get("h", 64))
@@ -285,8 +291,10 @@ func _load_selected_map_from_config() -> bool:
 	var solid_layer_cells: Array = canonical_layers.get("solid", [])
 	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(solid_layer_cells, tileset_def)
 	var door_cells: Array = DriftTileDefs.build_door_cells_from_layer_cells(solid_layer_cells, tileset_def)
+	var safe_zone_cells: Array = DriftTileDefs.build_safe_zone_cells(canonical, tileset_def)
 	world.set_solid_tiles(solid_cells)
 	world.set_door_tiles(door_cells)
+	world.set_safe_zone_tiles(safe_zone_cells)
 	var door_open_s: float = float(meta.get("door_open_seconds", DriftConstants.DOOR_OPEN_SECONDS))
 	var door_closed_s: float = float(meta.get("door_closed_seconds", DriftConstants.DOOR_CLOSED_SECONDS))
 	var door_frame_s: float = float(meta.get("door_frame_seconds", DriftConstants.DOOR_FRAME_SECONDS))
@@ -317,17 +325,9 @@ func _on_peer_connected(peer_id: int) -> void:
 	ship_id_by_peer[peer_id] = ship_id
 	print("Client connected: ", peer_id, " ship_id=", ship_id)
 
-	# Spawn point spread by ship_id to avoid overlap.
-	var spawn: Vector2 = _spawn_for_ship_id(ship_id)
-
 	# Always reset ship state on connect.
-	if world.ships.has(ship_id):
-		var ship_state: DriftTypes.DriftShipState = world.ships[ship_id]
-		ship_state.position = spawn
-		ship_state.velocity = Vector2.ZERO
-		ship_state.rotation = 0.0
-	else:
-		world.add_ship(ship_id, spawn)
+	# Unified authoritative spawn: safe-zone-first if present; otherwise random valid.
+	world.respawn_ship(ship_id)
 
 	# Clear buffered inputs for this ship and reset last cmd.
 	_remove_buffered_inputs_for_ship(ship_id)
@@ -353,6 +353,17 @@ func _on_peer_disconnected(peer_id: int) -> void:
 		_remove_buffered_inputs_for_ship(ship_id)
 
 	print("Client disconnected: ", peer_id)
+
+
+func _respawn_ship(ship_id: int) -> void:
+	# Authoritative respawn location selection.
+	# Intended to be called by whatever death/round-reset logic the server owns.
+	if world == null:
+		return
+	# Unified authoritative spawn: safe-zone-first if present; otherwise random valid.
+	world.respawn_ship(ship_id)
+	_remove_buffered_inputs_for_ship(ship_id)
+	last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 
 
 func _poll_network_packets() -> void:
@@ -402,7 +413,11 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 			float(input_dict.get("rotation", 0.0)),
 			bool(input_dict.get("fire_primary", false)),
 			bool(input_dict.get("fire_secondary", false)),
-			bool(input_dict.get("modifier", false))
+			bool(input_dict.get("modifier", false)),
+			bool(input_dict.get("stealth_btn", false)),
+			bool(input_dict.get("cloak_btn", false)),
+			bool(input_dict.get("xradar_btn", false)),
+			bool(input_dict.get("antiwarp_btn", false))
 		)
 
 		if DEBUG_NET:

@@ -106,6 +106,14 @@ In-game:
 - `Esc`: toggle the in-game menu (non-blocking)
 - In the menu: "Back to Menu" returns to the connection screen
 
+Abilities (default bindings):
+
+- `Shift` (hold) + thrust: afterburner (drains energy)
+- `Z`: toggle stealth
+- `X`: toggle cloak
+- `C`: toggle XRadar
+- `V`: toggle AntiWarp
+
 ## Map Editor
 
 Open the in-project map editor with `M` from the client.
@@ -145,6 +153,26 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Core simulation logic lives in `shared/` so both sides agree on movement/collisions.
 - Server spawn locations can come from map `entities` with `type="spawn"`.
 - Wall-bounce sound is triggered from shared collision events (client-side audio).
+
+## Bots (Headless Clients)
+
+Driftline includes a headless bot client script:
+
+- `res://client/bot_client.gd`
+
+Bots connect to the server as normal clients and generate input locally. They **do not** bypass authoritative rules:
+
+- Safe zones are enforced by shared action validation. Bots may still press fire in safe zones to trigger the existing “brake” behavior, but offensive output is still rejected.
+
+Bot AI is intentionally *not* perfect information:
+
+- Targeting uses a perception layer with periodic updates, limited FOV/range, short memory, LOS uncertainty, and brief pursuit of last-known positions.
+
+Bots have deterministic per-bot “personality” constants derived from `bot_id` / `ship_id`:
+
+- Reaction timing, aim error baseline, braking style, aggression/chase persistence, and disengage thresholds.
+
+This makes each bot’s style consistent across runs/replays for a given `ship_id`, while keeping the authoritative simulation deterministic and unchanged.
 
 ## Prizes (Server Authoritative)
 

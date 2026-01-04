@@ -13,11 +13,27 @@
       "bounce_restitution": 1.0
     }
   },
+  "abilities": {
+    "afterburner": {
+      "drain_per_sec": 30
+    },
+    "stealth": {
+      "drain_per_sec": 20
+    },
+    "cloak": {
+      "drain_per_sec": 25
+    },
+    "xradar": {
+      "drain_per_sec": 15
+    },
+    "antiwarp": {
+      "drain_per_sec": 35
+    }
+  },
   "energy": {
     "max": 1200,
     "recharge_rate_per_sec": 150,
     "recharge_delay_ms": 300,
-    "afterburner_drain_per_s": 30,
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150

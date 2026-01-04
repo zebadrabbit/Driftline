@@ -45,6 +45,21 @@ This project didn’t previously have a formal changelog. The entries below were
 
 - Prize pickup SFX could be missed due to event timing; server now buffers prize events between snapshot sends.
 
+## 0.5.6 - 2026-01-04
+
+### Added
+
+- Combat-only death (only when damage reduces energy to zero) with automatic respawn after a configurable delay.
+- Deterministic snapshot replication for death state (dead ships cannot move/act/target until respawn).
+- Bot imperfect-information targeting: periodic perception updates with FOV/range limits, short memory, LOS uncertainty, and brief pursuit of last-known positions.
+- Per-bot personality constants (seeded from bot_id/ship_id) affecting reaction timing, aim error, braking style, aggression/persistence, and energy disengage thresholds.
+- Bot “social” behaviors (small, occasional): safe-zone hesitation, circling instead of hard commits, and target-switch indecision under multi-threat pressure.
+
+### Changed
+
+- Bullet progression supports level-based tactical profiles (e.g. bounce/multishot/shrapnel/spread/cooldown) replicated deterministically.
+- Safe-zone bot braking (“fire-to-stop”) is gated (cooldown + probability + speed threshold) to avoid robotic perfect braking.
+
 ## Unreleased
 
 ### Added

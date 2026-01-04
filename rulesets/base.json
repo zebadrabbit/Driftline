@@ -18,13 +18,68 @@
     "ball_kick_speed": 700.0,
     "ball_knock_impulse": 250.0,
     "ball_stick_offset": 18.0,
-    "ball_steal_padding": 4.0
+    "ball_steal_padding": 4.0,
+    "bullet": {
+      "speed": 950.0,
+      "lifetime_s": 0.4,
+      "muzzle_offset": 30.0,
+      "bounces": 0,
+      "bounce_restitution": 1.0,
+      "levels": {
+        "1": {
+          "guns": 1,
+          "spread_deg": 0.0,
+          "cooldown_ticks": 0,
+          "shrapnel_count": 0
+        },
+        "2": {
+          "guns": 2,
+          "multi_fire": false,
+          "spread_deg": 4.0,
+          "cooldown_ticks": 3,
+          "bounces": 1,
+          "bounce_restitution": 0.9,
+          "shrapnel_count": 0
+        },
+        "3": {
+          "guns": 3,
+          "multi_fire": false,
+          "spread_deg": 6.0,
+          "cooldown_ticks": 5,
+          "bounces": 2,
+          "bounce_restitution": 0.9,
+          "shrapnel_count": 5,
+          "shrapnel_speed_mult": 0.65,
+          "shrapnel_lifetime_s": 0.18,
+          "shrapnel_cone_deg": 70.0
+        }
+      }
+    }
+  },
+  "abilities": {
+    "afterburner": {
+      "drain_per_sec": 30,
+      "speed_mult_pct": 100,
+      "thrust_mult_pct": 160
+    },
+    "stealth": {
+      "drain_per_sec": 20
+    },
+    "cloak": {
+      "drain_per_sec": 25
+    },
+    "xradar": {
+      "drain_per_sec": 15
+    },
+    "antiwarp": {
+      "drain_per_sec": 35,
+      "radius_px": 200
+    }
   },
   "energy": {
     "max": 1200,
     "recharge_rate_per_sec": 150,
     "recharge_delay_ms": 300,
-    "afterburner_drain_per_s": 30,
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150

@@ -6,27 +6,19 @@
   },
   "weapons": {
     "bullet": {
-      "speed": 950.0,
-      "lifetime_s": 0.8,
-      "muzzle_offset": 28.0
+      "levels": {
+        "3": {
+          "shrapnel_count": 999
+        }
+      }
     }
   },
   "abilities": {
-    "afterburner": {
-      "drain_per_sec": 30
-    },
-    "stealth": {
-      "drain_per_sec": 20
-    },
-    "cloak": {
-      "drain_per_sec": 25
-    },
-    "xradar": {
-      "drain_per_sec": 15
-    },
-    "antiwarp": {
-      "drain_per_sec": 35
-    }
+    "afterburner": { "drain_per_sec": 30 },
+    "stealth": { "drain_per_sec": 20 },
+    "cloak": { "drain_per_sec": 25 },
+    "xradar": { "drain_per_sec": 15 },
+    "antiwarp": { "drain_per_sec": 35 }
   },
   "energy": {
     "max": 1200,

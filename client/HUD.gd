@@ -18,6 +18,12 @@ extends CanvasLayer
 @export var ship_energy_max: int = 0
 @export var ship_energy_recharge_wait_ticks: int = 0
 
+@export var ship_afterburner_on: bool = false
+@export var ship_stealth_on: bool = false
+@export var ship_cloak_on: bool = false
+@export var ship_xradar_on: bool = false
+@export var ship_antiwarp_on: bool = false
+
 const SpriteFontLabelScript := preload("res://client/SpriteFontLabel.gd")
 
 @onready var name_bounty = $Root/SpriteFontLabel
@@ -58,12 +64,28 @@ func set_values(p_name: String, p_bounty: int, p_stars: int, p_ship_id: int) -> 
 	ship_id = p_ship_id
 
 
-func set_ship_stats(p_speed: float, p_heading_degrees: float, p_energy_current: float, p_energy_max: float = 0.0, p_recharge_wait_ticks: int = 0) -> void:
+func set_ship_stats(
+	p_speed: float,
+	p_heading_degrees: float,
+	p_energy_current: float,
+	p_energy_max: float = 0.0,
+	p_recharge_wait_ticks: int = 0,
+	p_afterburner_on: bool = false,
+	p_stealth_on: bool = false,
+	p_cloak_on: bool = false,
+	p_xradar_on: bool = false,
+	p_antiwarp_on: bool = false
+) -> void:
 	ship_speed = p_speed
 	ship_heading_degrees = p_heading_degrees
 	ship_energy_current = maxi(0, int(round(p_energy_current)))
 	ship_energy_max = maxi(0, int(round(p_energy_max)))
 	ship_energy_recharge_wait_ticks = maxi(0, int(p_recharge_wait_ticks))
+	ship_afterburner_on = bool(p_afterburner_on)
+	ship_stealth_on = bool(p_stealth_on)
+	ship_cloak_on = bool(p_cloak_on)
+	ship_xradar_on = bool(p_xradar_on)
+	ship_antiwarp_on = bool(p_antiwarp_on)
 
 
 func _process(delta: float) -> void:
@@ -94,7 +116,18 @@ func _process(delta: float) -> void:
 	var eng_text := "%d" % ship_energy_current
 	if ship_energy_max > 0:
 		eng_text = "%d/%d" % [ship_energy_current, ship_energy_max]
-	var stats_text := "SPD:%3.0f  HDG:%3.0f  ENG:%s  R:%d" % [ship_speed, ship_heading_degrees, eng_text, ship_energy_recharge_wait_ticks]
+	var abil: String = ""
+	if ship_afterburner_on:
+		abil += " AB"
+	if ship_stealth_on:
+		abil += " ST"
+	if ship_cloak_on:
+		abil += " CL"
+	if ship_xradar_on:
+		abil += " XR"
+	if ship_antiwarp_on:
+		abil += " AW"
+	var stats_text := "SPD:%3.0f  HDG:%3.0f  ENG:%s  R:%d%s" % [ship_speed, ship_heading_degrees, eng_text, ship_energy_recharge_wait_ticks, abil]
 	if stats_text != _last_stats_text:
 		_last_stats_text = stats_text
 		if stats_label != null:

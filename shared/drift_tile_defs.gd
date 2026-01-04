@@ -157,6 +157,46 @@ static func tile_is_door(tileset_def: Dictionary, atlas_x: int, atlas_y: int) ->
 	return bool(p.get("door", false))
 
 
+static func tile_is_safe_zone(tileset_def: Dictionary, atlas_x: int, atlas_y: int) -> bool:
+	var p := tile_props(tileset_def, atlas_x, atlas_y)
+	return bool(p.get("safe_zone", false))
+
+
+static func build_safe_zone_cells(map_canonical: Dictionary, tileset_def: Dictionary) -> Array:
+	var layers: Dictionary = map_canonical.get("layers", {})
+	var seen: Dictionary = {} # "x,y" -> [x,y,ax,ay]
+	for src_layer in ["bg", "solid", "fg"]:
+		var cells: Array = layers.get(src_layer, [])
+		for cell in cells:
+			if not (cell is Array) or (cell as Array).size() != 4:
+				continue
+			var arr: Array = cell
+			var x: int = int(arr[0])
+			var y: int = int(arr[1])
+			var ax: int = int(arr[2])
+			var ay: int = int(arr[3])
+			if not tile_is_safe_zone(tileset_def, ax, ay):
+				continue
+			seen["%d,%d" % [x, y]] = [x, y, ax, ay]
+	return _sorted_cells(seen.values())
+
+
+static func build_safe_zone_cells_from_layer_cells(cells: Array, tileset_def: Dictionary) -> Array:
+	var seen: Dictionary = {} # "x,y" -> [x,y,ax,ay]
+	for cell in cells:
+		if not (cell is Array) or (cell as Array).size() != 4:
+			continue
+		var arr: Array = cell
+		var x: int = int(arr[0])
+		var y: int = int(arr[1])
+		var ax: int = int(arr[2])
+		var ay: int = int(arr[3])
+		if not tile_is_safe_zone(tileset_def, ax, ay):
+			continue
+		seen["%d,%d" % [x, y]] = [x, y, ax, ay]
+	return _sorted_cells(seen.values())
+
+
 static func build_render_layers(map_canonical: Dictionary, tileset_def: Dictionary) -> Dictionary:
 	var layers: Dictionary = map_canonical.get("layers", {})
 	var seen := {

@@ -249,8 +249,10 @@ func _load_client_map() -> void:
 	var solid_layer_cells: Array = canonical_layers.get("solid", [])
 	var solid_cells: Array = DriftTileDefs.build_solid_cells_from_layer_cells(solid_layer_cells, tileset_def)
 	var door_cells_raw: Array = DriftTileDefs.build_door_cells_from_layer_cells(solid_layer_cells, tileset_def)
+	var safe_zone_cells: Array = DriftTileDefs.build_safe_zone_cells(canonical, tileset_def)
 	world.set_solid_tiles(solid_cells)
 	world.set_door_tiles(door_cells_raw)
+	world.set_safe_zone_tiles(safe_zone_cells)
 	var door_open_s: float = float(meta.get("door_open_seconds", DriftConstants.DOOR_OPEN_SECONDS))
 	var door_closed_s: float = float(meta.get("door_closed_seconds", DriftConstants.DOOR_CLOSED_SECONDS))
 	var door_frame_s: float = float(meta.get("door_frame_seconds", DriftConstants.DOOR_FRAME_SECONDS))
@@ -423,7 +425,12 @@ func _process(delta: float) -> void:
 				var ec: int = int(ss.energy_current) if ("energy_current" in ss) else int(round(float(ss.energy)))
 				var em: int = int(ss.energy_max) if ("energy_max" in ss) else 0
 				var wt: int = int(ss.energy_recharge_wait_ticks) if ("energy_recharge_wait_ticks" in ss) else 0
-				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ec), float(em), wt)
+				var ab_on: bool = bool(ss.afterburner_on) if ("afterburner_on" in ss) else false
+				var st_on: bool = bool(ss.stealth_on) if ("stealth_on" in ss) else false
+				var ck_on: bool = bool(ss.cloak_on) if ("cloak_on" in ss) else false
+				var xr_on: bool = bool(ss.xradar_on) if ("xradar_on" in ss) else false
+				var aw_on: bool = bool(ss.antiwarp_on) if ("antiwarp_on" in ss) else false
+				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ec), float(em), wt, ab_on, st_on, ck_on, xr_on, aw_on)
 
 
 func _latest_tick_step() -> void:
@@ -505,7 +512,12 @@ func _collect_input_cmd() -> DriftTypes.DriftInputCmd:
 	var fire_primary: bool = Input.is_action_pressed("drift_fire_primary")
 	var fire_secondary: bool = Input.is_action_pressed("drift_fire_secondary")
 	var modifier: bool = Input.is_action_pressed("drift_modifier_ability")
-	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier)
+	# Ability toggle buttons (edge detection happens in shared sim).
+	var stealth_btn: bool = Input.is_action_pressed("drift_ability_stealth")
+	var cloak_btn: bool = Input.is_action_pressed("drift_ability_cloak")
+	var xradar_btn: bool = Input.is_action_pressed("drift_ability_xradar")
+	var antiwarp_btn: bool = Input.is_action_pressed("drift_ability_antiwarp")
+	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn)
 
 
 func _unhandled_input(_event):
@@ -1345,7 +1357,7 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		for b in bs:
 			if b == null:
 				continue
-			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
+			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
 	# Authoritative prizes (render only; no client simulation).
 	authoritative_prizes.clear()
 	if snap_dict.has("prizes") and (snap_dict.get("prizes") is Array):
@@ -1466,6 +1478,12 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.energy_recharge_wait_ticks = int(auth_state.energy_recharge_wait_ticks)
 	local_state.energy_recharge_fp_accum = int(auth_state.energy_recharge_fp_accum)
 	local_state.energy_drain_fp_accum = int(auth_state.energy_drain_fp_accum)
+	local_state.stealth_on = bool(auth_state.stealth_on)
+	local_state.cloak_on = bool(auth_state.cloak_on)
+	local_state.xradar_on = bool(auth_state.xradar_on)
+	local_state.antiwarp_on = bool(auth_state.antiwarp_on)
+	local_state.in_safe_zone = bool(auth_state.in_safe_zone)
+	local_state.damage_protect_until_tick = int(auth_state.damage_protect_until_tick)
 
 	# 2) Rewind/snap world.tick to the snapshot tick.
 	world.tick = snapshot_tick
@@ -1478,10 +1496,20 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 				continue
 			if int(b.owner_id) != local_ship_id:
 				continue
-			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
+			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
 		# Ensure edge-triggered fire state matches the snapshot baseline.
 		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
+		var abits: int = 0
+		if bool(base_cmd.stealth_btn):
+			abits |= 1
+		if bool(base_cmd.cloak_btn):
+			abits |= 2
+		if bool(base_cmd.xradar_btn):
+			abits |= 4
+		if bool(base_cmd.antiwarp_btn):
+			abits |= 8
+		world._prev_ability_buttons_by_ship[local_ship_id] = abits
 
 	# If we're snapping forward (snapshot_tick >= previous current_tick), no replay is needed.
 	if snapshot_tick >= current_tick:
@@ -1545,7 +1573,7 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 				continue
 			if int(b.owner_id) != local_ship_id:
 				continue
-			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
+			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
 	return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict, Vector2.ZERO, Vector2.ZERO, -1, local_bullets)
 
 

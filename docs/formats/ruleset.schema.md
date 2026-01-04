@@ -70,11 +70,17 @@ Top-level object:
       }
     }
   },
+  "abilities": {
+    "afterburner": { "drain_per_sec": 30, "speed_mult_pct": 100, "thrust_mult_pct": 160 },
+    "stealth": { "drain_per_sec": 20 },
+    "cloak": { "drain_per_sec": 25 },
+    "xradar": { "drain_per_sec": 15 },
+    "antiwarp": { "drain_per_sec": 35, "radius_px": 200 }
+  },
   "energy": {
     "max": 1200,
     "recharge_rate_per_sec": 150,
     "recharge_delay_ms": 300,
-    "afterburner_drain_per_s": 30,
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150
@@ -93,6 +99,8 @@ Top-level object:
 - Supported values: `1` (legacy) or `2` (latest)
 
 Schema version `2` is stricter and requires explicit energy tuning keys.
+
+Schema version `2` also introduces **continuous-drain abilities** under `abilities`.
 
 ### `physics` (required)
 
@@ -294,12 +302,54 @@ Supported keys:
 - `bounces` (optional): integer in range `0..16`
 - `bounce_restitution` (optional): number in range `0.0..2.0`
 
+### `abilities` (required in schema v2)
+
+- Type: object
+- Unknown keys are rejected.
+
+Schema v2 requires the following blocks:
+
+- `abilities.afterburner`
+- `abilities.stealth`
+- `abilities.cloak`
+- `abilities.xradar`
+- `abilities.antiwarp`
+
+Each block must include:
+
+- `drain_per_sec` (required)
+  - Type: number
+  - Range: `0..100000`
+
+Optional fields:
+
+- `abilities.afterburner.speed_mult_pct` (optional)
+  - Type: number
+  - Range: `0..500`
+
+- `abilities.afterburner.thrust_mult_pct` (optional)
+  - Type: number
+  - Range: `0..500`
+
+- `abilities.antiwarp.radius_px` (optional)
+  - Type: number
+  - Range: `0..100000`
+
+All ability behavior is interpreted by the engine; these are declarative tuning knobs only.
+
 ### `energy` (required in schema v2; optional in schema v1)
 
 - Type: object
 - Unknown keys are rejected.
 
 Energy is currently a tuning block shared to clients during handshake for consistency.
+
+In schema v2, sustained drains are configured under `abilities.*.drain_per_sec`.
+
+In schema v1 (legacy), afterburner drain may appear as:
+
+- `energy.afterburner_drain_per_s` (legacy)
+- `energy.afterburner_drain_per_sec` (legacy alias)
 
 #### `energy.max` (optional)
 

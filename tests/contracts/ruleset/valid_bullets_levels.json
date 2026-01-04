@@ -7,20 +7,34 @@
   "weapons": {
     "bullet": {
       "speed": 900.0,
+      "cooldown_ticks": 0,
+      "spread_deg": 0.0,
       "lifetime_s": 1.0,
       "muzzle_offset": 30.0,
       "levels": {
         "1": {
-          "guns": 1
+          "guns": 1,
+          "cooldown_ticks": 0,
+          "spread_deg": 0.0,
+          "shrapnel_count": 0
         },
         "2": {
-          "guns": 2
+          "guns": 2,
+          "cooldown_ticks": 3,
+          "spread_deg": 4.0,
+          "shrapnel_count": 0
         },
         "3": {
           "guns": 3,
           "multi_fire": true,
           "bounces": 1,
-          "bounce_restitution": 1.0
+          "bounce_restitution": 1.0,
+          "cooldown_ticks": 5,
+          "spread_deg": 6.0,
+          "shrapnel_count": 5,
+          "shrapnel_speed_mult": 0.65,
+          "shrapnel_lifetime_s": 0.18,
+          "shrapnel_cone_deg": 70.0
         }
       }
     }
@@ -36,11 +50,27 @@
       }
     }
   },
+  "abilities": {
+    "afterburner": {
+      "drain_per_sec": 30
+    },
+    "stealth": {
+      "drain_per_sec": 20
+    },
+    "cloak": {
+      "drain_per_sec": 25
+    },
+    "xradar": {
+      "drain_per_sec": 15
+    },
+    "antiwarp": {
+      "drain_per_sec": 35
+    }
+  },
   "energy": {
     "max": 1200,
     "recharge_rate_per_sec": 150,
     "recharge_delay_ms": 300,
-    "afterburner_drain_per_s": 30,
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150

@@ -4,22 +4,17 @@
   "physics": {
     "wall_restitution": 0.6
   },
-  "abilities": {
-    "afterburner": {
-      "drain_per_sec": 30
-    },
-    "stealth": {
-      "drain_per_sec": 20
-    },
-    "cloak": {
-      "drain_per_sec": 25
-    },
-    "xradar": {
-      "drain_per_sec": 15
-    },
-    "antiwarp": {
-      "drain_per_sec": 35
+  "weapons": {
+    "bullet": {
+      "cooldown_ticks": 999
     }
+  },
+  "abilities": {
+    "afterburner": { "drain_per_sec": 30 },
+    "stealth": { "drain_per_sec": 20 },
+    "cloak": { "drain_per_sec": 25 },
+    "xradar": { "drain_per_sec": 15 },
+    "antiwarp": { "drain_per_sec": 35 }
   },
   "energy": {
     "max": 1200,

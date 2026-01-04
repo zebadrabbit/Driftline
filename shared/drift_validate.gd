@@ -536,13 +536,42 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		if schema_version not in [SCHEMA_RULESET_V1, SCHEMA_RULESET_V2]:
 			errors.append(_err("ruleset", "unsupported schema_version %d (supported: %d, %d)" % [schema_version, SCHEMA_RULESET_V1, SCHEMA_RULESET_V2]))
 
-	# Strict top-level shape.
+	# Strict top-level shape (varies by schema version).
+	var top_allowed: Dictionary = {
+		"format": true,
+		"schema_version": true,
+		"physics": true,
+		"weapons": true,
+		"energy": true,
+		"ships": true,
+	}
+	if schema_version == SCHEMA_RULESET_V2:
+		top_allowed["abilities"] = true
+		top_allowed["combat"] = true
 	for k in root.keys():
 		var key := String(k)
-		if key not in ["format", "schema_version", "physics", "weapons", "energy", "ships"]:
+		if not top_allowed.has(key):
 			errors.append(_err("ruleset", "unknown top-level key '%s'" % key))
 
 	var physics := _require_dict(root.get("physics"), "ruleset.physics", errors)
+
+	# Optional combat section (schema v2 only).
+	var combat: Dictionary = {}
+	if root.has("combat"):
+		if schema_version != SCHEMA_RULESET_V2:
+			errors.append(_err("ruleset", "'combat' is only supported in schema_version %d" % SCHEMA_RULESET_V2))
+		else:
+			combat = _require_dict(root.get("combat"), "ruleset.combat", errors)
+			var combat_allowed := {
+				"spawn_protect_ms": true,
+				"respawn_delay_ms": true,
+			}
+			for ck in combat.keys():
+				var cks := String(ck)
+				if not combat_allowed.has(cks):
+					errors.append(_err("ruleset.combat", "unknown key '%s'" % cks))
+			_validate_optional_number_range(combat, "spawn_protect_ms", "ruleset.combat.spawn_protect_ms", 0.0, 600000.0, errors)
+			_validate_optional_number_range(combat, "respawn_delay_ms", "ruleset.combat.respawn_delay_ms", 0.0, 600000.0, errors)
 
 	# Strict physics keys.
 	var physics_allowed := {
@@ -613,6 +642,12 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			bullet = _require_dict(weapons.get("bullet"), "ruleset.weapons.bullet", errors)
 			var bullet_allowed := {
 				"speed": true,
+				"cooldown_ticks": true,
+				"spread_deg": true,
+				"shrapnel_count": true,
+				"shrapnel_speed_mult": true,
+				"shrapnel_lifetime_s": true,
+				"shrapnel_cone_deg": true,
 				"lifetime_s": true,
 				"muzzle_offset": true,
 				"bounces": true,
@@ -624,6 +659,26 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				if not bullet_allowed.has(bks):
 					errors.append(_err("ruleset.weapons.bullet", "unknown key '%s'" % bks))
 			_validate_optional_number_range(bullet, "speed", "ruleset.weapons.bullet.speed", 0.0, 5000.0, errors)
+			if bullet.has("cooldown_ticks"):
+				var ct := typeof(bullet.get("cooldown_ticks"))
+				if ct not in [TYPE_INT, TYPE_FLOAT]:
+					errors.append(_err("ruleset.weapons.bullet.cooldown_ticks", "must be a number"))
+				else:
+					var ci := int(bullet.get("cooldown_ticks"))
+					if ci < 0 or ci > 120:
+						errors.append(_err("ruleset.weapons.bullet.cooldown_ticks", "must be in range 0..120"))
+			_validate_optional_number_range(bullet, "spread_deg", "ruleset.weapons.bullet.spread_deg", 0.0, 45.0, errors)
+			if bullet.has("shrapnel_count"):
+				var st := typeof(bullet.get("shrapnel_count"))
+				if st not in [TYPE_INT, TYPE_FLOAT]:
+					errors.append(_err("ruleset.weapons.bullet.shrapnel_count", "must be a number"))
+				else:
+					var si := int(bullet.get("shrapnel_count"))
+					if si < 0 or si > 16:
+						errors.append(_err("ruleset.weapons.bullet.shrapnel_count", "must be in range 0..16"))
+			_validate_optional_number_range(bullet, "shrapnel_speed_mult", "ruleset.weapons.bullet.shrapnel_speed_mult", 0.0, 2.0, errors)
+			_validate_optional_number_range(bullet, "shrapnel_lifetime_s", "ruleset.weapons.bullet.shrapnel_lifetime_s", 0.0, 5.0, errors)
+			_validate_optional_number_range(bullet, "shrapnel_cone_deg", "ruleset.weapons.bullet.shrapnel_cone_deg", 0.0, 360.0, errors)
 			_validate_optional_number_range(bullet, "lifetime_s", "ruleset.weapons.bullet.lifetime_s", 0.0, 10.0, errors)
 			_validate_optional_number_range(bullet, "muzzle_offset", "ruleset.weapons.bullet.muzzle_offset", 0.0, 64.0, errors)
 			if bullet.has("bounces"):
@@ -652,6 +707,12 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 						"guns": true,
 						"multi_fire": true,
 						"speed": true,
+						"cooldown_ticks": true,
+						"spread_deg": true,
+						"shrapnel_count": true,
+						"shrapnel_speed_mult": true,
+						"shrapnel_lifetime_s": true,
+						"shrapnel_cone_deg": true,
 						"lifetime_s": true,
 						"muzzle_offset": true,
 						"bounces": true,
@@ -672,6 +733,26 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 					if lvl.has("multi_fire") and typeof(lvl.get("multi_fire")) != TYPE_BOOL:
 						errors.append(_err("ruleset.weapons.bullet.levels.%s.multi_fire" % lks, "must be a boolean"))
 					_validate_optional_number_range(lvl, "speed", "ruleset.weapons.bullet.levels.%s.speed" % lks, 0.0, 5000.0, errors)
+					if lvl.has("cooldown_ticks"):
+						var ct2 := typeof(lvl.get("cooldown_ticks"))
+						if ct2 not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.weapons.bullet.levels.%s.cooldown_ticks" % lks, "must be a number"))
+						else:
+							var ci2 := int(lvl.get("cooldown_ticks"))
+							if ci2 < 0 or ci2 > 120:
+								errors.append(_err("ruleset.weapons.bullet.levels.%s.cooldown_ticks" % lks, "must be in range 0..120"))
+					_validate_optional_number_range(lvl, "spread_deg", "ruleset.weapons.bullet.levels.%s.spread_deg" % lks, 0.0, 45.0, errors)
+					if lvl.has("shrapnel_count"):
+						var st2 := typeof(lvl.get("shrapnel_count"))
+						if st2 not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.weapons.bullet.levels.%s.shrapnel_count" % lks, "must be a number"))
+						else:
+							var si2 := int(lvl.get("shrapnel_count"))
+							if si2 < 0 or si2 > 16:
+								errors.append(_err("ruleset.weapons.bullet.levels.%s.shrapnel_count" % lks, "must be in range 0..16"))
+					_validate_optional_number_range(lvl, "shrapnel_speed_mult", "ruleset.weapons.bullet.levels.%s.shrapnel_speed_mult" % lks, 0.0, 2.0, errors)
+					_validate_optional_number_range(lvl, "shrapnel_lifetime_s", "ruleset.weapons.bullet.levels.%s.shrapnel_lifetime_s" % lks, 0.0, 5.0, errors)
+					_validate_optional_number_range(lvl, "shrapnel_cone_deg", "ruleset.weapons.bullet.levels.%s.shrapnel_cone_deg" % lks, 0.0, 360.0, errors)
 					_validate_optional_number_range(lvl, "lifetime_s", "ruleset.weapons.bullet.levels.%s.lifetime_s" % lks, 0.0, 10.0, errors)
 					_validate_optional_number_range(lvl, "muzzle_offset", "ruleset.weapons.bullet.levels.%s.muzzle_offset" % lks, 0.0, 64.0, errors)
 					if lvl.has("bounces"):
@@ -717,6 +798,12 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 						"guns": true,
 						"multi_fire": true,
 						"speed": true,
+						"cooldown_ticks": true,
+						"spread_deg": true,
+						"shrapnel_count": true,
+						"shrapnel_speed_mult": true,
+						"shrapnel_lifetime_s": true,
+						"shrapnel_cone_deg": true,
 						"lifetime_s": true,
 						"muzzle_offset": true,
 						"bounces": true,
@@ -759,8 +846,79 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 								errors.append(_err("ruleset.ships.%s.weapons.bullet.bounces" % ship_key, "must be in range 0..16"))
 					_validate_optional_number_range(ship_bullet, "bounce_restitution", "ruleset.ships.%s.weapons.bullet.bounce_restitution" % ship_key, 0.0, 2.0, errors)
 					_validate_optional_number_range(ship_bullet, "speed", "ruleset.ships.%s.weapons.bullet.speed" % ship_key, 0.0, 5000.0, errors)
+					if ship_bullet.has("cooldown_ticks"):
+						var ct3 := typeof(ship_bullet.get("cooldown_ticks"))
+						if ct3 not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.cooldown_ticks" % ship_key, "must be a number"))
+						else:
+							var ci3 := int(ship_bullet.get("cooldown_ticks"))
+							if ci3 < 0 or ci3 > 120:
+								errors.append(_err("ruleset.ships.%s.weapons.bullet.cooldown_ticks" % ship_key, "must be in range 0..120"))
+					_validate_optional_number_range(ship_bullet, "spread_deg", "ruleset.ships.%s.weapons.bullet.spread_deg" % ship_key, 0.0, 45.0, errors)
+					if ship_bullet.has("shrapnel_count"):
+						var st3 := typeof(ship_bullet.get("shrapnel_count"))
+						if st3 not in [TYPE_INT, TYPE_FLOAT]:
+							errors.append(_err("ruleset.ships.%s.weapons.bullet.shrapnel_count" % ship_key, "must be a number"))
+						else:
+							var si3 := int(ship_bullet.get("shrapnel_count"))
+							if si3 < 0 or si3 > 16:
+								errors.append(_err("ruleset.ships.%s.weapons.bullet.shrapnel_count" % ship_key, "must be in range 0..16"))
+					_validate_optional_number_range(ship_bullet, "shrapnel_speed_mult", "ruleset.ships.%s.weapons.bullet.shrapnel_speed_mult" % ship_key, 0.0, 2.0, errors)
+					_validate_optional_number_range(ship_bullet, "shrapnel_lifetime_s", "ruleset.ships.%s.weapons.bullet.shrapnel_lifetime_s" % ship_key, 0.0, 5.0, errors)
+					_validate_optional_number_range(ship_bullet, "shrapnel_cone_deg", "ruleset.ships.%s.weapons.bullet.shrapnel_cone_deg" % ship_key, 0.0, 360.0, errors)
 					_validate_optional_number_range(ship_bullet, "lifetime_s", "ruleset.ships.%s.weapons.bullet.lifetime_s" % ship_key, 0.0, 10.0, errors)
 					_validate_optional_number_range(ship_bullet, "muzzle_offset", "ruleset.ships.%s.weapons.bullet.muzzle_offset" % ship_key, 0.0, 64.0, errors)
+
+	# Abilities section (schema v2).
+	var abilities: Dictionary = {}
+	var ability_afterburner: Dictionary = {}
+	if schema_version == SCHEMA_RULESET_V2 and not root.has("abilities"):
+		errors.append(_err("ruleset", "missing required field 'abilities'"))
+	if root.has("abilities"):
+		if schema_version != SCHEMA_RULESET_V2:
+			errors.append(_err("ruleset", "'abilities' is only supported in schema_version %d" % SCHEMA_RULESET_V2))
+		else:
+			abilities = _require_dict(root.get("abilities"), "ruleset.abilities", errors)
+			var abilities_allowed := {
+				"afterburner": true,
+				"stealth": true,
+				"cloak": true,
+				"xradar": true,
+				"antiwarp": true,
+			}
+			for ak in abilities.keys():
+				var aks := String(ak)
+				if not abilities_allowed.has(aks):
+					errors.append(_err("ruleset.abilities", "unknown key '%s'" % aks))
+			# Required ability blocks and required drain field.
+			for req_ability in ["afterburner", "stealth", "cloak", "xradar", "antiwarp"]:
+				if not abilities.has(req_ability):
+					errors.append(_err("ruleset.abilities", "missing required field '%s'" % req_ability))
+					continue
+				var aobj: Dictionary = _require_dict(abilities.get(req_ability), "ruleset.abilities.%s" % req_ability, errors)
+				for k2 in aobj.keys():
+					var k2s := String(k2)
+					var ok: bool = false
+					if k2s == "drain_per_sec":
+						ok = true
+					elif req_ability == "afterburner" and k2s in ["speed_mult_pct", "thrust_mult_pct"]:
+						ok = true
+					elif req_ability == "antiwarp" and k2s == "radius_px":
+						ok = true
+					if not ok:
+						errors.append(_err("ruleset.abilities.%s" % req_ability, "unknown key '%s'" % k2s))
+				if not aobj.has("drain_per_sec"):
+					errors.append(_err("ruleset.abilities.%s" % req_ability, "missing required field 'drain_per_sec'"))
+				else:
+					_validate_optional_number_range(aobj, "drain_per_sec", "ruleset.abilities.%s.drain_per_sec" % req_ability, 0.0, 100000.0, errors)
+				if req_ability == "afterburner":
+					_validate_optional_number_range(aobj, "speed_mult_pct", "ruleset.abilities.afterburner.speed_mult_pct", 0.0, 500.0, errors)
+					_validate_optional_number_range(aobj, "thrust_mult_pct", "ruleset.abilities.afterburner.thrust_mult_pct", 0.0, 500.0, errors)
+				if req_ability == "antiwarp":
+					_validate_optional_number_range(aobj, "radius_px", "ruleset.abilities.antiwarp.radius_px", 0.0, 100000.0, errors)
+				# Keep references used later for warnings.
+				if req_ability == "afterburner":
+					ability_afterburner = aobj
 
 	# Energy section.
 	var energy: Dictionary = {}
@@ -768,18 +926,31 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		errors.append(_err("ruleset", "missing required field 'energy'"))
 	if root.has("energy"):
 		energy = _require_dict(root.get("energy"), "ruleset.energy", errors)
-		var energy_allowed := {
-			# Legacy (schema v1)
-			"max": true,
-			"regen_per_s": true,
-			"afterburner_drain_per_s": true,
-			# New (optional)
-			"recharge_rate_per_sec": true,
-			"recharge_delay_ms": true,
-			"bullet_energy_cost": true,
-			"multifire_energy_cost": true,
-			"bomb_energy_cost": true,
-		}
+		var energy_allowed: Dictionary = {}
+		if schema_version == SCHEMA_RULESET_V1:
+			energy_allowed = {
+				# Legacy
+				"max": true,
+				"regen_per_s": true,
+				"afterburner_drain_per_s": true,
+				"afterburner_drain_per_sec": true,
+				# New(er) optional
+				"recharge_rate_per_sec": true,
+				"recharge_delay_ms": true,
+				"bullet_energy_cost": true,
+				"multifire_energy_cost": true,
+				"bomb_energy_cost": true,
+			}
+		else:
+			# Schema v2: sustained ability drains live under ruleset.abilities.
+			energy_allowed = {
+				"max": true,
+				"recharge_rate_per_sec": true,
+				"recharge_delay_ms": true,
+				"bullet_energy_cost": true,
+				"multifire_energy_cost": true,
+				"bomb_energy_cost": true,
+			}
 		for ek in energy.keys():
 			var eks := String(ek)
 			if not energy_allowed.has(eks):
@@ -791,7 +962,6 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				"max",
 				"recharge_rate_per_sec",
 				"recharge_delay_ms",
-				"afterburner_drain_per_s",
 				"bullet_energy_cost",
 				"multifire_energy_cost",
 				"bomb_energy_cost",
@@ -802,6 +972,7 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		_validate_optional_number_range(energy, "max", "ruleset.energy.max", 0.0, 100000.0, errors)
 		_validate_optional_number_range(energy, "regen_per_s", "ruleset.energy.regen_per_s", 0.0, 100000.0, errors)
 		_validate_optional_number_range(energy, "afterburner_drain_per_s", "ruleset.energy.afterburner_drain_per_s", 0.0, 100000.0, errors)
+		_validate_optional_number_range(energy, "afterburner_drain_per_sec", "ruleset.energy.afterburner_drain_per_sec", 0.0, 100000.0, errors)
 		_validate_optional_number_range(energy, "recharge_rate_per_sec", "ruleset.energy.recharge_rate_per_sec", 0.0, 100000.0, errors)
 		_validate_optional_number_range(energy, "recharge_delay_ms", "ruleset.energy.recharge_delay_ms", 0.0, 10000.0, errors)
 		_validate_optional_number_range(energy, "bullet_energy_cost", "ruleset.energy.bullet_energy_cost", 0.0, 10000.0, errors)
@@ -859,6 +1030,15 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			if missing_energy.size() > 0:
 				warnings.append(_err("ruleset.energy", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_energy)))
 
+	# In schema v2, warn if recommended afterburner movement modifiers are missing.
+	if schema_version == SCHEMA_RULESET_V2 and not ability_afterburner.is_empty():
+		var missing_ab: Array[String] = []
+		for k in ["speed_mult_pct", "thrust_mult_pct"]:
+			if not ability_afterburner.has(k):
+				missing_ab.append(k)
+		if missing_ab.size() > 0:
+			warnings.append(_err("ruleset.abilities.afterburner", "missing optional fields (engine defaults will be used): %s" % ", ".join(missing_ab)))
+
 	# Canonical (no auto-fill).
 	var canonical := {
 		"format": FORMAT_RULESET,
@@ -913,12 +1093,31 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				(canonical["weapons"] as Dictionary)[ks] = out_b
 			else:
 				(canonical["weapons"] as Dictionary)[ks] = weapons.get(ks)
+	if root.has("abilities") and schema_version == SCHEMA_RULESET_V2:
+		canonical["abilities"] = {}
+		var ability_keys: Array = abilities.keys()
+		ability_keys.sort()
+		for k in ability_keys:
+			var ks := String(k)
+			(canonical["abilities"] as Dictionary)[ks] = abilities.get(ks)
+	if root.has("combat") and schema_version == SCHEMA_RULESET_V2:
+		canonical["combat"] = {}
+		var combat_keys: Array = combat.keys()
+		combat_keys.sort()
+		for k in combat_keys:
+			var ks := String(k)
+			(canonical["combat"] as Dictionary)[ks] = combat.get(ks)
 	if root.has("energy"):
 		canonical["energy"] = {}
+		if schema_version == SCHEMA_RULESET_V1 and energy.has("afterburner_drain_per_sec") and not energy.has("afterburner_drain_per_s"):
+			# Legacy alias mapping (schema v1 only).
+			(canonical["energy"] as Dictionary)["afterburner_drain_per_s"] = energy.get("afterburner_drain_per_sec")
 		var energy_keys: Array = energy.keys()
 		energy_keys.sort()
 		for k in energy_keys:
 			var ks := String(k)
+			if schema_version == SCHEMA_RULESET_V1 and ks == "afterburner_drain_per_sec":
+				continue
 			(canonical["energy"] as Dictionary)[ks] = energy.get(ks)
 	if root.has("ships"):
 		canonical["ships"] = {}

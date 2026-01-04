@@ -16,19 +16,32 @@ class DriftInputCmd:
 	var fire_primary: bool
 	var fire_secondary: bool
 	var modifier: bool
+	# Ability buttons (client reports current button-down; sim performs edge detection).
+	var stealth_btn: bool
+	var cloak_btn: bool
+	var xradar_btn: bool
+	var antiwarp_btn: bool
 
 	func _init(
 		thrust_value: float = 0.0,
 		rotation_value: float = 0.0,
 		fire_primary_value: bool = false,
 		fire_secondary_value: bool = false,
-		modifier_value: bool = false
+		modifier_value: bool = false,
+		stealth_btn_value: bool = false,
+		cloak_btn_value: bool = false,
+		xradar_btn_value: bool = false,
+		antiwarp_btn_value: bool = false
 	) -> void:
 		thrust = clampf(float(thrust_value), -1.0, 1.0)
 		rotation = clampf(float(rotation_value), -1.0, 1.0)
 		fire_primary = bool(fire_primary_value)
 		fire_secondary = bool(fire_secondary_value)
 		modifier = bool(modifier_value)
+		stealth_btn = bool(stealth_btn_value)
+		cloak_btn = bool(cloak_btn_value)
+		xradar_btn = bool(xradar_btn_value)
+		antiwarp_btn = bool(antiwarp_btn_value)
 
 
 
@@ -39,6 +52,20 @@ class DriftShipState:
 	var rotation: float
 	var username: String = ""
 	var bounty: int = 0
+
+	# Death/respawn (server-authoritative, replicated via snapshots).
+	# If world.tick < dead_until_tick, the ship is considered dead and non-interactive.
+	var dead_until_tick: int = 0
+
+	# Last energy mutation provenance (debug/authoritative semantics).
+	# Used to distinguish combat damage from voluntary spending.
+	var last_energy_change_reason: int = 0
+	var last_energy_change_source_id: int = -1
+	var last_energy_change_tick: int = 0
+
+	# Combat / damage protection.
+	# Deterministic tick timestamp; damage is ignored while world.tick < damage_protect_until_tick.
+	var damage_protect_until_tick: int = 0
 	# Prizes/upgrades (server authoritative, replicated via snapshots).
 	var gun_level: int = 1
 	var bomb_level: int = 1
@@ -63,6 +90,18 @@ class DriftShipState:
 	var energy_recharge_wait_ticks: int = 0
 	var energy_recharge_fp_accum: int = 0
 	var energy_drain_fp_accum: int = 0
+
+	# Continuous-drain abilities (replicated via snapshots).
+	# - afterburner_on is a hold ability (typically modifier + forward thrust)
+	# - others are toggles (edge-detected in the deterministic sim)
+	var afterburner_on: bool = false
+	var stealth_on: bool = false
+	var cloak_on: bool = false
+	var xradar_on: bool = false
+	var antiwarp_on: bool = false
+
+	# Safe zone state (deterministic, derived from map data).
+	var in_safe_zone: bool = false
 
 	# Legacy field kept for backward compatibility with older UI/debug.
 	# New code should prefer energy_current/energy_max.
@@ -90,7 +129,19 @@ class DriftShipState:
 		energy_recharge_delay_ticks_value: int = 0,
 		energy_recharge_wait_ticks_value: int = 0,
 		energy_recharge_fp_accum_value: int = 0,
-		energy_drain_fp_accum_value: int = 0
+		energy_drain_fp_accum_value: int = 0,
+		afterburner_on_value: bool = false,
+		stealth_on_value: bool = false,
+		cloak_on_value: bool = false,
+		xradar_on_value: bool = false,
+		antiwarp_on_value: bool = false
+		,
+		in_safe_zone_value: bool = false,
+		damage_protect_until_tick_value: int = 0,
+		dead_until_tick_value: int = 0,
+		last_energy_change_reason_value: int = 0,
+		last_energy_change_source_id_value: int = -1,
+		last_energy_change_tick_value: int = 0
 	) -> void:
 		id = ship_id
 		position = position_value
@@ -115,6 +166,18 @@ class DriftShipState:
 		energy_recharge_fp_accum = maxi(0, int(energy_recharge_fp_accum_value))
 		energy_drain_fp_accum = maxi(0, int(energy_drain_fp_accum_value))
 
+		afterburner_on = bool(afterburner_on_value)
+		stealth_on = bool(stealth_on_value)
+		cloak_on = bool(cloak_on_value)
+		xradar_on = bool(xradar_on_value)
+		antiwarp_on = bool(antiwarp_on_value)
+		in_safe_zone = bool(in_safe_zone_value)
+		damage_protect_until_tick = maxi(0, int(damage_protect_until_tick_value))
+		dead_until_tick = maxi(0, int(dead_until_tick_value))
+		last_energy_change_reason = int(last_energy_change_reason_value)
+		last_energy_change_source_id = int(last_energy_change_source_id_value)
+		last_energy_change_tick = maxi(0, int(last_energy_change_tick_value))
+
 		energy = clampf(float(energy_value), 0.0, 1000000.0)
 
 
@@ -134,6 +197,10 @@ class DriftBallState:
 class DriftBulletState:
 	var id: int
 	var owner_id: int
+	# Snapshot-stable weapon level at time of firing.
+	# Used for deterministic level-based behaviors (e.g., shrapnel) without depending
+	# on the firing ship's later upgrades.
+	var level: int = 1
 	var position: Vector2
 	var velocity: Vector2
 	var spawn_tick: int
@@ -143,6 +210,7 @@ class DriftBulletState:
 	func _init(
 		bullet_id: int,
 		owner_id_value: int,
+		level_value: int,
 		pos: Vector2,
 		vel: Vector2,
 		spawn_tick_value: int,
@@ -151,6 +219,7 @@ class DriftBulletState:
 	) -> void:
 		id = bullet_id
 		owner_id = owner_id_value
+		level = clampi(int(level_value), 1, 3)
 		position = pos
 		velocity = vel
 		spawn_tick = spawn_tick_value

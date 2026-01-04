@@ -1,0 +1,13 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 2,
+  "physics": {
+    "wall_restitution": 0.6
+  },
+  "energy": {
+    "max": 1200
+  },
+  "combat": {
+    "respawn_delay_ms": 700000
+  }
+}

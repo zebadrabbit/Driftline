@@ -53,10 +53,28 @@ var energy_max_points: int = DriftConstants.DEFAULT_ENERGY_MAX
 var energy_recharge_rate_per_sec: int = DriftConstants.DEFAULT_RECHARGE_RATE_PER_SEC
 var energy_recharge_delay_ticks: int = DriftConstants.DEFAULT_RECHARGE_DELAY_TICKS
 var energy_afterburner_drain_per_sec: int = 0 # optional, can be configured by ruleset
+var ability_stealth_drain_per_sec: int = 0
+var ability_cloak_drain_per_sec: int = 0
+var ability_xradar_drain_per_sec: int = 0
+var ability_antiwarp_drain_per_sec: int = 0
+var ability_antiwarp_radius_px: int = 0
 var bullet_energy_cost: int = DriftConstants.DEFAULT_BULLET_ENERGY_COST
 var bullet_multifire_energy_cost: int = DriftConstants.DEFAULT_MULTIFIRE_ENERGY_COST
 var bomb_energy_cost: int = DriftConstants.DEFAULT_BOMB_ENERGY_COST
 var energy_afterburner_multiplier: float = 1.6
+var energy_afterburner_speed_multiplier: float = 1.0
+
+# Combat tuning.
+# Spawn protection blocks damage application for a short period after spawn/respawn.
+var spawn_protect_ticks: int = 0
+
+# Death/respawn tuning.
+# Respawn delay after combat death (apply_damage drove energy to 0).
+var respawn_delay_ticks: int = int((1500 * DriftConstants.TICK_RATE + 999) / 1000)
+
+
+func _ship_is_dead(ship_state: DriftTypes.DriftShipState, tick_value: int) -> bool:
+	return int(ship_state.dead_until_tick) > 0 and int(tick_value) < int(ship_state.dead_until_tick)
 
 const TOP_SPEED_BONUS_PCT: float = 0.04
 const THRUSTER_BONUS_PCT: float = 0.06
@@ -98,6 +116,7 @@ const PRIZE_SPAWN_ATTEMPTS: int = 200
 var bullets: Dictionary = {} # Dictionary[int, DriftTypes.DriftBulletState]
 var _next_bullet_id: int = 1
 var _prev_fire_by_ship: Dictionary = {} # Dictionary[int, bool]
+var _prev_ability_buttons_by_ship: Dictionary = {} # Dictionary[int, int]
 
 # Effective bullet tuning values used by the deterministic sim.
 var bullet_speed: float = 950.0
@@ -107,6 +126,16 @@ var bullet_radius: float = 2.0
 var bullet_gun_spacing: float = 8.0
 var bullet_bounces: int = 0
 var bullet_bounce_restitution: float = 1.0
+
+# Tactical bullet options (ruleset-configurable; deterministic).
+# - cooldown_ticks is enforced as a tick-phase gate: ship can only fire on ticks where
+#   (tick + ship_id) % cooldown_ticks == 0.
+var bullet_cooldown_ticks: int = 0
+var bullet_spread_deg: float = 0.0
+var bullet_shrapnel_count: int = 0
+var bullet_shrapnel_speed_mult: float = 0.65
+var bullet_shrapnel_lifetime_ticks: int = 10
+var bullet_shrapnel_cone_deg: float = 70.0
 
 
 func _resolve_bullet_bounce_restitution_for_ship(ship_id: int) -> float:
@@ -142,6 +171,7 @@ func _resolve_bullet_bounce_restitution_for_ship(ship_id: int) -> float:
 func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	# Must only be called with a validated driftline.ruleset dict.
 	ruleset = canonical_ruleset
+	var schema_version: int = int(canonical_ruleset.get("schema_version", 1))
 
 	var physics: Dictionary = canonical_ruleset.get("physics", {})
 	if typeof(physics) == TYPE_DICTIONARY:
@@ -174,9 +204,69 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 			bullet_muzzle_offset = float(b.get("muzzle_offset", bullet_muzzle_offset))
 			bullet_bounces = int(b.get("bounces", bullet_bounces))
 			bullet_bounce_restitution = float(b.get("bounce_restitution", bullet_bounce_restitution))
+			bullet_cooldown_ticks = int(b.get("cooldown_ticks", bullet_cooldown_ticks))
+			bullet_spread_deg = float(b.get("spread_deg", bullet_spread_deg))
+			bullet_shrapnel_count = int(b.get("shrapnel_count", bullet_shrapnel_count))
+			bullet_shrapnel_speed_mult = float(b.get("shrapnel_speed_mult", bullet_shrapnel_speed_mult))
+			bullet_shrapnel_cone_deg = float(b.get("shrapnel_cone_deg", bullet_shrapnel_cone_deg))
+			if b.has("shrapnel_lifetime_s"):
+				var sl: float = float(b.get("shrapnel_lifetime_s"))
+				bullet_shrapnel_lifetime_ticks = int(round(sl / DriftConstants.TICK_DT))
 			if b.has("lifetime_s"):
 				var lifetime_s: float = float(b.get("lifetime_s"))
 				bullet_lifetime_ticks = int(round(lifetime_s / DriftConstants.TICK_DT))
+
+			bullet_cooldown_ticks = clampi(bullet_cooldown_ticks, 0, 120)
+			bullet_spread_deg = clampf(bullet_spread_deg, 0.0, 45.0)
+			bullet_shrapnel_count = clampi(bullet_shrapnel_count, 0, 16)
+			bullet_shrapnel_speed_mult = clampf(bullet_shrapnel_speed_mult, 0.0, 2.0)
+			bullet_shrapnel_lifetime_ticks = clampi(bullet_shrapnel_lifetime_ticks, 0, 600)
+			bullet_shrapnel_cone_deg = clampf(bullet_shrapnel_cone_deg, 0.0, 360.0)
+
+	# Ensure sane defaults even if ruleset omitted bullet section.
+	bullet_cooldown_ticks = clampi(bullet_cooldown_ticks, 0, 120)
+	bullet_spread_deg = clampf(bullet_spread_deg, 0.0, 45.0)
+	bullet_shrapnel_count = clampi(bullet_shrapnel_count, 0, 16)
+	bullet_shrapnel_speed_mult = clampf(bullet_shrapnel_speed_mult, 0.0, 2.0)
+	bullet_shrapnel_lifetime_ticks = clampi(bullet_shrapnel_lifetime_ticks, 0, 600)
+	bullet_shrapnel_cone_deg = clampf(bullet_shrapnel_cone_deg, 0.0, 360.0)
+
+	# Abilities section (schema v2).
+	# Note: schema v1 has no abilities block; ability drains and behavior are engine-disabled.
+	energy_afterburner_speed_multiplier = 1.0
+	energy_afterburner_multiplier = 1.6
+	ability_stealth_drain_per_sec = 0
+	ability_cloak_drain_per_sec = 0
+	ability_xradar_drain_per_sec = 0
+	ability_antiwarp_drain_per_sec = 0
+	ability_antiwarp_radius_px = 0
+	if schema_version >= 2:
+		var abilities: Dictionary = canonical_ruleset.get("abilities", {})
+		if typeof(abilities) == TYPE_DICTIONARY and not abilities.is_empty():
+			if abilities.has("afterburner") and typeof(abilities.get("afterburner")) == TYPE_DICTIONARY:
+				var ab: Dictionary = abilities.get("afterburner")
+				if ab.has("drain_per_sec"):
+					energy_afterburner_drain_per_sec = maxi(0, int(round(float(ab.get("drain_per_sec")))))
+				# Defaults preserve prior behavior (thrust boost only; no speed cap change).
+				var sp_pct: int = int(round(float(ab.get("speed_mult_pct", 100.0))))
+				var th_pct: int = int(round(float(ab.get("thrust_mult_pct", 160.0))))
+				sp_pct = clampi(sp_pct, 0, 500)
+				th_pct = clampi(th_pct, 0, 500)
+				energy_afterburner_speed_multiplier = float(sp_pct) / 100.0
+				energy_afterburner_multiplier = float(th_pct) / 100.0
+			if abilities.has("stealth") and typeof(abilities.get("stealth")) == TYPE_DICTIONARY:
+				var st: Dictionary = abilities.get("stealth")
+				ability_stealth_drain_per_sec = maxi(0, int(round(float(st.get("drain_per_sec", 0.0)))))
+			if abilities.has("cloak") and typeof(abilities.get("cloak")) == TYPE_DICTIONARY:
+				var ck: Dictionary = abilities.get("cloak")
+				ability_cloak_drain_per_sec = maxi(0, int(round(float(ck.get("drain_per_sec", 0.0)))))
+			if abilities.has("xradar") and typeof(abilities.get("xradar")) == TYPE_DICTIONARY:
+				var xr: Dictionary = abilities.get("xradar")
+				ability_xradar_drain_per_sec = maxi(0, int(round(float(xr.get("drain_per_sec", 0.0)))))
+			if abilities.has("antiwarp") and typeof(abilities.get("antiwarp")) == TYPE_DICTIONARY:
+				var aw: Dictionary = abilities.get("antiwarp")
+				ability_antiwarp_drain_per_sec = maxi(0, int(round(float(aw.get("drain_per_sec", 0.0)))))
+				ability_antiwarp_radius_px = maxi(0, int(round(float(aw.get("radius_px", 0.0)))))
 
 	var energy: Dictionary = canonical_ruleset.get("energy", {})
 	if typeof(energy) == TYPE_DICTIONARY and not energy.is_empty():
@@ -203,15 +293,16 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 				var ms_i: int = maxi(0, int(round(float(ms))))
 				energy_recharge_delay_ticks = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
 
-		# Prefer new name if present; fall back to legacy.
-		if energy.has("afterburner_drain_per_sec"):
-			var d2 = energy.get("afterburner_drain_per_sec")
-			if typeof(d2) in [TYPE_INT, TYPE_FLOAT]:
-				energy_afterburner_drain_per_sec = maxi(0, int(round(float(d2))))
-		elif energy.has("afterburner_drain_per_s"):
-			var d = energy.get("afterburner_drain_per_s")
-			if typeof(d) in [TYPE_INT, TYPE_FLOAT]:
-				energy_afterburner_drain_per_sec = maxi(0, int(round(float(d))))
+		# Legacy (schema v1): afterburner drain lives under energy.*
+		if schema_version == 1:
+			if energy.has("afterburner_drain_per_sec"):
+				var d2 = energy.get("afterburner_drain_per_sec")
+				if typeof(d2) in [TYPE_INT, TYPE_FLOAT]:
+					energy_afterburner_drain_per_sec = maxi(0, int(round(float(d2))))
+			elif energy.has("afterburner_drain_per_s"):
+				var d = energy.get("afterburner_drain_per_s")
+				if typeof(d) in [TYPE_INT, TYPE_FLOAT]:
+					energy_afterburner_drain_per_sec = maxi(0, int(round(float(d))))
 
 		if energy.has("bullet_energy_cost"):
 			var bc = energy.get("bullet_energy_cost")
@@ -225,6 +316,98 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 			var boc = energy.get("bomb_energy_cost")
 			if typeof(boc) in [TYPE_INT, TYPE_FLOAT]:
 				bomb_energy_cost = maxi(0, int(round(float(boc))))
+
+	# Combat section (schema v2, optional).
+	spawn_protect_ticks = 0
+	respawn_delay_ticks = int((1500 * DriftConstants.TICK_RATE + 999) / 1000)
+	if schema_version >= 2:
+		var combat: Dictionary = canonical_ruleset.get("combat", {})
+		if typeof(combat) == TYPE_DICTIONARY and not combat.is_empty():
+			if combat.has("spawn_protect_ms"):
+				var ms = combat.get("spawn_protect_ms")
+				if typeof(ms) in [TYPE_INT, TYPE_FLOAT]:
+					var ms_i: int = maxi(0, int(round(float(ms))))
+					spawn_protect_ticks = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
+			if combat.has("respawn_delay_ms"):
+				var rms = combat.get("respawn_delay_ms")
+				if typeof(rms) in [TYPE_INT, TYPE_FLOAT]:
+					var rms_i: int = maxi(0, int(round(float(rms))))
+					respawn_delay_ticks = int((rms_i * DriftConstants.TICK_RATE + 999) / 1000)
+
+
+func _resolve_bullet_shrapnel_cfg_for_level(level: int) -> Dictionary:
+	var out := {
+		"count": bullet_shrapnel_count,
+		"speed_mult": bullet_shrapnel_speed_mult,
+		"lifetime_ticks": bullet_shrapnel_lifetime_ticks,
+		"cone_deg": bullet_shrapnel_cone_deg,
+	}
+	var lvl: int = clampi(int(level), 1, 3)
+	var rs_weapons: Dictionary = ruleset.get("weapons", {})
+	if typeof(rs_weapons) != TYPE_DICTIONARY:
+		return out
+	if not rs_weapons.has("bullet") or typeof(rs_weapons.get("bullet")) != TYPE_DICTIONARY:
+		return out
+	var rs_bullet: Dictionary = rs_weapons.get("bullet")
+	if not rs_bullet.has("levels") or typeof(rs_bullet.get("levels")) != TYPE_DICTIONARY:
+		return out
+	var levels: Dictionary = rs_bullet.get("levels")
+	var key := str(lvl)
+	if not levels.has(key) or typeof(levels.get(key)) != TYPE_DICTIONARY:
+		return out
+	var cfg: Dictionary = levels.get(key)
+	if cfg.has("shrapnel_count"):
+		out["count"] = int(cfg.get("shrapnel_count"))
+	if cfg.has("shrapnel_speed_mult"):
+		out["speed_mult"] = float(cfg.get("shrapnel_speed_mult"))
+	if cfg.has("shrapnel_lifetime_s"):
+		out["lifetime_ticks"] = int(round(float(cfg.get("shrapnel_lifetime_s")) / DriftConstants.TICK_DT))
+	if cfg.has("shrapnel_cone_deg"):
+		out["cone_deg"] = float(cfg.get("shrapnel_cone_deg"))
+
+	out["count"] = clampi(int(out.get("count", 0)), 0, 16)
+	out["speed_mult"] = clampf(float(out.get("speed_mult", 0.0)), 0.0, 2.0)
+	out["lifetime_ticks"] = clampi(int(out.get("lifetime_ticks", 0)), 0, 600)
+	out["cone_deg"] = clampf(float(out.get("cone_deg", 0.0)), 0.0, 360.0)
+	return out
+
+
+func _maybe_spawn_bullet_shrapnel(b: DriftTypes.DriftBulletState) -> void:
+	# Shrapnel is level-based and stored on the bullet at fire-time.
+	# To avoid recursion/infinite fragmentation, fragments are spawned as level 1 bullets.
+	var cfg := _resolve_bullet_shrapnel_cfg_for_level(int(b.level))
+	var count: int = int(cfg.get("count", 0))
+	if count <= 0:
+		return
+	var lifetime_ticks: int = int(cfg.get("lifetime_ticks", 0))
+	if lifetime_ticks <= 0:
+		return
+	var speed_mult: float = float(cfg.get("speed_mult", 0.0))
+	if speed_mult <= 0.0:
+		return
+	var cone_deg: float = float(cfg.get("cone_deg", 0.0))
+
+	var v := b.velocity
+	var base_speed := v.length()
+	if base_speed <= 0.001:
+		base_speed = bullet_speed
+	var frag_speed := base_speed * speed_mult
+	frag_speed = clampf(frag_speed, 0.0, 5000.0)
+	if frag_speed <= 0.001:
+		return
+	var base_ang := v.angle()
+
+	for i in range(count):
+		var t: float = 0.0
+		if count > 1:
+			t = (float(i) / float(count - 1)) * 2.0 - 1.0
+		var ang := base_ang + deg_to_rad(t * (cone_deg * 0.5))
+		var dir := Vector2(cos(ang), sin(ang))
+		var vel := dir * frag_speed
+		var die_tick := tick + lifetime_ticks
+		var frag := DriftTypes.DriftBulletState.new(_next_bullet_id, int(b.owner_id), 1, b.position, vel, tick, die_tick, 0)
+		bullets[_next_bullet_id] = frag
+		_next_bullet_id += 1
 
 
 func set_map_dimensions(w_tiles: int, h_tiles: int) -> void:
@@ -312,18 +495,85 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		if int(ship_state.energy_recharge_wait_ticks) < 0:
 			ship_state.energy_recharge_wait_ticks = 0
 
-	# Optional continuous drain: afterburner (Shift + forward thrust).
-	# This keeps existing boost behavior while using deterministic integer math.
+	# Ability toggles (edge-detected in the deterministic sim).
+	var prev_bits: int = int(_prev_ability_buttons_by_ship.get(int(ship_state.id), 0))
+	var cur_bits: int = 0
+	if bool(input_cmd.stealth_btn):
+		cur_bits |= 1
+	if bool(input_cmd.cloak_btn):
+		cur_bits |= 2
+	if bool(input_cmd.xradar_btn):
+		cur_bits |= 4
+	if bool(input_cmd.antiwarp_btn):
+		cur_bits |= 8
+	var pressed_bits: int = cur_bits & (~prev_bits)
+	_prev_ability_buttons_by_ship[int(ship_state.id)] = cur_bits
+	if (pressed_bits & 1) != 0:
+		ship_state.stealth_on = not bool(ship_state.stealth_on)
+	if (pressed_bits & 2) != 0:
+		ship_state.cloak_on = not bool(ship_state.cloak_on)
+	if (pressed_bits & 4) != 0:
+		ship_state.xradar_on = not bool(ship_state.xradar_on)
+	if (pressed_bits & 8) != 0:
+		ship_state.antiwarp_on = not bool(ship_state.antiwarp_on)
+
+	# Optional continuous drains: afterburner (hold) + toggled abilities.
+	# Note: while any sustained drain is active, recharge must be blocked deterministically.
 	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
-	if wants_afterburner and int(ship_state.energy_current) > 0 and int(energy_afterburner_drain_per_sec) > 0:
+	ship_state.afterburner_on = wants_afterburner and int(ship_state.energy_current) > 0 and int(energy_afterburner_drain_per_sec) > 0
+	# If an ability has no configured drain, treat it as unavailable.
+	if bool(ship_state.stealth_on) and int(ability_stealth_drain_per_sec) <= 0:
+		ship_state.stealth_on = false
+	if bool(ship_state.cloak_on) and int(ability_cloak_drain_per_sec) <= 0:
+		ship_state.cloak_on = false
+	if bool(ship_state.xradar_on) and int(ability_xradar_drain_per_sec) <= 0:
+		ship_state.xradar_on = false
+	if bool(ship_state.antiwarp_on) and int(ability_antiwarp_drain_per_sec) <= 0:
+		ship_state.antiwarp_on = false
+
+	var total_drain_per_sec: int = 0
+	if bool(ship_state.afterburner_on):
+		total_drain_per_sec += int(energy_afterburner_drain_per_sec)
+	if bool(ship_state.stealth_on):
+		total_drain_per_sec += int(ability_stealth_drain_per_sec)
+	if bool(ship_state.cloak_on):
+		total_drain_per_sec += int(ability_cloak_drain_per_sec)
+	if bool(ship_state.xradar_on):
+		total_drain_per_sec += int(ability_xradar_drain_per_sec)
+	if bool(ship_state.antiwarp_on):
+		total_drain_per_sec += int(ability_antiwarp_drain_per_sec)
+
+	if total_drain_per_sec > 0 and int(ship_state.energy_current) <= 0:
+		# Auto-disable abilities when energy is depleted.
+		ship_state.afterburner_on = false
+		ship_state.stealth_on = false
+		ship_state.cloak_on = false
+		ship_state.xradar_on = false
+		ship_state.antiwarp_on = false
+	elif total_drain_per_sec > 0 and int(ship_state.energy_current) > 0:
+		# Block recharge while any sustained ability is active.
+		ship_state.energy_recharge_wait_ticks = maxi(int(ship_state.energy_recharge_wait_ticks), int(ship_state.energy_recharge_delay_ticks))
 		# Distribute per-second drain across ticks deterministically.
-		ship_state.energy_drain_fp_accum += int(energy_afterburner_drain_per_sec)
+		ship_state.energy_drain_fp_accum += int(total_drain_per_sec)
 		var drain_this_tick: int = int(ship_state.energy_drain_fp_accum) / DriftConstants.TICK_RATE
 		ship_state.energy_drain_fp_accum = int(ship_state.energy_drain_fp_accum) % DriftConstants.TICK_RATE
 		if drain_this_tick > 0:
-			# Afterburner should not be blocked by "insufficient" energy; clamp to 0.
-			ship_state.energy_current = maxi(0, int(ship_state.energy_current) - drain_this_tick)
-			ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_delay_ticks)
+			var ok_drain: bool = adjust_energy(int(ship_state.id), -drain_this_tick, EnergyReason.DRAIN_SUSTAINED, int(ship_state.id))
+			if (not ok_drain) and int(ship_state.energy_current) <= 0:
+				# Insufficient energy to sustain abilities: drain to 0 and force-disable.
+				ship_state.afterburner_on = false
+				ship_state.stealth_on = false
+				ship_state.cloak_on = false
+				ship_state.xradar_on = false
+				ship_state.antiwarp_on = false
+				ship_state.energy_drain_fp_accum = 0
+			# If energy reaches 0, sustained abilities must shut off deterministically.
+			if int(ship_state.energy_current) <= 0:
+				ship_state.afterburner_on = false
+				ship_state.stealth_on = false
+				ship_state.cloak_on = false
+				ship_state.xradar_on = false
+				ship_state.antiwarp_on = false
 
 	# Recharge (only when wait is zero, and we were not waiting at tick start).
 	if (not was_waiting) and int(ship_state.energy_recharge_wait_ticks) == 0 and int(ship_state.energy_current) < int(ship_state.energy_max):
@@ -338,7 +588,7 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		var add_this_tick: int = int(ship_state.energy_recharge_fp_accum) / DriftConstants.TICK_RATE
 		ship_state.energy_recharge_fp_accum = int(ship_state.energy_recharge_fp_accum) % DriftConstants.TICK_RATE
 		if add_this_tick > 0:
-			ship_state.energy_current = mini(int(ship_state.energy_max), int(ship_state.energy_current) + add_this_tick)
+			adjust_energy(int(ship_state.id), add_this_tick, EnergyReason.REGEN_BASE, -1)
 
 	# Keep legacy mirror updated.
 	ship_state.energy = float(ship_state.energy_current)
@@ -568,11 +818,9 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 			var amt: int = 25
 			if is_negative:
 				# Negative prize drains energy (clamped) and resets recharge delay.
-				ship_state.energy_current = maxi(0, int(ship_state.energy_current) - amt)
-				ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_delay_ticks)
+				adjust_energy(int(ship_state.id), -amt, EnergyReason.PRIZE_NEGATIVE, -1)
 			else:
-				add_energy(ship_state, amt)
-			ship_state.energy = float(ship_state.energy_current)
+				adjust_energy(int(ship_state.id), amt, EnergyReason.PRIZE_POSITIVE, -1)
 		DriftTypes.PrizeKind.Recharge:
 			applied_effect = true
 			if is_negative:
@@ -703,6 +951,248 @@ var collision_events: Array = []
 var prize_events: Array = []
 
 
+# Safe zones (deterministic, derived from map data).
+var _safe_zone_tiles: Dictionary = {} # Dictionary[Vector2i, bool]
+var _safe_zone_tile_list: Array = [] # Array[Vector2i]
+var _safe_zone_tile_list_sorted: Array = [] # Array[Vector2i]
+
+
+enum ActionType {
+	FIRE_PRIMARY,
+	FIRE_SECONDARY,
+	BOMB,
+	MINE,
+	ABILITY,
+	APPLY_DAMAGE,
+}
+
+
+enum EnergyReason {
+	DAMAGE_BULLET,
+	DAMAGE_BOMB,
+	DAMAGE_MINE,
+	DAMAGE_ENV,
+	COST_FIRE_PRIMARY,
+	COST_FIRE_SECONDARY,
+	COST_ABILITY,
+	DRAIN_CLOAK,
+	DRAIN_AFTERBURNER,
+	DRAIN_SUSTAINED,
+	PRIZE_NEGATIVE,
+	PRIZE_POSITIVE,
+	REGEN_BASE,
+}
+
+
+func _energy_reason_is_cost(reason: int) -> bool:
+	return int(reason) == EnergyReason.COST_FIRE_PRIMARY \
+		or int(reason) == EnergyReason.COST_FIRE_SECONDARY \
+		or int(reason) == EnergyReason.COST_ABILITY
+
+
+func _energy_reason_is_drain(reason: int) -> bool:
+	return int(reason) == EnergyReason.DRAIN_CLOAK \
+		or int(reason) == EnergyReason.DRAIN_AFTERBURNER \
+		or int(reason) == EnergyReason.DRAIN_SUSTAINED
+
+
+func _damage_reason_for_source(source: Variant) -> int:
+	# Keep this deterministic and permissive (unknown -> env).
+	if typeof(source) == TYPE_STRING:
+		var s: String = String(source)
+		match s:
+			"bullet":
+				return EnergyReason.DAMAGE_BULLET
+			"bomb":
+				return EnergyReason.DAMAGE_BOMB
+			"mine":
+				return EnergyReason.DAMAGE_MINE
+			"env", "environment":
+				return EnergyReason.DAMAGE_ENV
+	return EnergyReason.DAMAGE_ENV
+
+
+func adjust_energy(ship_id: int, delta: int, reason: int, source_id: int = -1) -> bool:
+	# Single authoritative energy mutation function.
+	# delta: negative for loss, positive for gain.
+	# Returns:
+	# - false only for "all-or-nothing" cost reasons when insufficient energy.
+	# - true otherwise (including clamped drains/damage).
+	var sid: int = int(ship_id)
+	if not ships.has(sid):
+		return false
+	var ship: DriftTypes.DriftShipState = ships.get(sid)
+	if ship == null:
+		return false
+
+	var d: int = int(delta)
+	if d == 0:
+		return true
+
+	var cur: int = int(ship.energy_current)
+	var maxv: int = maxi(0, int(ship.energy_max))
+	var next: int = cur + d
+	var ok: bool = true
+
+	if d < 0:
+		var cost_amt: int = -d
+		if _energy_reason_is_cost(reason):
+			# All-or-nothing: rejected costs do not charge.
+			if cur < cost_amt:
+				return false
+			next = cur - cost_amt
+		elif _energy_reason_is_drain(reason):
+			# Drains can partially deplete; signal failure when insufficient.
+			if cur < cost_amt:
+				ok = false
+		else:
+			# Drains/damage/prizes/etc: clamp.
+			if next < 0:
+				next = 0
+
+		# Any loss event refreshes the recharge delay.
+		ship.energy_recharge_wait_ticks = int(ship.energy_recharge_delay_ticks)
+	else:
+		# Gain: clamp to max.
+		if next > maxv:
+			next = maxv
+
+	if next < 0:
+		next = 0
+	ship.energy_current = next
+	ship.last_energy_change_reason = int(reason)
+	ship.last_energy_change_source_id = int(source_id)
+	ship.last_energy_change_tick = int(tick)
+	# Keep legacy mirror updated.
+	ship.energy = float(ship.energy_current)
+	return ok
+
+
+func _energy_reason_is_damage(reason: int) -> bool:
+	return int(reason) == EnergyReason.DAMAGE_BULLET \
+		or int(reason) == EnergyReason.DAMAGE_BOMB \
+		or int(reason) == EnergyReason.DAMAGE_MINE \
+		or int(reason) == EnergyReason.DAMAGE_ENV
+
+
+func spend_energy(ship_id: int, cost: int, reason: int, action_type: int) -> bool:
+	# Thin wrapper for action-linked costs.
+	# Enforces: only charge when can_perform_action(...) accepts the action.
+	var sid: int = int(ship_id)
+	var c: int = maxi(0, int(cost))
+	if c <= 0:
+		return true
+	if not ships.has(sid):
+		return false
+	var ship: DriftTypes.DriftShipState = ships.get(sid)
+	if ship == null:
+		return false
+	var gate := can_perform_action(ship, int(action_type), {"tick": tick, "ship_id": sid})
+	if not bool(gate.get("ok", true)):
+		return false
+	return adjust_energy(sid, -c, int(reason), sid)
+
+
+func can_perform_action(ship_state: DriftTypes.DriftShipState, action_type: int, context: Dictionary = {}) -> Dictionary:
+	# Single authoritative validation gate for player actions.
+	# Returns a dict with at least:
+	#   ok: bool
+	# Optional:
+	#   brake: bool (special safe-zone behavior for fire attempts while drifting)
+	#   preserve_edge: bool (if false, action is considered "consumed")
+	#
+	# NOTE: This function should stay deterministic and depend only on replicated state.
+	var ctx_tick: int = int(context.get("tick", tick))
+	if _ship_is_dead(ship_state, ctx_tick):
+		return {"ok": false, "preserve_edge": true}
+	var in_safe: bool = bool(ship_state.in_safe_zone)
+	if not in_safe:
+		return {"ok": true}
+
+	match int(action_type):
+		ActionType.FIRE_PRIMARY:
+			# Safe zones: reject firing. If attempting while drifting, brake.
+			var speed: float = ship_state.velocity.length()
+			var drifting: bool = speed > 0.5
+			return {"ok": false, "brake": drifting, "preserve_edge": true}
+		ActionType.FIRE_SECONDARY, ActionType.BOMB, ActionType.MINE, ActionType.ABILITY:
+			# Safe zones: reject offensive actions and abilities.
+			return {"ok": false, "preserve_edge": true}
+		ActionType.APPLY_DAMAGE:
+			# Safe zones: prevent any damage application.
+			return {"ok": false}
+		_:
+			return {"ok": true}
+
+
+func apply_damage(attacker_id: int, target_id: int, damage: int, source: Variant) -> bool:
+	# Centralized damage application.
+	# Determinism rules:
+	# - No RNG
+	# - Only depends on current tick + replicated state
+	# Server-authoritative:
+	# - Call from authoritative sim; clients may call during prediction but must match.
+	var dmg: int = maxi(0, int(damage))
+	if dmg <= 0:
+		return false
+	if not ships.has(target_id):
+		return false
+	var target: DriftTypes.DriftShipState = ships.get(target_id)
+	if target == null:
+		return false
+	if _ship_is_dead(target, tick):
+		return false
+
+	# Safe zone immunity: no damage can be applied to ships in safe zones.
+	# Also reject attempts originating from a ship in a safe zone.
+	if bool(target.in_safe_zone):
+		return false
+	if ships.has(attacker_id):
+		var attacker: DriftTypes.DriftShipState = ships.get(attacker_id)
+		if attacker != null:
+			if _ship_is_dead(attacker, tick):
+				return false
+			if bool(attacker.in_safe_zone):
+				return false
+
+	# Spawn protection.
+	if tick < int(target.damage_protect_until_tick):
+		return false
+
+	# Damage model placeholder: until a separate HP system exists, represent damage as energy loss.
+	var reason: int = _damage_reason_for_source(source)
+	var ok := adjust_energy(int(target_id), -dmg, reason, int(attacker_id))
+	if ok and int(target.energy_current) <= 0 and _energy_reason_is_damage(reason):
+		# Combat death is server-authoritative and only triggered via apply_damage.
+		if int(target.dead_until_tick) <= 0 or tick >= int(target.dead_until_tick):
+			target.dead_until_tick = maxi(0, tick + maxi(0, int(respawn_delay_ticks)))
+			target.velocity = Vector2.ZERO
+			target.afterburner_on = false
+			target.stealth_on = false
+			target.cloak_on = false
+			target.xradar_on = false
+			target.antiwarp_on = false
+			_prev_fire_by_ship[target_id] = false
+			_prev_ability_buttons_by_ship[target_id] = 0
+	return ok
+
+
+func _enforce_safe_zone_state(ship_state: DriftTypes.DriftShipState) -> void:
+	# Safe zones allow movement only; enforce any stateful restrictions here.
+	ship_state.afterburner_on = false
+	ship_state.stealth_on = false
+	ship_state.cloak_on = false
+	ship_state.xradar_on = false
+	ship_state.antiwarp_on = false
+	ship_state.energy_drain_fp_accum = 0
+
+# Spawning (server-auth): separate RNG stream from prizes.
+var _spawn_rng := RandomNumberGenerator.new()
+
+const SPAWN_ATTEMPTS: int = 128
+const SAFE_SPAWN_ATTEMPTS: int = 96
+
+
 func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_speed: float) -> void:
 	collision_events.append({
 		"type": "wall",
@@ -727,25 +1217,62 @@ func add_ship(id: int, position: Vector2) -> void:
 	ships[id] = s
 
 
+func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
+	# Reset transient ship state after initial spawn or respawn.
+	# (Does not change persistent upgrades/bounty; those are game-design dependent.)
+	if not ships.has(ship_id):
+		add_ship(ship_id, position)
+		return
+	var s: DriftTypes.DriftShipState = ships.get(ship_id)
+	if s == null:
+		add_ship(ship_id, position)
+		return
+	s.position = position
+	s.velocity = Vector2.ZERO
+	s.rotation = 0.0
+	# Energy reset.
+	s.energy_max = maxi(0, int(energy_max_points))
+	s.energy_current = int(s.energy_max)
+	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
+	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
+	s.energy_recharge_wait_ticks = 0
+	s.energy_recharge_fp_accum = 0
+	s.energy_drain_fp_accum = 0
+	s.energy = float(s.energy_current)
+	# Abilities off.
+	s.afterburner_on = false
+	s.stealth_on = false
+	s.cloak_on = false
+	s.xradar_on = false
+	s.antiwarp_on = false
+	# Engine shutdown cleared.
+	s.engine_shutdown_until_tick = 0
+	# Death/respawn cleared.
+	s.dead_until_tick = 0
+	s.last_energy_change_reason = 0
+	s.last_energy_change_source_id = -1
+	s.last_energy_change_tick = int(tick)
+	# Spawn protection.
+	s.damage_protect_until_tick = maxi(0, tick + maxi(0, int(spawn_protect_ticks)))
+	# Safe-zone flag is derived from map state; set it immediately for authoritative replication.
+	s.in_safe_zone = _is_position_in_safe_zone(s.position, DriftConstants.SHIP_RADIUS)
+
+
 func drain_energy(ship: DriftTypes.DriftShipState, amount: int) -> bool:
 	# Weapon-style drain: block if insufficient energy.
 	var amt: int = maxi(0, int(amount))
 	if amt <= 0:
 		return true
-	if int(ship.energy_current) < amt:
-		return false
-	ship.energy_current = int(ship.energy_current) - amt
-	ship.energy_recharge_wait_ticks = int(ship.energy_recharge_delay_ticks)
-	ship.energy = float(ship.energy_current)
-	return true
+	# Default legacy behavior: treat as primary-fire style cost.
+	# Newer code should call spend_energy(...) with an explicit reason and action_type.
+	return adjust_energy(int(ship.id), -amt, EnergyReason.COST_FIRE_PRIMARY, int(ship.id))
 
 
 func add_energy(ship: DriftTypes.DriftShipState, amount: int) -> void:
 	var amt: int = maxi(0, int(amount))
 	if amt <= 0:
 		return
-	ship.energy_current = mini(int(ship.energy_max), int(ship.energy_current) + amt)
-	ship.energy = float(ship.energy_current)
+	adjust_energy(int(ship.id), amt, EnergyReason.PRIZE_POSITIVE, -1)
 
 func get_spawn_position(ship_id: int) -> Vector2:
 	# Example: spread ships horizontally from center
@@ -769,6 +1296,178 @@ func set_door_tiles(tiles: Array) -> void:
 		if tile_data.size() >= 2:
 			_door_tile_cells.append(Vector2i(int(tile_data[0]), int(tile_data[1])))
 	_rebuild_effective_solids_for_tick(tick)
+
+
+func set_safe_zone_tiles(tiles: Array) -> void:
+	"""Set safe zone tile positions from map data. tiles is Array of [x, y, atlas_x, atlas_y]"""
+	_safe_zone_tiles.clear()
+	_safe_zone_tile_list.clear()
+	for tile_data in tiles:
+		if tile_data.size() >= 2:
+			var tile_pos := Vector2i(int(tile_data[0]), int(tile_data[1]))
+			_safe_zone_tiles[tile_pos] = true
+			_safe_zone_tile_list.append(tile_pos)
+	_safe_zone_tile_list_sorted = _safe_zone_tile_list.duplicate(false)
+	_sort_tiles_in_place(_safe_zone_tile_list_sorted)
+
+
+func set_spawn_rng_seed(seed_value: int) -> void:
+	_spawn_rng.seed = int(seed_value)
+
+
+func _sort_tiles_in_place(tiles: Array) -> void:
+	# Stable, deterministic ordering for fallback scans.
+	# Sort by y then x.
+	if tiles.size() <= 1:
+		return
+	tiles.sort_custom(Callable(self, "_tile_sort_lt"))
+
+
+func _tile_sort_lt(a: Variant, b: Variant) -> bool:
+	if not (a is Vector2i) or not (b is Vector2i):
+		return false
+	var ta := a as Vector2i
+	var tb := b as Vector2i
+	if ta.y == tb.y:
+		return ta.x < tb.x
+	return ta.y < tb.y
+
+
+func is_valid_spawn_point(pos: Vector2) -> bool:
+	var r: float = float(DriftConstants.SHIP_RADIUS)
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		var w_px: float = float(map_w_tiles) * float(TILE_SIZE)
+		var h_px: float = float(map_h_tiles) * float(TILE_SIZE)
+		if pos.x < r or pos.y < r or pos.x > (w_px - r) or pos.y > (h_px - r):
+			return false
+	if is_position_blocked(pos, r):
+		return false
+	return true
+
+
+func _random_point_in_tile(tile: Vector2i, radius: float) -> Vector2:
+	# Prefer staying away from tile edges so ship radius doesn't straddle solids.
+	var min_x: float = float(tile.x) * float(TILE_SIZE)
+	var min_y: float = float(tile.y) * float(TILE_SIZE)
+	var max_x: float = min_x + float(TILE_SIZE)
+	var max_y: float = min_y + float(TILE_SIZE)
+	var inset: float = minf(float(TILE_SIZE) * 0.45, radius + 0.5)
+	var x0: float = min_x + inset
+	var x1: float = max_x - inset
+	var y0: float = min_y + inset
+	var y1: float = max_y - inset
+	if x1 <= x0 or y1 <= y0:
+		return _world_pos_for_tile(tile)
+	return Vector2(_spawn_rng.randf_range(x0, x1), _spawn_rng.randf_range(y0, y1))
+
+
+func get_safe_spawn_point() -> Variant:
+	# Returns Vector2 on success, or null if no safe zones or none valid.
+	if _safe_zone_tile_list.is_empty():
+		return null
+	var r: float = float(DriftConstants.SHIP_RADIUS)
+	for _attempt in range(SAFE_SPAWN_ATTEMPTS):
+		var idx: int = _spawn_rng.randi_range(0, _safe_zone_tile_list.size() - 1)
+		var t: Vector2i = _safe_zone_tile_list[idx]
+		# Try center, then a jittered point.
+		var p0 := _world_pos_for_tile(t)
+		if is_valid_spawn_point(p0):
+			return p0
+		var p1 := _random_point_in_tile(t, r)
+		if is_valid_spawn_point(p1):
+			return p1
+
+	# Fallback: deterministic scan for the first valid safe tile.
+	for t2 in _safe_zone_tile_list_sorted:
+		if not (t2 is Vector2i):
+			continue
+		var p2 := _world_pos_for_tile(t2)
+		if is_valid_spawn_point(p2):
+			return p2
+	return null
+
+
+func get_random_valid_spawn_point() -> Vector2:
+	# Random valid location in playable field/bounds.
+	# Prefer the main walkable component if available.
+	var r: float = float(DriftConstants.SHIP_RADIUS)
+	if not _main_walkable_tiles.is_empty():
+		for _attempt in range(SPAWN_ATTEMPTS):
+			var idx: int = _spawn_rng.randi_range(0, _main_walkable_tiles.size() - 1)
+			var t: Vector2i = _main_walkable_tiles[idx]
+			var p := _random_point_in_tile(t, r)
+			if is_valid_spawn_point(p):
+				return p
+		# Fallback scan: first valid tile.
+		for t2 in _main_walkable_tiles:
+			if not (t2 is Vector2i):
+				continue
+			var p2 := _world_pos_for_tile(t2)
+			if is_valid_spawn_point(p2):
+				return p2
+
+	# If we don't have walkables (e.g., map dimensions missing), sample within bounds.
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		var w_px: float = float(map_w_tiles) * float(TILE_SIZE)
+		var h_px: float = float(map_h_tiles) * float(TILE_SIZE)
+		for _attempt2 in range(SPAWN_ATTEMPTS):
+			var p3 := Vector2(_spawn_rng.randf_range(r, w_px - r), _spawn_rng.randf_range(r, h_px - r))
+			if is_valid_spawn_point(p3):
+				return p3
+
+	# Deterministic last-resort fallback.
+	var center := _world_pos_for_tile(_center_tile())
+	if is_valid_spawn_point(center):
+		return center
+	# Scan whole map for first non-solid tile.
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		for y in range(map_h_tiles):
+			for x in range(map_w_tiles):
+				var t := Vector2i(x, y)
+				if _static_solid_tiles.has(t):
+					continue
+				var p4 := _world_pos_for_tile(t)
+				if is_valid_spawn_point(p4):
+					return p4
+	return DriftConstants.ARENA_CENTER
+
+
+func get_spawn_point() -> Vector2:
+	# Safe-zone-first spawn selection.
+	var safe = get_safe_spawn_point()
+	if safe is Vector2:
+		return safe
+	return get_random_valid_spawn_point()
+
+
+func respawn_ship(ship_id: int) -> void:
+	# Authoritative respawn primitive: choose spawn point and reset ship state.
+	# Actual death detection/triggering is owned by the server/game rules.
+	var spawn := get_spawn_point()
+	reset_ship_for_spawn(ship_id, spawn)
+
+
+func _is_position_in_safe_zone(pos: Vector2, radius: float) -> bool:
+	# Circle-rect overlap against any safe-zone tile intersecting the ship's radius.
+	if _safe_zone_tiles.is_empty():
+		return false
+	var min_tile_x := int(floor((pos.x - radius) / TILE_SIZE))
+	var max_tile_x := int(floor((pos.x + radius) / TILE_SIZE))
+	var min_tile_y := int(floor((pos.y - radius) / TILE_SIZE))
+	var max_tile_y := int(floor((pos.y + radius) / TILE_SIZE))
+	for tx in range(min_tile_x, max_tile_x + 1):
+		for ty in range(min_tile_y, max_tile_y + 1):
+			var tile_coord := Vector2i(tx, ty)
+			if not _safe_zone_tiles.has(tile_coord):
+				continue
+			var tile_rect_min := Vector2(tx * TILE_SIZE, ty * TILE_SIZE)
+			var tile_rect_max := tile_rect_min + Vector2(TILE_SIZE, TILE_SIZE)
+			var closest_x := clampf(pos.x, tile_rect_min.x, tile_rect_max.x)
+			var closest_y := clampf(pos.y, tile_rect_min.y, tile_rect_max.y)
+			var closest := Vector2(closest_x, closest_y)
+			if pos.distance_to(closest) < radius:
+				return true
+	return false
 
 
 func configure_doors(open_seconds: float, closed_seconds: float, frame_seconds: float = 0.2, start_open: bool = true) -> void:
@@ -930,24 +1629,124 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	var ship_ids: Array = ships.keys()
 	ship_ids.sort()
 
+	# Automatic respawn for combat deaths.
+	for ship_id in ship_ids:
+		var rs: DriftTypes.DriftShipState = ships.get(ship_id)
+		if rs == null:
+			continue
+		if int(rs.dead_until_tick) > 0 and tick >= int(rs.dead_until_tick):
+			respawn_ship(int(ship_id))
+
+	# Dead owners cannot carry the ball.
+	if ball.owner_id != -1 and ships.has(ball.owner_id):
+		var bo: DriftTypes.DriftShipState = ships.get(ball.owner_id)
+		if bo != null and _ship_is_dead(bo, tick):
+			ball.owner_id = -1
+
+	# Sanitized per-ship action inputs for this tick (weapons/abilities).
+	# Movement is processed separately so safe zones still allow movement.
+	var action_cmds: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
+
 
 	for ship_id in ship_ids:
 		var ship_state: DriftTypes.DriftShipState = ships[ship_id]
 		var input_cmd: DriftTypes.DriftInputCmd = inputs.get(ship_id, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
-		_step_ship_energy(ship_state, input_cmd)
+
+		# Dead ships are non-interactive: no movement, no actions, no energy steps.
+		if _ship_is_dead(ship_state, tick):
+			ship_state.velocity = Vector2.ZERO
+			action_cmds[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+			continue
+
+		# Safe zone detection.
+		ship_state.in_safe_zone = _is_position_in_safe_zone(ship_state.position, DriftConstants.SHIP_RADIUS)
+
+		# Build action command through the single validation gate.
+		var action_cmd: DriftTypes.DriftInputCmd = input_cmd
+		var move_cmd: DriftTypes.DriftInputCmd = input_cmd
+		var energy_cmd: DriftTypes.DriftInputCmd = input_cmd
+		if bool(ship_state.in_safe_zone):
+			_enforce_safe_zone_state(ship_state)
+
+			# Abilities rejected in safe zone.
+			var abil_v := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": ship_id})
+			if not bool(abil_v.get("ok", true)):
+				action_cmd = DriftTypes.DriftInputCmd.new(
+					action_cmd.thrust,
+					action_cmd.rotation,
+					bool(action_cmd.fire_primary),
+					bool(action_cmd.fire_secondary),
+					false,
+					false,
+					false,
+					false,
+					false
+				)
+				energy_cmd = DriftTypes.DriftInputCmd.new(
+					energy_cmd.thrust,
+					energy_cmd.rotation,
+					bool(energy_cmd.fire_primary),
+					bool(energy_cmd.fire_secondary),
+					false,
+					false,
+					false,
+					false,
+					false
+				)
+
+			# Fire primary rejected in safe zone; may trigger braking if drifting.
+			if bool(action_cmd.fire_primary):
+				var fire_v := can_perform_action(ship_state, ActionType.FIRE_PRIMARY, {"tick": tick, "ship_id": ship_id})
+				if not bool(fire_v.get("ok", true)):
+					if bool(fire_v.get("brake", false)):
+						ship_state.velocity = Vector2.ZERO
+						move_cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+					# Do not let the action propagate to ball/bullets.
+					action_cmd = DriftTypes.DriftInputCmd.new(
+						action_cmd.thrust,
+						action_cmd.rotation,
+						false,
+						bool(action_cmd.fire_secondary),
+						bool(action_cmd.modifier),
+						bool(action_cmd.stealth_btn),
+						bool(action_cmd.cloak_btn),
+						bool(action_cmd.xradar_btn),
+						bool(action_cmd.antiwarp_btn)
+					)
+
+			# Fire secondary rejected in safe zone (bomb/mine placeholders).
+			if bool(action_cmd.fire_secondary):
+				var sec_v := can_perform_action(ship_state, ActionType.FIRE_SECONDARY, {"tick": tick, "ship_id": ship_id})
+				if not bool(sec_v.get("ok", true)):
+					action_cmd = DriftTypes.DriftInputCmd.new(
+						action_cmd.thrust,
+						action_cmd.rotation,
+						bool(action_cmd.fire_primary),
+						false,
+						bool(action_cmd.modifier),
+						bool(action_cmd.stealth_btn),
+						bool(action_cmd.cloak_btn),
+						bool(action_cmd.xradar_btn),
+						bool(action_cmd.antiwarp_btn)
+					)
+
+		# Store sanitized action command.
+		action_cmds[ship_id] = action_cmd
+
+		_step_ship_energy(ship_state, energy_cmd)
 		# Engine shutdown (negative prize effect): thrust/rotation disabled, firing allowed.
 		if int(ship_state.engine_shutdown_until_tick) > 0 and tick < int(ship_state.engine_shutdown_until_tick):
-			input_cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, bool(input_cmd.fire_primary), bool(input_cmd.fire_secondary), bool(input_cmd.modifier))
+			move_cmd = DriftTypes.DriftInputCmd.new(0.0, 0.0, bool(move_cmd.fire_primary), bool(move_cmd.fire_secondary), bool(move_cmd.modifier))
 		
 		# Store position before movement
 		var old_position := ship_state.position
 		
 		DriftShip.apply_input(
 			ship_state,
-			input_cmd,
+			move_cmd,
 			DriftConstants.TICK_DT,
 			ship_turn_rate,
-			_ship_effective_thrust_accel(ship_state, input_cmd),
+			_ship_effective_thrust_accel(ship_state, move_cmd),
 			_ship_effective_reverse_accel(ship_state),
 			_ship_effective_max_speed(ship_state),
 			ship_base_drag,
@@ -1105,6 +1904,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Check for acquisition
 		for ship_id in ship_ids:
 			var ship = ships[ship_id]
+			if _ship_is_dead(ship, tick):
+				continue
 			if ship.position.distance_to(ball.position) <= DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS:
 				ball.owner_id = ship.id
 				ball.velocity = Vector2.ZERO
@@ -1124,6 +1925,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 				if other_id == owner.id:
 					continue
 				var other = ships[other_id]
+				if _ship_is_dead(other, tick):
+					continue
 				var steal_radius := DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS + ball_steal_padding
 				if other.position.distance_to(owner.position) <= steal_radius:
 					var n = ball.position - other.position
@@ -1135,9 +1938,9 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 					ball.position = owner.position + n * (DriftConstants.SHIP_RADIUS + DriftConstants.BALL_RADIUS)
 					break
 
-	# Kick on fire
+	# Kick on fire (uses validated action commands).
 	var kicked_ship_id: int = -1
-	if ball.owner_id != -1 and inputs.has(ball.owner_id) and inputs[ball.owner_id].fire_primary:
+	if ball.owner_id != -1 and action_cmds.has(ball.owner_id) and (action_cmds[ball.owner_id] as DriftTypes.DriftInputCmd).fire_primary:
 		kicked_ship_id = int(ball.owner_id)
 		var owner = ships[ball.owner_id]
 		ball.owner_id = -1
@@ -1149,9 +1952,9 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	# Fire bullets only when NOT currently holding the ball.
 	# Edge-triggered fire (no additional weapon state needed in snapshots).
 	for ship_id in ship_ids:
-		if not inputs.has(ship_id):
+		if not action_cmds.has(ship_id):
 			continue
-		var cmd: DriftTypes.DriftInputCmd = inputs[ship_id]
+		var cmd: DriftTypes.DriftInputCmd = action_cmds[ship_id]
 		var prev_fire: bool = bool(_prev_fire_by_ship.get(ship_id, false))
 		_prev_fire_by_ship[ship_id] = bool(cmd.fire_primary)
 		if not cmd.fire_primary or prev_fire:
@@ -1178,6 +1981,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var eff_level: int = clampi(int(ship_state.gun_level), 1, 3)
 		var toggle_multishot: bool = bool(ship_state.multi_fire_enabled)
 		var toggle_bounce: bool = (int(ship_state.bullet_bounce_bonus) > 0)
+		var eff_cooldown_ticks: int = bullet_cooldown_ticks
+		var eff_spread_deg: float = bullet_spread_deg
 
 		# Optional level profiles (ruleset.weapons.bullet.levels).
 		var level_cfg: Dictionary = {}
@@ -1213,6 +2018,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 							guns = int(level_cfg.get("guns", guns))
 							multi_fire = bool(level_cfg.get("multi_fire", multi_fire))
 							eff_speed = float(level_cfg.get("speed", eff_speed))
+							eff_cooldown_ticks = int(level_cfg.get("cooldown_ticks", eff_cooldown_ticks))
+							eff_spread_deg = float(level_cfg.get("spread_deg", eff_spread_deg))
 							eff_muzzle_offset = float(level_cfg.get("muzzle_offset", eff_muzzle_offset))
 							eff_bounces = int(level_cfg.get("bounces", eff_bounces))
 							eff_bounce_restitution = float(level_cfg.get("bounce_restitution", eff_bounce_restitution))
@@ -1222,6 +2029,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 						guns = int(sb.get("guns", guns))
 						multi_fire = bool(sb.get("multi_fire", multi_fire))
 						eff_speed = float(sb.get("speed", eff_speed))
+						eff_cooldown_ticks = int(sb.get("cooldown_ticks", eff_cooldown_ticks))
+						eff_spread_deg = float(sb.get("spread_deg", eff_spread_deg))
 						eff_muzzle_offset = float(sb.get("muzzle_offset", eff_muzzle_offset))
 						eff_bounces = int(sb.get("bounces", eff_bounces))
 						eff_bounce_restitution = float(sb.get("bounce_restitution", eff_bounce_restitution))
@@ -1238,6 +2047,12 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		guns = clampi(guns, 1, 8)
 		eff_bounces = clampi(eff_bounces, 0, 16)
 		eff_bounce_restitution = clampf(eff_bounce_restitution, 0.0, 2.0)
+		eff_cooldown_ticks = clampi(eff_cooldown_ticks, 0, 120)
+		eff_spread_deg = clampf(eff_spread_deg, 0.0, 45.0)
+
+		# Level-based cooldown gate (no extra replicated weapon state needed).
+		if eff_cooldown_ticks > 0 and int(posmod(tick + ship_id, eff_cooldown_ticks)) != 0:
+			continue
 		var fire_guns: Array[int] = []
 		if multi_fire or guns == 1:
 			for gi in range(guns):
@@ -1252,16 +2067,19 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var cost: int = int(bullet_energy_cost)
 		if shots > 1:
 			cost = int(bullet_multifire_energy_cost)
-		if cost > 0 and not drain_energy(ship_state, cost):
+		if cost > 0 and not spend_energy(ship_id, cost, EnergyReason.COST_FIRE_PRIMARY, ActionType.FIRE_PRIMARY):
 			continue
 
 		for gi in fire_guns:
 			var centered := float(gi) - (float(guns - 1) * 0.5)
 			var lateral := centered * bullet_gun_spacing
-			var spawn_pos := ship_state.position + fwd * eff_muzzle_offset + right * lateral
-			var vel := ship_state.velocity + fwd * eff_speed
+			var ang_off := deg_to_rad(centered * eff_spread_deg)
+			var shot_dir := fwd.rotated(ang_off)
+			var shot_right := Vector2(-shot_dir.y, shot_dir.x)
+			var spawn_pos := ship_state.position + shot_dir * eff_muzzle_offset + shot_right * lateral
+			var vel := ship_state.velocity + shot_dir * eff_speed
 			var die_tick := tick + maxi(0, eff_lifetime_ticks)
-			var bstate := DriftTypes.DriftBulletState.new(_next_bullet_id, ship_id, spawn_pos, vel, tick, die_tick, eff_bounces)
+			var bstate := DriftTypes.DriftBulletState.new(_next_bullet_id, ship_id, eff_level, spawn_pos, vel, tick, die_tick, eff_bounces)
 			bullets[_next_bullet_id] = bstate
 			_next_bullet_id += 1
 
@@ -1274,20 +2092,24 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		if b == null:
 			continue
 		if b.die_tick >= 0 and tick >= b.die_tick:
+			_maybe_spawn_bullet_shrapnel(b)
 			to_remove.append(int(bid))
 			continue
 		var next_pos := b.position + b.velocity * DriftConstants.TICK_DT
 		# Arena bounds check.
 		if next_pos.x < DriftConstants.ARENA_MIN.x or next_pos.x > DriftConstants.ARENA_MAX.x or next_pos.y < DriftConstants.ARENA_MIN.y or next_pos.y > DriftConstants.ARENA_MAX.y:
+			_maybe_spawn_bullet_shrapnel(b)
 			to_remove.append(int(bid))
 			continue
 		# Tile collision check (treat bullets as small circles).
 		if is_position_blocked(next_pos, bullet_radius):
 			if int(b.bounces_left) <= 0:
+				_maybe_spawn_bullet_shrapnel(b)
 				to_remove.append(int(bid))
 				continue
 			var n: Vector2 = get_collision_normal(b.position, next_pos, bullet_radius)
 			if n == Vector2.ZERO:
+				_maybe_spawn_bullet_shrapnel(b)
 				to_remove.append(int(bid))
 				continue
 			# Sweep to last non-colliding point to avoid tunneling/jitter.
@@ -1304,6 +2126,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			var contact_pos := b.position.lerp(next_pos, t_lo)
 			b.position = contact_pos - n * SEPARATION_EPSILON
 			if is_position_blocked(b.position, bullet_radius):
+				_maybe_spawn_bullet_shrapnel(b)
 				to_remove.append(int(bid))
 				continue
 			# Reflect velocity with optional restitution.
@@ -1341,7 +2164,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var b: DriftTypes.DriftBulletState = bullets.get(bid)
 		if b == null:
 			continue
-		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.position, b.velocity, b.spawn_tick, b.die_tick, b.bounces_left))
+		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.level, b.position, b.velocity, b.spawn_tick, b.die_tick, b.bounces_left))
 
 	var snapshot_prizes: Array = []
 	if include_prizes:
@@ -1358,7 +2181,10 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 
 func _ship_effective_max_speed(ship_state: DriftTypes.DriftShipState) -> float:
 	var bonus: int = int(ship_state.top_speed_bonus)
-	return ship_max_speed * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+	var base: float = ship_max_speed * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+	if bool(ship_state.afterburner_on):
+		return base * energy_afterburner_speed_multiplier
+	return base
 
 
 func _ship_effective_reverse_accel(_ship_state: DriftTypes.DriftShipState) -> float:
@@ -1369,8 +2195,7 @@ func _ship_effective_reverse_accel(_ship_state: DriftTypes.DriftShipState) -> fl
 func _ship_effective_thrust_accel(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTypes.DriftInputCmd) -> float:
 	var thrust_bonus: int = int(ship_state.thruster_bonus)
 	var base: float = ship_thrust_accel * (1.0 + THRUSTER_BONUS_PCT * float(thrust_bonus))
-	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
-	if wants_afterburner and int(ship_state.energy_current) > 0:
+	if bool(ship_state.afterburner_on):
 		return base * energy_afterburner_multiplier
 	return base
 
@@ -1398,5 +2223,16 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 		source.energy_recharge_delay_ticks,
 		source.energy_recharge_wait_ticks,
 		source.energy_recharge_fp_accum,
-		source.energy_drain_fp_accum
+		source.energy_drain_fp_accum,
+		source.afterburner_on,
+		source.stealth_on,
+		source.cloak_on,
+		source.xradar_on,
+		source.antiwarp_on,
+		source.in_safe_zone,
+		source.damage_protect_until_tick,
+		source.dead_until_tick,
+		source.last_energy_change_reason,
+		source.last_energy_change_source_id,
+		source.last_energy_change_tick
 	)

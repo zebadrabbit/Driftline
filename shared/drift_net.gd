@@ -98,6 +98,10 @@ static func pack_input_packet(tick: int, ship_id: int, cmd: DriftTypes.DriftInpu
 	# Extensions (optional trailing fields; old servers/clients ignore extra bytes).
 	buffer.put_u8(1 if cmd.fire_secondary else 0)
 	buffer.put_u8(1 if cmd.modifier else 0)
+	buffer.put_u8(1 if cmd.stealth_btn else 0)
+	buffer.put_u8(1 if cmd.cloak_btn else 0)
+	buffer.put_u8(1 if cmd.xradar_btn else 0)
+	buffer.put_u8(1 if cmd.antiwarp_btn else 0)
 
 	return buffer.data_array
 
@@ -120,10 +124,22 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 	var fire_primary: bool = buffer.get_u8() != 0
 	var fire_secondary: bool = false
 	var modifier: bool = false
+	var stealth_btn: bool = false
+	var cloak_btn: bool = false
+	var xradar_btn: bool = false
+	var antiwarp_btn: bool = false
 	if buffer.get_available_bytes() >= 1:
 		fire_secondary = buffer.get_u8() != 0
 	if buffer.get_available_bytes() >= 1:
 		modifier = buffer.get_u8() != 0
+	if buffer.get_available_bytes() >= 1:
+		stealth_btn = buffer.get_u8() != 0
+	if buffer.get_available_bytes() >= 1:
+		cloak_btn = buffer.get_u8() != 0
+	if buffer.get_available_bytes() >= 1:
+		xradar_btn = buffer.get_u8() != 0
+	if buffer.get_available_bytes() >= 1:
+		antiwarp_btn = buffer.get_u8() != 0
 	var thrust: float = (1.0 if forward else 0.0) + (-1.0 if reverse else 0.0)
 
 	return {
@@ -135,6 +151,10 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 		"fire_primary": fire_primary,
 		"fire_secondary": fire_secondary,
 		"modifier": modifier,
+		"stealth_btn": stealth_btn,
+		"cloak_btn": cloak_btn,
+		"xradar_btn": xradar_btn,
+		"antiwarp_btn": antiwarp_btn,
 	}
 
 
@@ -187,6 +207,10 @@ static func pack_snapshot_packet(
 	#   [optional] repeated bullet_extras_count times:
 	#     u32 id
 	#     u16 bounces_left
+	#   [optional] u16 bullet_extras_v2_count
+	#   [optional] repeated bullet_extras_v2_count times:
+	#     u32 id
+	#     u8 level
 	#   [optional] u16 ship_extras_count
 	#   [optional] repeated ship_extras_count times:
 	#     u32 id
@@ -225,6 +249,18 @@ static func pack_snapshot_packet(
 	#     u8 event_type (1=pickup)
 	#     u32 ship_id
 	#     u32 prize_id
+	#   [optional] u16 ship_abilities_v1_count
+	#   [optional] repeated ship_abilities_v1_count times:
+	#     u32 id
+	#     u8 flags (bit0=stealth_on, bit1=cloak_on, bit2=xradar_on, bit3=antiwarp_on, bit4=in_safe_zone)
+	#   [optional] u16 ship_damage_v1_count
+	#   [optional] repeated ship_damage_v1_count times:
+	#     u32 id
+	#     u32 damage_protect_until_tick
+	#   [optional] u16 ship_death_v1_count
+	#   [optional] repeated ship_death_v1_count times:
+	#     u32 id
+	#     u32 dead_until_tick
 	var bullet_count: int = bullets.size()
 	if bullet_count < 0:
 		bullet_count = 0
@@ -249,6 +285,13 @@ static func pack_snapshot_packet(
 		var b = bullets[i]
 		buffer.put_32(int(b.id))
 		buffer.put_u16(int(clampi(int(b.bounces_left), 0, 65535)))
+
+	# Bullet extras v2 (optional trailing section; append-only).
+	buffer.put_u16(bullet_count)
+	for i in range(bullet_count):
+		var b2 = bullets[i]
+		buffer.put_32(int(b2.id))
+		buffer.put_u8(int(clampi(int(b2.level), 1, 3)))
 
 	# Ship extras section (optional trailing).
 	var ship_count: int = ships.size()
@@ -335,6 +378,38 @@ static func pack_snapshot_packet(
 		buffer.put_u8(et)
 		buffer.put_32(sid)
 		buffer.put_32(pid)
+
+	# Ship abilities v1 (optional trailing; append-only so older clients can ignore).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sa = ships[i]
+		buffer.put_32(int(sa.id))
+		var aflags: int = 0
+		if bool(sa.stealth_on):
+			aflags |= 1
+		if bool(sa.cloak_on):
+			aflags |= 2
+		if bool(sa.xradar_on):
+			aflags |= 4
+		if bool(sa.antiwarp_on):
+			aflags |= 8
+		if bool(sa.in_safe_zone):
+			aflags |= 16
+		buffer.put_u8(aflags)
+
+	# Ship damage v1 (optional trailing; append-only).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sd = ships[i]
+		buffer.put_32(int(sd.id))
+		buffer.put_32(int(maxi(0, int(sd.damage_protect_until_tick))))
+
+	# Ship death v1 (optional trailing; append-only).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sx = ships[i]
+		buffer.put_32(int(sx.id))
+		buffer.put_32(int(maxi(0, int(sx.dead_until_tick))))
 
 	return buffer.data_array
 
@@ -540,7 +615,7 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			var bvy: float = buffer.get_float()
 			var spawn_tick: int = int(buffer.get_32())
 			var die_tick: int = int(buffer.get_32())
-			bullets[i] = DriftTypes.DriftBulletState.new(bid, owner_id, Vector2(bpx, bpy), Vector2(bvx, bvy), spawn_tick, die_tick, 0)
+			bullets[i] = DriftTypes.DriftBulletState.new(bid, owner_id, 1, Vector2(bpx, bpy), Vector2(bvx, bvy), spawn_tick, die_tick, 0)
 
 		# Optional bullet extras section.
 		if buffer.get_available_bytes() >= 2:
@@ -558,6 +633,18 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 				var bounces_left: int = int(buffer.get_u16())
 				if by_id.has(ebid):
 					(by_id[ebid] as DriftTypes.DriftBulletState).bounces_left = bounces_left
+
+			# Optional bullet extras v2 section (level).
+			if buffer.get_available_bytes() >= 2:
+				var extras2_count: int = int(buffer.get_u16())
+				# Each extra2 is 4+1 = 5 bytes.
+				if buffer.get_available_bytes() < (extras2_count * 5):
+					return {}
+				for _j in range(extras2_count):
+					var ebid2: int = int(buffer.get_32())
+					var level: int = int(buffer.get_u8())
+					if by_id.has(ebid2):
+						(by_id[ebid2] as DriftTypes.DriftBulletState).level = clampi(level, 1, 3)
 
 	# Optional ship extras section.
 	if buffer.get_available_bytes() >= 2:
@@ -675,6 +762,64 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			var pid: int = int(buffer.get_32())
 			if et == 1:
 				prize_events.append({"type": "pickup", "ship_id": sid, "prize_id": pid})
+
+	# Optional ship abilities v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_abilities_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 1 = 5 bytes.
+		if buffer.get_available_bytes() < (ship_abilities_count * 5):
+			return {}
+		var ship_by_id4: Dictionary = {}
+		for s4 in ships:
+			if s4 == null:
+				continue
+			ship_by_id4[int(s4.id)] = s4
+		for _i in range(ship_abilities_count):
+			var sid4: int = int(buffer.get_32())
+			var flags4: int = int(buffer.get_u8())
+			if ship_by_id4.has(sid4):
+				var ss4: DriftTypes.DriftShipState = ship_by_id4[sid4]
+				ss4.stealth_on = (flags4 & 1) != 0
+				ss4.cloak_on = (flags4 & 2) != 0
+				ss4.xradar_on = (flags4 & 4) != 0
+				ss4.antiwarp_on = (flags4 & 8) != 0
+				ss4.in_safe_zone = (flags4 & 16) != 0
+
+	# Optional ship damage v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_damage_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 = 8 bytes.
+		if buffer.get_available_bytes() < (ship_damage_count * 8):
+			return {}
+		var ship_by_id5: Dictionary = {}
+		for s5 in ships:
+			if s5 == null:
+				continue
+			ship_by_id5[int(s5.id)] = s5
+		for _i in range(ship_damage_count):
+			var sid5: int = int(buffer.get_32())
+			var protect_until: int = int(buffer.get_32())
+			if ship_by_id5.has(sid5):
+				var ss5: DriftTypes.DriftShipState = ship_by_id5[sid5]
+				ss5.damage_protect_until_tick = maxi(0, protect_until)
+
+	# Optional ship death v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_death_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 = 8 bytes.
+		if buffer.get_available_bytes() < (ship_death_count * 8):
+			return {}
+		var ship_by_id6: Dictionary = {}
+		for s6 in ships:
+			if s6 == null:
+				continue
+			ship_by_id6[int(s6.id)] = s6
+		for _k in range(ship_death_count):
+			var sid6: int = int(buffer.get_32())
+			var dead_until: int = int(buffer.get_32())
+			if ship_by_id6.has(sid6):
+				var ss6: DriftTypes.DriftShipState = ship_by_id6[sid6]
+				ss6.dead_until_tick = maxi(0, dead_until)
 
 	return {
 		"type": pkt_type,

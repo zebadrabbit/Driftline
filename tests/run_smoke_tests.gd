@@ -24,6 +24,14 @@ func _initialize() -> void:
 	_test_no_hardcoded_keys_in_gameplay()
 	_test_welcome_includes_ruleset_payload()
 	_test_energy_deterministic_recharge_and_costs()
+	_test_abilities_continuous_drain_and_auto_disable()
+	_test_safe_zone_mechanics()
+	_test_energy_fire_costs_and_damage_safe_zone()
+	_test_safe_zone_brake_persistent()
+	_test_spawn_protection_blocks_damage()
+	_test_death_spend_to_zero_does_not_kill()
+	_test_death_damage_to_zero_kills_and_respawns()
+	_test_death_safe_zone_damage_impossible()
 	_test_determinism_checksum_fixed_input()
 	_test_prizes_spawn_walkable()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
@@ -84,14 +92,14 @@ func _determinism_state_bytes(world) -> PackedByteArray:
 		if b == null:
 			continue
 		buf.put_32(bullet_id)
-		buf.put_32(int(b.owner_ship_id))
+		buf.put_32(int(b.owner_id))
 		buf.put_64(_q(float(b.position.x), Q_POS))
 		buf.put_64(_q(float(b.position.y), Q_POS))
 		buf.put_64(_q(float(b.velocity.x), Q_VEL))
 		buf.put_64(_q(float(b.velocity.y), Q_VEL))
 		buf.put_32(int(b.spawn_tick))
 		buf.put_32(int(b.die_tick))
-		buf.put_32(int(b.bounces_remaining))
+		buf.put_32(int(b.bounces_left))
 
 	# Ball
 	buf.put_64(_q(float(world.ball.position.x), Q_POS))
@@ -136,11 +144,17 @@ func _test_determinism_checksum_fixed_input() -> void:
 				"bounce_restitution": 1.0,
 			},
 		},
+		"abilities": {
+			"afterburner": {"drain_per_sec": 30, "speed_mult_pct": 100, "thrust_mult_pct": 160},
+			"stealth": {"drain_per_sec": 20},
+			"cloak": {"drain_per_sec": 25},
+			"xradar": {"drain_per_sec": 15},
+			"antiwarp": {"drain_per_sec": 35, "radius_px": 200},
+		},
 		"energy": {
 			"max": 1200,
 			"recharge_rate_per_sec": 150,
 			"recharge_delay_ms": 300,
-			"afterburner_drain_per_s": 30,
 			"bullet_energy_cost": 30,
 			"multifire_energy_cost": 90,
 			"bomb_energy_cost": 150,
@@ -152,8 +166,9 @@ func _test_determinism_checksum_fixed_input() -> void:
 		_fail("determinism_checksum (ruleset validation failed)")
 		return
 
+	var canonical_ruleset: Dictionary = valid.get("ruleset", ruleset)
 	var world = DriftWorld.new()
-	world.apply_ruleset(ruleset)
+	world.apply_ruleset(canonical_ruleset)
 	world.set_solid_tiles([])
 	world.set_door_tiles([])
 	world.add_boundary_tiles(128, 128)
@@ -181,6 +196,452 @@ func _test_determinism_checksum_fixed_input() -> void:
 		return
 
 	_pass("determinism_checksum_fixed_input")
+
+
+func _test_safe_zone_mechanics() -> void:
+	_ran += 1
+	# Safe zones must be enforced in shared sim:
+	# - no bullets/energy drain when firing
+	# - pressing fire instantly stops the ship
+	# - abilities cannot be activated and must not drain
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("safe_zone (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	# Mark tile (2,2) as safe zone.
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var ship_id := 1
+	var start_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, start_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("safe_zone (ship missing)")
+		return
+	# Give the ship velocity so the fire-stop rule is observable.
+	s.velocity = Vector2(120.0, -30.0)
+	var start_energy := int(s.energy_current)
+	var start_bullets := int(world.bullets.size())
+
+	# Press fire: should stop ship, spawn no bullets, drain no energy.
+	var fire_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)
+	world.step_tick({ ship_id: fire_cmd })
+	if not bool(s.in_safe_zone):
+		_fail("safe_zone (expected in_safe_zone true)")
+		return
+	if int(world.bullets.size()) != start_bullets:
+		_fail("safe_zone (expected no bullets)")
+		return
+	if int(s.energy_current) != start_energy:
+		_fail("safe_zone (expected no energy drain)")
+		return
+	if s.velocity != Vector2.ZERO:
+		_fail("safe_zone (expected velocity forced to zero)")
+		return
+	if s.position != start_pos:
+		_fail("safe_zone (expected no movement on fire-stop)")
+		return
+
+	# Attempt abilities: should not activate and should not drain.
+	var abil_cmd := DriftTypes.DriftInputCmd.new(1.0, 0.0, false, false, true, true, true, true, true)
+	world.step_tick({ ship_id: abil_cmd })
+	if bool(s.afterburner_on) or bool(s.stealth_on) or bool(s.cloak_on) or bool(s.xradar_on) or bool(s.antiwarp_on):
+		_fail("safe_zone (expected abilities to remain off)")
+		return
+	if int(s.energy_current) != start_energy:
+		_fail("safe_zone (expected abilities to cost no energy)")
+		return
+
+	_pass("safe_zone_mechanics")
+
+
+func _test_death_spend_to_zero_does_not_kill() -> void:
+	_ran += 1
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("death_spend_to_zero (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.add_ship(1, Vector2(64, 64))
+	var s: DriftTypes.DriftShipState = world.ships.get(1)
+	if s == null:
+		_fail("death_spend_to_zero (ship missing)")
+		return
+
+	# Spend down to 0 via a cost reason; must NOT trigger death.
+	var cur := int(s.energy_current)
+	if cur <= 0:
+		_fail("death_spend_to_zero (expected positive starting energy)")
+		return
+	var ok := world.adjust_energy(1, -cur, int(DriftWorld.EnergyReason.COST_FIRE_PRIMARY), 1)
+	if not ok:
+		_fail("death_spend_to_zero (expected spend to succeed)")
+		return
+	if int(s.energy_current) != 0:
+		_fail("death_spend_to_zero (expected energy_current == 0)")
+		return
+	if int(s.dead_until_tick) != 0:
+		_fail("death_spend_to_zero (expected not dead)")
+		return
+
+	_pass("death_spend_to_zero_does_not_kill")
+
+
+func _test_death_damage_to_zero_kills_and_respawns() -> void:
+	_ran += 1
+	# Use an explicit schema v2 ruleset so combat.respawn_delay_ms is supported.
+	var ruleset := {
+		"format": "driftline.ruleset",
+		"schema_version": 2,
+		"physics": {"wall_restitution": 0.85},
+		"weapons": {"ball_friction": 0.98},
+		"abilities": {
+			"afterburner": {"drain_per_sec": 0, "speed_mult_pct": 100, "thrust_mult_pct": 160},
+			"stealth": {"drain_per_sec": 0},
+			"cloak": {"drain_per_sec": 0},
+			"xradar": {"drain_per_sec": 0},
+			"antiwarp": {"drain_per_sec": 0, "radius_px": 0}
+		},
+		"energy": {
+			"max": 200,
+			"recharge_rate_per_sec": 0,
+			"recharge_delay_ms": 300,
+			"bullet_energy_cost": 0,
+			"multifire_energy_cost": 0,
+			"bomb_energy_cost": 0
+		},
+		"combat": {"spawn_protect_ms": 300, "respawn_delay_ms": 100},
+	}
+	var valid := DriftValidate.validate_ruleset(ruleset)
+	if not bool(valid.get("ok", false)):
+		_fail("death_damage_to_zero (ruleset validation failed: %s)" % [str(valid.get("errors", []))])
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", ruleset)
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	# Provide a safe zone so respawn selects it.
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.set_spawn_rng_seed(1234)
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.add_ship(1, Vector2(64, 64))
+	var s: DriftTypes.DriftShipState = world.ships.get(1)
+	if s == null:
+		_fail("death_damage_to_zero (ship missing)")
+		return
+
+	# Apply damage that reduces energy to 0; must trigger death.
+	var did := world.apply_damage(-1, 1, 9999, "bullet")
+	if not did:
+		_fail("death_damage_to_zero (expected damage to apply)")
+		return
+	if int(s.energy_current) != 0:
+		_fail("death_damage_to_zero (expected energy_current == 0 after damage)")
+		return
+	if int(s.dead_until_tick) <= int(world.tick):
+		_fail("death_damage_to_zero (expected dead_until_tick in the future)")
+		return
+
+	# Step until respawn happens.
+	var safety := 300
+	while int(s.dead_until_tick) > 0 and safety > 0:
+		world.step_tick({})
+		safety -= 1
+		if int(s.dead_until_tick) == 0:
+			break
+	if safety <= 0:
+		_fail("death_damage_to_zero (respawn did not occur)")
+		return
+	if int(s.energy_current) <= 0:
+		_fail("death_damage_to_zero (expected energy reset on respawn)")
+		return
+	if int(s.damage_protect_until_tick) <= int(world.tick):
+		_fail("death_damage_to_zero (expected spawn protection after respawn)")
+		return
+	if not bool(s.in_safe_zone):
+		_fail("death_damage_to_zero (expected respawn into safe zone)")
+		return
+
+	_pass("death_damage_to_zero_kills_and_respawns")
+
+
+func _test_death_safe_zone_damage_impossible() -> void:
+	_ran += 1
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("death_safe_zone_damage (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	# Mark tile (2,2) as safe zone.
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	var ship_id := 1
+	var start_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, start_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("death_safe_zone_damage (ship missing)")
+		return
+	# Step once so in_safe_zone is derived.
+	world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false) })
+	if not bool(s.in_safe_zone):
+		_fail("death_safe_zone_damage (expected in_safe_zone true)")
+		return
+	var did := world.apply_damage(-1, ship_id, 9999, "bullet")
+	if did:
+		_fail("death_safe_zone_damage (expected damage blocked)")
+		return
+	if int(s.dead_until_tick) != 0:
+		_fail("death_safe_zone_damage (expected not dead)")
+		return
+	_pass("death_safe_zone_damage_impossible")
+
+
+func _test_energy_fire_costs_and_damage_safe_zone() -> void:
+	_ran += 1
+	# Explicit energy accounting smoke test:
+	# - rejected FIRE_PRIMARY in safe zone does not reduce energy
+	# - accepted FIRE_PRIMARY outside safe zone does reduce energy
+	# - apply_damage against a safe-zone ship is rejected and does not change energy
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("energy_safe_zone (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var safe_id := 1
+	var outside_id := 2
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	var outside_pos := Vector2(5 * 16 + 8, 5 * 16 + 8)
+	world.add_ship(safe_id, safe_pos)
+	world.add_ship(outside_id, outside_pos)
+	var s_safe: DriftTypes.DriftShipState = world.ships.get(safe_id)
+	var s_out: DriftTypes.DriftShipState = world.ships.get(outside_id)
+	if s_safe == null or s_out == null:
+		_fail("energy_safe_zone (ship missing)")
+		return
+
+	var start_energy_safe := int(s_safe.energy_current)
+	var start_bullets := int(world.bullets.size())
+	world.step_tick({
+		safe_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false),
+		outside_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false),
+	})
+	if not bool(s_safe.in_safe_zone):
+		_fail("energy_safe_zone (expected safe ship in safe zone)")
+		return
+	if int(s_safe.energy_current) != start_energy_safe:
+		_fail("energy_safe_zone (expected no energy drain on rejected fire)")
+		return
+	if int(world.bullets.size()) != start_bullets:
+		_fail("energy_safe_zone (expected no bullets from safe-zone fire)")
+		return
+
+	var start_energy_out := int(s_out.energy_current)
+	world.step_tick({
+		outside_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false),
+	})
+	if bool(s_out.in_safe_zone):
+		_fail("energy_safe_zone (expected outside ship not in safe zone)")
+		return
+	if int(world.bullets.size()) <= start_bullets:
+		_fail("energy_safe_zone (expected bullet spawned outside safe zone)")
+		return
+	var cost_single := int(world.bullet_energy_cost)
+	var cost_multi := int(world.bullet_multifire_energy_cost)
+	var delta := int(start_energy_out - int(s_out.energy_current))
+	if delta <= 0:
+		_fail("energy_safe_zone (expected outside fire to reduce energy)")
+		return
+	if delta != cost_single and delta != cost_multi:
+		_fail("energy_safe_zone (unexpected fire cost delta %d)" % [delta])
+		return
+
+	var before_damage_safe := int(s_safe.energy_current)
+	var dmg_ok := world.apply_damage(outside_id, safe_id, 10, "bullet")
+	if dmg_ok:
+		_fail("energy_safe_zone (expected damage blocked in safe zone)")
+		return
+	if int(s_safe.energy_current) != before_damage_safe:
+		_fail("energy_safe_zone (expected no energy change on blocked damage)")
+		return
+
+	_pass("energy_fire_costs_and_damage_safe_zone")
+
+
+func _test_safe_zone_brake_persistent() -> void:
+	_ran += 1
+	# Safe-zone braking must be persistent:
+	# - build velocity outside
+	# - enter safe zone and attempt FIRE_PRIMARY -> velocity becomes 0
+	# - subsequent idle ticks stay at 0 (no inertia resuming)
+	# - applying thrust again resumes movement
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("safe_zone_brake (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var ship_id := 1
+	var outside_pos := Vector2(3 * 16 + 8, 2 * 16 + 8)
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, outside_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("safe_zone_brake (ship missing)")
+		return
+
+	# Build velocity outside the safe zone.
+	for _i in range(10):
+		world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(1.0, 0.0, false, false, false) })
+	if s.velocity.length() <= 1.0:
+		_fail("safe_zone_brake (expected non-zero velocity after thrust)")
+		return
+
+	# Enter safe zone while drifting.
+	s.position = safe_pos
+	world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false) })
+	if not bool(s.in_safe_zone):
+		_fail("safe_zone_brake (expected ship in safe zone)")
+		return
+	if s.velocity != Vector2.ZERO:
+		_fail("safe_zone_brake (expected velocity zero after fire-brake)")
+		return
+
+	# No inertia resuming on following ticks.
+	for _j in range(5):
+		world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false) })
+		if s.velocity != Vector2.ZERO:
+			_fail("safe_zone_brake (expected velocity to remain zero)")
+			return
+
+	# Thrust again resumes movement.
+	world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(1.0, 0.0, false, false, false) })
+	if s.velocity.length() <= 1.0:
+		_fail("safe_zone_brake (expected velocity to resume after thrust)")
+		return
+
+	_pass("safe_zone_brake_persistent")
+
+
+func _test_spawn_protection_blocks_damage() -> void:
+	_ran += 1
+	# apply_damage() must respect spawn protection timers and safe-zone immunity.
+	# This is a low-level invariant test; it does not depend on bullets/bombs existing yet.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("spawn_protection (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	# Enable a short spawn protection window.
+	rs["combat"] = {"spawn_protect_ms": 250}
+	var valid := DriftValidate.validate_ruleset(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("spawn_protection (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", {})
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	world.add_ship(1, Vector2(32, 32))
+	world.add_ship(2, Vector2(64, 64))
+	# Use the spawn/reset primitive so the protection timestamp is initialized.
+	world.reset_ship_for_spawn(2, Vector2(64, 64))
+
+	var target: DriftTypes.DriftShipState = world.ships.get(2)
+	if target == null:
+		_fail("spawn_protection (target ship missing)")
+		return
+	# Give the target energy to "damage".
+	target.energy_current = 100
+	target.energy = float(target.energy_current)
+
+	# During protection, apply_damage must be rejected.
+	var ok0 := world.apply_damage(1, 2, 25, "test")
+	if ok0:
+		_fail("spawn_protection (apply_damage succeeded during protection)")
+		return
+	if int(target.energy_current) != 100:
+		_fail("spawn_protection (energy changed during protection)")
+		return
+
+	# Advance to the first unprotected tick.
+	var pt: int = maxi(0, int(world.spawn_protect_ticks))
+	for _i in range(pt):
+		world.step_tick({})
+	var pre_energy: int = int(target.energy_current)
+	var ok1 := world.apply_damage(1, 2, 25, "test")
+	if not ok1:
+		_fail("spawn_protection (apply_damage rejected after protection window)")
+		return
+	var expected_after: int = maxi(0, pre_energy - 25)
+	if int(target.energy_current) != expected_after:
+		_fail("spawn_protection (expected energy_current %d, got %d)" % [expected_after, int(target.energy_current)])
+		return
+
+	# Safe-zone immunity: cannot damage a ship in a safe zone.
+	world.set_safe_zone_tiles([[4, 4, 0, 0]])
+	target.position = Vector2(4 * 16 + 8, 4 * 16 + 8)
+	# Recompute safe zone flag.
+	world.step_tick({})
+	if not bool(target.in_safe_zone):
+		_fail("spawn_protection (expected target in safe zone)")
+		return
+	var pre_safe: int = int(target.energy_current)
+	var ok2 := world.apply_damage(1, 2, 25, "test")
+	if ok2:
+		_fail("spawn_protection (apply_damage succeeded in safe zone)")
+		return
+	if int(target.energy_current) != pre_safe:
+		_fail("spawn_protection (energy changed in safe zone)")
+		return
+
+	_pass("spawn_protection_blocks_damage")
 
 
 func _test_energy_deterministic_recharge_and_costs() -> void:
@@ -261,6 +722,90 @@ func _test_energy_deterministic_recharge_and_costs() -> void:
 	_pass("energy_deterministic_recharge_and_costs")
 
 
+func _test_abilities_continuous_drain_and_auto_disable() -> void:
+	_ran += 1
+	# Goal: assert sustained abilities behave deterministically:
+	# - toggles are edge-triggered in the shared sim
+	# - sustained drain blocks recharge
+	# - abilities auto-disable when energy hits 0
+	# - recharge resumes after the configured delay
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("abilities_continuous (failed to load base ruleset)")
+		return
+
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var ship_id := 1
+	world.add_ship(ship_id, Vector2(64, 64))
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("abilities_continuous (ship missing)")
+		return
+
+	# Toggle stealth on (button-down for one tick; edge detection lives in the sim).
+	var toggle_stealth := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false, true, false, false, false)
+	world.step_tick({ ship_id: toggle_stealth })
+	if not bool(s.stealth_on):
+		_fail("abilities_continuous (expected stealth_on after toggle)")
+		return
+
+	# While stealth is on, energy must monotonically decrease (never recharge).
+	var idle := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	var before := int(s.energy_current)
+	for _i in range(120):
+		var e0 := int(s.energy_current)
+		world.step_tick({ ship_id: idle })
+		var e1 := int(s.energy_current)
+		if e1 > e0:
+			_fail("abilities_continuous (energy increased while sustained ability active)")
+			return
+	var after := int(s.energy_current)
+	if after >= before:
+		_fail("abilities_continuous (expected energy to drain while stealth_on)")
+		return
+
+	# Force low energy and ensure ability auto-disables when drained.
+	s.energy_current = 1
+	s.energy_recharge_wait_ticks = 0
+	s.energy_drain_fp_accum = 0
+	s.stealth_on = true
+	for _i in range(240):
+		world.step_tick({ ship_id: idle })
+		if int(s.energy_current) <= 0:
+			break
+	if int(s.energy_current) != 0:
+		_fail("abilities_continuous (expected energy to reach 0)")
+		return
+	if bool(s.stealth_on):
+		_fail("abilities_continuous (expected stealth_on to auto-disable at 0 energy)")
+		return
+
+	# After delay elapses, recharge should resume.
+	var wait_ticks := int(s.energy_recharge_wait_ticks)
+	for _i in range(wait_ticks):
+		var e_before := int(s.energy_current)
+		world.step_tick({ ship_id: idle })
+		if int(s.energy_current) != e_before:
+			_fail("abilities_continuous (energy changed during recharge delay after disable)")
+			return
+	var e0r := int(s.energy_current)
+	world.step_tick({ ship_id: idle })
+	var e1r := int(s.energy_current)
+	if e1r <= e0r and e0r < int(s.energy_max):
+		_fail("abilities_continuous (energy did not recharge after delay)")
+		return
+
+	_pass("abilities_continuous_drain_and_auto_disable")
+
+
 func _test_controls_actions_present() -> void:
 	_ran += 1
 	var required := [
@@ -271,6 +816,10 @@ func _test_controls_actions_present() -> void:
 		"drift_fire_primary",
 		"drift_fire_secondary",
 		"drift_modifier_ability",
+		"drift_ability_stealth",
+		"drift_ability_cloak",
+		"drift_ability_xradar",
+		"drift_ability_antiwarp",
 	]
 	for a in required:
 		if not InputMap.has_action(a):
@@ -337,10 +886,7 @@ func _test_no_hardcoded_keys_in_gameplay() -> void:
 		"res://shared",
 		"res://server",
 	]
-	var allowlist := {
-		# Designated input layer.
-		"res://client/client_main.gd": true,
-	}
+	var allowlist := {}
 	var needles := [
 		"Input.is_key_pressed(",
 		"KEY_",
