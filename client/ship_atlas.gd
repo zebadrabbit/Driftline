@@ -23,6 +23,12 @@ const FRAMES_PER_ROW: int = 10
 const TOTAL_ROWS: int = SHIP_COUNT * ROWS_PER_SHIP
 const FRAMES_PER_SHIP: int = ROWS_PER_SHIP * FRAMES_PER_ROW
 
+# ships.png uses a different 0° reference than the simulation.
+# In practice, the "0°" frame in the sheet is drawn pointing up, while the
+# simulation's rotation=0 points right (+X). Apply a fixed clockwise offset to
+# keep visuals aligned with movement.
+const CW_HEADING_OFFSET_DEG: float = 90.0
+
 static func _validate_texture(tex: Texture2D) -> bool:
 	if tex == null:
 		return false
@@ -46,6 +52,8 @@ static func tile_size_px(tex: Texture2D) -> Vector2i:
 static func heading_deg_to_frame_index(heading_deg: float) -> int:
 	# Convert to clockwise space.
 	var cw := fposmod(360.0 - float(heading_deg), 360.0)
+	# Apply fixed sheet-to-sim alignment offset.
+	cw = fposmod(cw + CW_HEADING_OFFSET_DEG, 360.0)
 	# 40 facings => 9 degrees per frame.
 	var step := 360.0 / float(FRAMES_PER_SHIP)
 	# Floor mapping keeps the index stable across small jitter.

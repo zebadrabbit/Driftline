@@ -60,21 +60,22 @@ func _test_ship_sprite_atlas_mapping() -> void:
 	var ship_index := 3
 	var heading_deg := 0.0
 	var coords := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index, heading_deg)
-	if coords != Vector2i(0, ship_index * 4):
-		_fail("ship_atlas (expected heading 0 => col0,row%d got %s)" % [ship_index * 4, str(coords)])
+	# With the sheet-to-sim alignment offset, heading 0 maps to the next quadrant row.
+	if coords != Vector2i(0, ship_index * 4 + 1):
+		_fail("ship_atlas (expected heading 0 => col0,row%d got %s)" % [ship_index * 4 + 1, str(coords)])
 		return
 
 	# A half-turn should land in dir_row=2, col=0.
 	var coords2 := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index, 180.0)
-	if coords2.x != 0 or coords2.y != (ship_index * 4 + 2):
-		_fail("ship_atlas (expected heading 180 => col0,row%d got %s)" % [ship_index * 4 + 2, str(coords2)])
+	if coords2.x != 0 or coords2.y != (ship_index * 4 + 3):
+		_fail("ship_atlas (expected heading 180 => col0,row%d got %s)" % [ship_index * 4 + 3, str(coords2)])
 		return
 
 	# Verify ship block separation.
 	var ship_index_b := 4
 	var coords3 := DriftShipAtlas.ship_heading_to_sheet_coords(ship_index_b, 0.0)
-	if coords3.y != ship_index_b * 4:
-		_fail("ship_atlas (expected ship %d row base %d got %d)" % [ship_index_b, ship_index_b * 4, coords3.y])
+	if coords3.y != ship_index_b * 4 + 1:
+		_fail("ship_atlas (expected ship %d row %d got %d)" % [ship_index_b, ship_index_b * 4 + 1, coords3.y])
 		return
 
 	_pass("ship_sprite_atlas_mapping")
