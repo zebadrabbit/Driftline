@@ -38,6 +38,9 @@ const NET_CHANNEL: int = 1
 const SPAWN_POSITION: Vector2 = Vector2(512.0, 512.0)
 const SNAPSHOT_INTERVAL_TICKS: int = 6
 
+# Manual team change request throttling (server-side). 0 disables cooldown.
+const FREQ_CHANGE_COOLDOWN_MS: int = 0
+
 const QUIT_FLAG_PATH := "user://server.quit"
 const QUIT_POLL_INTERVAL_SECONDS: float = 0.25
 
@@ -75,6 +78,9 @@ var ship_id_by_peer: Dictionary = {} # Dictionary[int, int]
 
 # ship_id -> last known input (fallback when packets are missing)
 var last_cmd_by_ship: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
+
+# ship_id -> last tick when freq was manually changed
+var last_freq_change_tick_by_ship: Dictionary = {} # Dictionary[int, int]
 
 
 func _initialize() -> void:
@@ -328,6 +334,7 @@ func _on_peer_connected(peer_id: int) -> void:
 	# Always reset ship state on connect.
 	# Unified authoritative spawn: safe-zone-first if present; otherwise random valid.
 	world.respawn_ship(ship_id)
+	last_freq_change_tick_by_ship[ship_id] = -2147483648
 
 	# Clear buffered inputs for this ship and reset last cmd.
 	_remove_buffered_inputs_for_ship(ship_id)
@@ -350,6 +357,7 @@ func _on_peer_disconnected(peer_id: int) -> void:
 
 		# Clear buffers for that ship.
 		last_cmd_by_ship.erase(ship_id)
+		last_freq_change_tick_by_ship.erase(ship_id)
 		_remove_buffered_inputs_for_ship(ship_id)
 
 	print("Client disconnected: ", peer_id)
@@ -419,9 +427,56 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 			bool(input_dict.get("xradar_btn", false)),
 			bool(input_dict.get("antiwarp_btn", false))
 		)
+		return
 
-		if DEBUG_NET:
-			print("[NET] recv input tick=", tick, " world.tick=", world.tick, " from=", sender_id)
+	if pkt_type == DriftNet.PKT_SET_FREQ_REQUEST:
+		var req: Dictionary = DriftNet.unpack_set_freq_request(bytes)
+		if req.is_empty():
+			return
+		if not ship_id_by_peer.has(sender_id):
+			return
+		var ship_id: int = int(req.get("ship_id", -1))
+		if int(ship_id_by_peer[sender_id]) != ship_id:
+			return
+		var desired_freq: int = int(req.get("desired_freq", 0))
+		var res: Dictionary = request_set_freq(ship_id, desired_freq)
+		_send_set_freq_result(sender_id, ship_id, desired_freq, res)
+		return
+
+
+func _send_set_freq_result(peer_id: int, ship_id: int, desired_freq: int, res: Dictionary) -> void:
+	if enet_peer == null:
+		return
+	var ok: bool = bool(res.get("ok", false))
+	var reason: int = int(res.get("reason", DriftNet.SET_FREQ_REASON_NOT_ALLOWED))
+	if ok:
+		reason = DriftNet.SET_FREQ_REASON_NONE
+	var packet: PackedByteArray = DriftNet.pack_set_freq_result(ship_id, ok, desired_freq, reason)
+	enet_peer.set_transfer_channel(NET_CHANNEL)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_target_peer(int(peer_id))
+	enet_peer.put_packet(packet)
+
+
+func request_set_freq(ship_id: int, desired_freq: int) -> Dictionary:
+	# Server-side entrypoint for manual team/freq changes.
+	# Clients will observe the result via authoritative snapshots.
+	if world == null:
+		return {"ok": false, "error": "world not initialized", "reason": DriftNet.SET_FREQ_REASON_NOT_ALLOWED}
+	if not world.ships.has(ship_id):
+		return {"ok": false, "error": "ship not found", "reason": DriftNet.SET_FREQ_REASON_NOT_ALLOWED}
+
+	# Optional cooldown enforcement.
+	if int(FREQ_CHANGE_COOLDOWN_MS) > 0:
+		var cooldown_ticks: int = int((int(FREQ_CHANGE_COOLDOWN_MS) * DriftConstants.TICK_RATE + 999) / 1000)
+		var last_tick: int = int(last_freq_change_tick_by_ship.get(ship_id, -2147483648))
+		if int(world.tick) - last_tick < cooldown_ticks:
+			return {"ok": false, "error": "cooldown", "reason": DriftNet.SET_FREQ_REASON_COOLDOWN}
+
+	var res: Dictionary = world.set_ship_freq(ship_id, desired_freq)
+	if bool(res.get("ok", false)):
+		last_freq_change_tick_by_ship[ship_id] = int(world.tick)
+	return res
 
 
 func _step_authoritative_tick() -> void:

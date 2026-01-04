@@ -75,6 +75,22 @@ static func _validate_optional_number_range(d: Dictionary, key: String, ctx: Str
 		errors.append(_err(ctx, "must be in range %.3f..%.3f" % [min_v, max_v]))
 
 
+static func _validate_optional_int_range(d: Dictionary, key: String, ctx: String, min_v: int, max_v: int, errors: Array[String]) -> void:
+	if not d.has(key):
+		return
+	var t := typeof(d.get(key))
+	if t not in [TYPE_INT, TYPE_FLOAT]:
+		errors.append(_err(ctx, "must be a number"))
+		return
+	var f := float(d.get(key))
+	if absf(f - round(f)) > 0.000001:
+		errors.append(_err(ctx, "must be an int"))
+		return
+	var i := int(round(f))
+	if i < int(min_v) or i > int(max_v):
+		errors.append(_err(ctx, "must be in range %d..%d" % [int(min_v), int(max_v)]))
+
+
 static func validate_header(root: Dictionary, expected_format: String, expected_schema_version: int, ctx: String = "") -> Array[String]:
 	var errors: Array[String] = []
 	if not root.has("format"):
@@ -519,6 +535,9 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 	var errors: Array[String] = []
 	var warnings: Array[String] = []
 
+	const DEFAULT_UI_LOW_ENERGY_FRAC := 0.33
+	const DEFAULT_UI_CRITICAL_ENERGY_FRAC := 0.15
+
 	# Rulesets support multiple schema versions (legacy + latest).
 	# Unknown schema versions must fail loudly.
 	var schema_version: int = 0
@@ -548,6 +567,9 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 	if schema_version == SCHEMA_RULESET_V2:
 		top_allowed["abilities"] = true
 		top_allowed["combat"] = true
+		top_allowed["team"] = true
+		top_allowed["zones"] = true
+		top_allowed["ui"] = true
 	for k in root.keys():
 		var key := String(k)
 		if not top_allowed.has(key):
@@ -565,6 +587,7 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			var combat_allowed := {
 				"spawn_protect_ms": true,
 				"respawn_delay_ms": true,
+				"friendly_fire": true,
 			}
 			for ck in combat.keys():
 				var cks := String(ck)
@@ -572,6 +595,71 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 					errors.append(_err("ruleset.combat", "unknown key '%s'" % cks))
 			_validate_optional_number_range(combat, "spawn_protect_ms", "ruleset.combat.spawn_protect_ms", 0.0, 600000.0, errors)
 			_validate_optional_number_range(combat, "respawn_delay_ms", "ruleset.combat.respawn_delay_ms", 0.0, 600000.0, errors)
+			if combat.has("friendly_fire") and typeof(combat.get("friendly_fire")) != TYPE_BOOL:
+				errors.append(_err("ruleset.combat.friendly_fire", "must be a boolean"))
+
+	# Optional team section (schema v2 only).
+	var team: Dictionary = {}
+	if root.has("team"):
+		if schema_version != SCHEMA_RULESET_V2:
+			errors.append(_err("ruleset", "'team' is only supported in schema_version %d" % SCHEMA_RULESET_V2))
+		else:
+			team = _require_dict(root.get("team"), "ruleset.team", errors)
+			var team_allowed := {
+				"max_freq": true,
+				"force_even": true,
+			}
+			for tk in team.keys():
+				var tks := String(tk)
+				if not team_allowed.has(tks):
+					errors.append(_err("ruleset.team", "unknown key '%s'" % tks))
+			_validate_optional_int_range(team, "max_freq", "ruleset.team.max_freq", 0, 16, errors)
+			if team.has("force_even") and typeof(team.get("force_even")) != TYPE_BOOL:
+				errors.append(_err("ruleset.team.force_even", "must be a boolean"))
+
+	# Optional zones section (schema v2 only).
+	var zones: Dictionary = {}
+	if root.has("zones"):
+		if schema_version != SCHEMA_RULESET_V2:
+			errors.append(_err("ruleset", "'zones' is only supported in schema_version %d" % SCHEMA_RULESET_V2))
+		else:
+			zones = _require_dict(root.get("zones"), "ruleset.zones", errors)
+			var zones_allowed := {
+				"safe_zone_max_ms": true,
+			}
+			for zk in zones.keys():
+				var zks := String(zk)
+				if not zones_allowed.has(zks):
+					errors.append(_err("ruleset.zones", "unknown key '%s'" % zks))
+			_validate_optional_number_range(zones, "safe_zone_max_ms", "ruleset.zones.safe_zone_max_ms", 0.0, 600000.0, errors)
+
+	# Optional UI section (schema v2 only).
+	var ui: Dictionary = {}
+	var ui_low_energy_frac: float = DEFAULT_UI_LOW_ENERGY_FRAC
+	var ui_critical_energy_frac: float = DEFAULT_UI_CRITICAL_ENERGY_FRAC
+	if root.has("ui"):
+		if schema_version != SCHEMA_RULESET_V2:
+			errors.append(_err("ruleset", "'ui' is only supported in schema_version %d" % SCHEMA_RULESET_V2))
+		else:
+			ui = _require_dict(root.get("ui"), "ruleset.ui", errors)
+			var ui_allowed := {
+				"low_energy_frac": true,
+				"critical_energy_frac": true,
+			}
+			for uk in ui.keys():
+				var uks := String(uk)
+				if not ui_allowed.has(uks):
+					errors.append(_err("ruleset.ui", "unknown key '%s'" % uks))
+			_validate_optional_number_range(ui, "low_energy_frac", "ruleset.ui.low_energy_frac", 0.0, 1.0, errors)
+			_validate_optional_number_range(ui, "critical_energy_frac", "ruleset.ui.critical_energy_frac", 0.0, 1.0, errors)
+
+			# Cross-field constraint (using engine defaults if missing).
+			if ui.has("low_energy_frac"):
+				ui_low_energy_frac = float(ui.get("low_energy_frac"))
+			if ui.has("critical_energy_frac"):
+				ui_critical_energy_frac = float(ui.get("critical_energy_frac"))
+			if ui_critical_energy_frac > ui_low_energy_frac:
+				errors.append(_err("ruleset.ui", "critical_energy_frac must be <= low_energy_frac"))
 
 	# Strict physics keys.
 	var physics_allowed := {
@@ -1107,6 +1195,27 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 		for k in combat_keys:
 			var ks := String(k)
 			(canonical["combat"] as Dictionary)[ks] = combat.get(ks)
+	if root.has("team") and schema_version == SCHEMA_RULESET_V2:
+		canonical["team"] = {}
+		var team_keys: Array = team.keys()
+		team_keys.sort()
+		for k in team_keys:
+			var ks := String(k)
+			(canonical["team"] as Dictionary)[ks] = team.get(ks)
+	if root.has("zones") and schema_version == SCHEMA_RULESET_V2:
+		canonical["zones"] = {}
+		var zone_keys: Array = zones.keys()
+		zone_keys.sort()
+		for k in zone_keys:
+			var ks := String(k)
+			(canonical["zones"] as Dictionary)[ks] = zones.get(ks)
+	if root.has("ui") and schema_version == SCHEMA_RULESET_V2:
+		canonical["ui"] = {}
+		var ui_keys: Array = ui.keys()
+		ui_keys.sort()
+		for k in ui_keys:
+			var ks := String(k)
+			(canonical["ui"] as Dictionary)[ks] = ui.get(ks)
 	if root.has("energy"):
 		canonical["energy"] = {}
 		if schema_version == SCHEMA_RULESET_V1 and energy.has("afterburner_drain_per_sec") and not energy.has("afterburner_drain_per_s"):

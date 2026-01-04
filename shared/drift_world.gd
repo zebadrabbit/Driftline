@@ -73,6 +73,20 @@ var spawn_protect_ticks: int = 0
 var respawn_delay_ticks: int = int((1500 * DriftConstants.TICK_RATE + 999) / 1000)
 
 
+# Safe-zone camping limit.
+# 0 disables.
+var safe_zone_max_ticks: int = 0
+
+
+# Team / friendly-fire tuning (schema v2; engine defaults apply if omitted).
+# - team_max_freq: 0 means FFA; otherwise teams are 0..team_max_freq-1.
+# - team_force_even: used for server-enforced manual team changes.
+# - combat_friendly_fire: if true, same-team damage is allowed.
+var team_max_freq: int = 2
+var team_force_even: bool = true
+var combat_friendly_fire: bool = false
+
+
 func _ship_is_dead(ship_state: DriftTypes.DriftShipState, tick_value: int) -> bool:
 	return int(ship_state.dead_until_tick) > 0 and int(tick_value) < int(ship_state.dead_until_tick)
 
@@ -172,6 +186,21 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	# Must only be called with a validated driftline.ruleset dict.
 	ruleset = canonical_ruleset
 	var schema_version: int = int(canonical_ruleset.get("schema_version", 1))
+
+	# Zones tuning (schema v2 only).
+	safe_zone_max_ticks = 0
+	if schema_version >= 2:
+		var zones: Dictionary = canonical_ruleset.get("zones", {})
+		if typeof(zones) == TYPE_DICTIONARY and zones.has("safe_zone_max_ms"):
+			var ms: int = maxi(0, int(zones.get("safe_zone_max_ms")))
+			# Convert ms -> ticks (ceil) to avoid expiring earlier than configured.
+			safe_zone_max_ticks = int((ms * DriftConstants.TICK_RATE + 999) / 1000)
+
+	# Keep per-ship max in sync for snapshot replication.
+	for ship_id in ships.keys():
+		var s0: DriftTypes.DriftShipState = ships.get(ship_id)
+		if s0 != null:
+			s0.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 
 	var physics: Dictionary = canonical_ruleset.get("physics", {})
 	if typeof(physics) == TYPE_DICTIONARY:
@@ -320,6 +349,7 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	# Combat section (schema v2, optional).
 	spawn_protect_ticks = 0
 	respawn_delay_ticks = int((1500 * DriftConstants.TICK_RATE + 999) / 1000)
+	combat_friendly_fire = false
 	if schema_version >= 2:
 		var combat: Dictionary = canonical_ruleset.get("combat", {})
 		if typeof(combat) == TYPE_DICTIONARY and not combat.is_empty():
@@ -333,6 +363,21 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 				if typeof(rms) in [TYPE_INT, TYPE_FLOAT]:
 					var rms_i: int = maxi(0, int(round(float(rms))))
 					respawn_delay_ticks = int((rms_i * DriftConstants.TICK_RATE + 999) / 1000)
+			if combat.has("friendly_fire"):
+				combat_friendly_fire = bool(combat.get("friendly_fire"))
+
+	# Team section (schema v2, optional).
+	# Note: schema v1 has no team config; defaults apply.
+	team_max_freq = 2
+	team_force_even = true
+	if schema_version >= 2:
+		var team: Dictionary = canonical_ruleset.get("team", {})
+		if typeof(team) == TYPE_DICTIONARY and not team.is_empty():
+			if team.has("max_freq"):
+				team_max_freq = clampi(int(team.get("max_freq")), 0, 16)
+			if team.has("force_even"):
+				team_force_even = bool(team.get("force_even"))
+	team_max_freq = clampi(int(team_max_freq), 0, 16)
 
 
 func _resolve_bullet_shrapnel_cfg_for_level(level: int) -> Dictionary:
@@ -1155,6 +1200,14 @@ func apply_damage(attacker_id: int, target_id: int, damage: int, source: Variant
 			if bool(attacker.in_safe_zone):
 				return false
 
+	# Friendly-fire gate: if friendly_fire is disabled, same-freq damage is rejected.
+	# In FFA mode (team_max_freq == 0), friendly-fire is effectively enabled to avoid
+	# degenerate "all ships freq=0 -> no damage" behavior.
+	if not _is_friendly_fire_enabled() and attacker_id != -1 and ships.has(attacker_id):
+		var attacker2: DriftTypes.DriftShipState = ships.get(attacker_id)
+		if attacker2 != null and int(attacker2.freq) == int(target.freq):
+			return false
+
 	# Spawn protection.
 	if tick < int(target.damage_protect_until_tick):
 		return false
@@ -1205,6 +1258,8 @@ func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_spe
 
 func add_ship(id: int, position: Vector2) -> void:
 	var s: DriftTypes.DriftShipState = DriftTypes.DriftShipState.new(id, position)
+	s.safe_zone_time_used_ticks = 0
+	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 	s.energy_max = maxi(0, int(energy_max_points))
 	s.energy_current = s.energy_max
 	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
@@ -1249,6 +1304,9 @@ func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
 	s.engine_shutdown_until_tick = 0
 	# Death/respawn cleared.
 	s.dead_until_tick = 0
+	# Safe-zone timer resets on spawn/respawn.
+	s.safe_zone_time_used_ticks = 0
+	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 	s.last_energy_change_reason = 0
 	s.last_energy_change_source_id = -1
 	s.last_energy_change_tick = int(tick)
@@ -1440,11 +1498,212 @@ func get_spawn_point() -> Vector2:
 	return get_random_valid_spawn_point()
 
 
+func get_non_safe_spawn_point() -> Variant:
+	# Returns Vector2 on success, or null if no non-safe valid spawn exists.
+	# Deterministic selection: uses spawn RNG for attempts and stable scans for fallback.
+	# If no safe zones exist, any valid spawn is considered non-safe.
+	if _safe_zone_tiles.is_empty():
+		return get_random_valid_spawn_point()
+	var r: float = float(DriftConstants.SHIP_RADIUS)
+
+	# Prefer main walkable tiles when available.
+	if not _main_walkable_tiles.is_empty():
+		for _attempt in range(SPAWN_ATTEMPTS):
+			var idx: int = _spawn_rng.randi_range(0, _main_walkable_tiles.size() - 1)
+			var t: Vector2i = _main_walkable_tiles[idx]
+			# Quick reject tiles explicitly marked safe.
+			if _safe_zone_tiles.has(t):
+				continue
+			var p := _random_point_in_tile(t, r)
+			if is_valid_spawn_point(p) and not _is_position_in_safe_zone(p, r):
+				return p
+		# Fallback scan: first valid walkable tile that is not safe.
+		for t2 in _main_walkable_tiles:
+			if not (t2 is Vector2i):
+				continue
+			if _safe_zone_tiles.has(t2):
+				continue
+			var p2 := _world_pos_for_tile(t2)
+			if is_valid_spawn_point(p2) and not _is_position_in_safe_zone(p2, r):
+				return p2
+
+	# If we don't have walkables (or none suitable), sample within bounds.
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		var w_px: float = float(map_w_tiles) * float(TILE_SIZE)
+		var h_px: float = float(map_h_tiles) * float(TILE_SIZE)
+		for _attempt2 in range(SPAWN_ATTEMPTS):
+			var p3 := Vector2(_spawn_rng.randf_range(r, w_px - r), _spawn_rng.randf_range(r, h_px - r))
+			if is_valid_spawn_point(p3) and not _is_position_in_safe_zone(p3, r):
+				return p3
+
+	# Deterministic last-resort fallback scan.
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		for y in range(map_h_tiles):
+			for x in range(map_w_tiles):
+				var t3 := Vector2i(x, y)
+				if _static_solid_tiles.has(t3):
+					continue
+				if _safe_zone_tiles.has(t3):
+					continue
+				var p4 := _world_pos_for_tile(t3)
+				if is_valid_spawn_point(p4) and not _is_position_in_safe_zone(p4, r):
+					return p4
+	return null
+
+
+func respawn_ship_non_safe(ship_id: int) -> void:
+	var spawn = get_non_safe_spawn_point()
+	if spawn is Vector2:
+		reset_ship_for_spawn(ship_id, spawn)
+		_assign_freq_on_spawn(ship_id)
+		return
+	# If no non-safe spawn exists, fall back to normal spawn behavior.
+	respawn_ship(ship_id)
+
+
 func respawn_ship(ship_id: int) -> void:
 	# Authoritative respawn primitive: choose spawn point and reset ship state.
 	# Actual death detection/triggering is owned by the server/game rules.
-	var spawn := get_spawn_point()
+	var spawn = get_spawn_point()
 	reset_ship_for_spawn(ship_id, spawn)
+	_assign_freq_on_spawn(ship_id)
+
+
+func _is_friendly_fire_enabled() -> bool:
+	# Effective friendly-fire behavior.
+	# If team_max_freq == 0, the game is in FFA mode and must allow damage.
+	return bool(combat_friendly_fire) or int(team_max_freq) == 0
+
+
+func _assign_freq_on_spawn(ship_id: int) -> void:
+	# Deterministic team assignment. Intended to be called by the authoritative server
+	# on join and on respawn.
+	if not ships.has(ship_id):
+		return
+	var s: DriftTypes.DriftShipState = ships.get(ship_id)
+	if s == null:
+		return
+	if int(team_max_freq) <= 0:
+		s.freq = 0
+		return
+	s.freq = _choose_balanced_freq_for_ship(ship_id)
+
+
+func _choose_balanced_freq_for_ship(ship_id: int) -> int:
+	var maxf: int = clampi(int(team_max_freq), 1, 16)
+	var counts: Array[int] = []
+	counts.resize(maxf)
+	for i in range(maxf):
+		counts[i] = 0
+
+	# Determinism: stable iteration order by ship_id.
+	var ids: Array[int] = []
+	for k in ships.keys():
+		ids.append(int(k))
+	ids.sort()
+	for sid in ids:
+		var other_id: int = int(sid)
+		if other_id == int(ship_id):
+			continue
+		var other: DriftTypes.DriftShipState = ships.get(other_id)
+		if other == null:
+			continue
+		if _ship_is_dead(other, tick):
+			continue
+		var f: int = int(other.freq)
+		if f < 0 or f >= maxf:
+			continue
+		counts[f] += 1
+
+	# Choose the freq with the fewest active non-dead ships (tie-break lowest freq).
+	var best_freq: int = 0
+	var best_count: int = counts[0]
+	for f2 in range(1, maxf):
+		var c: int = int(counts[f2])
+		if c < best_count:
+			best_count = c
+			best_freq = f2
+	return best_freq
+
+
+func can_set_ship_freq(ship_id: int, desired_freq: int) -> Dictionary:
+	# Server helper for manual team changes.
+	# Deterministic: depends only on world state.
+	if not ships.has(ship_id):
+		return {"ok": false, "error": "ship not found", "reason": 4}
+	var s: DriftTypes.DriftShipState = ships.get(ship_id)
+	if s == null:
+		return {"ok": false, "error": "ship not found", "reason": 4}
+	if _ship_is_dead(s, tick):
+		return {"ok": false, "error": "ship is dead", "reason": 4}
+
+	var maxf: int = int(team_max_freq)
+	var df: int = int(desired_freq)
+	if maxf <= 0:
+		if df != 0:
+			return {"ok": false, "error": "FFA mode only allows freq 0", "reason": 1}
+		return {"ok": true, "reason": 0}
+	if df < 0 or df >= maxf:
+		return {"ok": false, "error": "desired_freq out of bounds", "reason": 1}
+	if int(s.freq) == df:
+		return {"ok": true, "reason": 0}
+
+	if not bool(team_force_even):
+		return {"ok": true, "reason": 0}
+
+	# Enforce even teams: after the change, variance between max/min team counts must be <= 1.
+	var counts: Array[int] = []
+	counts.resize(maxf)
+	for i in range(maxf):
+		counts[i] = 0
+
+	var ids: Array[int] = []
+	for k in ships.keys():
+		ids.append(int(k))
+	ids.sort()
+	for sid in ids:
+		var other_id: int = int(sid)
+		var other: DriftTypes.DriftShipState = ships.get(other_id)
+		if other == null:
+			continue
+		if _ship_is_dead(other, tick):
+			continue
+		var f0: int = int(other.freq)
+		if f0 < 0 or f0 >= maxf:
+			continue
+		counts[f0] += 1
+
+	# Apply proposed move for this ship.
+	var cur: int = int(s.freq)
+	if cur >= 0 and cur < maxf:
+		counts[cur] = maxi(0, int(counts[cur]) - 1)
+	counts[df] += 1
+
+	var min_c: int = counts[0]
+	var max_c: int = counts[0]
+	for f1 in range(1, maxf):
+		min_c = mini(min_c, int(counts[f1]))
+		max_c = maxi(max_c, int(counts[f1]))
+	if (max_c - min_c) > 1:
+		return {"ok": false, "error": "team balance constraint", "reason": 2}
+	return {"ok": true, "reason": 0}
+
+
+func set_ship_freq(ship_id: int, desired_freq: int) -> Dictionary:
+	var res := can_set_ship_freq(ship_id, desired_freq)
+	if not bool(res.get("ok", false)):
+		return res
+	if not ships.has(ship_id):
+		return {"ok": false, "error": "ship not found", "reason": 4}
+	var s: DriftTypes.DriftShipState = ships.get(ship_id)
+	if s == null:
+		return {"ok": false, "error": "ship not found", "reason": 4}
+	var maxf: int = int(team_max_freq)
+	if maxf <= 0:
+		s.freq = 0
+	else:
+		s.freq = clampi(int(desired_freq), 0, maxf - 1)
+	return {"ok": true, "reason": 0}
 
 
 func _is_position_in_safe_zone(pos: Vector2, radius: float) -> bool:
@@ -1660,6 +1919,19 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 
 		# Safe zone detection.
 		ship_state.in_safe_zone = _is_position_in_safe_zone(ship_state.position, DriftConstants.SHIP_RADIUS)
+
+		# Safe-zone time limit (server authoritative, deterministic).
+		# Accumulates only while alive and in safe zone; resets on spawn/respawn.
+		if int(safe_zone_max_ticks) > 0 and bool(ship_state.in_safe_zone):
+			ship_state.safe_zone_time_used_ticks = maxi(0, int(ship_state.safe_zone_time_used_ticks) + 1)
+			ship_state.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
+			if int(ship_state.safe_zone_time_used_ticks) >= int(safe_zone_max_ticks):
+				respawn_ship_non_safe(int(ship_id))
+				action_cmds[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+				continue
+		else:
+			# Keep max in sync for replication.
+			ship_state.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 
 		# Build action command through the single validation gate.
 		var action_cmd: DriftTypes.DriftInputCmd = input_cmd

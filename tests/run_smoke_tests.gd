@@ -12,6 +12,7 @@ const DriftRuleset = preload("res://shared/drift_ruleset.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
+const DriftTeamColors = preload("res://client/team_colors.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -28,7 +29,16 @@ func _initialize() -> void:
 	_test_safe_zone_mechanics()
 	_test_energy_fire_costs_and_damage_safe_zone()
 	_test_safe_zone_brake_persistent()
+	_test_safe_zone_time_limit_forces_non_safe_respawn()
 	_test_spawn_protection_blocks_damage()
+	_test_team_auto_balance_assigns_even_teams()
+	_test_set_freq_rejects_when_force_even_violated()
+	_test_team_color_mapping_flips_with_freq()
+	_test_team_color_objective_carrier_override()
+	_test_team_colors_radar_mapping_helpers()
+	_test_ffa_allows_damage_even_same_freq_when_friendly_fire_enabled()
+	_test_friendly_fire_blocks_damage()
+	_test_enemy_damage_applies()
 	_test_death_spend_to_zero_does_not_kill()
 	_test_death_damage_to_zero_kills_and_respawns()
 	_test_death_safe_zone_damage_impossible()
@@ -36,6 +46,139 @@ func _initialize() -> void:
 	_test_prizes_spawn_walkable()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_team_color_mapping_flips_with_freq() -> void:
+	_ran += 1
+	# Client friendliness rendering derives from freq: same freq => friendly, else enemy.
+	var my_freq := 1
+	var friendly_idx := DriftTeamColors.get_nameplate_color_index(my_freq, 1, 0)
+	var enemy_idx := DriftTeamColors.get_nameplate_color_index(my_freq, 2, 0)
+	if friendly_idx == enemy_idx:
+		_fail("team_colors (expected different friendly/enemy indices)")
+		return
+	if int(friendly_idx) != 1:
+		_fail("team_colors (expected friendly index=1 green got %d)" % [int(friendly_idx)])
+		return
+	if int(enemy_idx) != 3:
+		_fail("team_colors (expected enemy index=3 red got %d)" % [int(enemy_idx)])
+		return
+	# Flip my_freq: the same other becomes enemy.
+	var flipped := DriftTeamColors.get_nameplate_color_index(2, 1, 0)
+	if int(flipped) != 3:
+		_fail("team_colors (expected flip to enemy index=3 got %d)" % [int(flipped)])
+		return
+	_pass("team_color_mapping_flips_with_freq")
+
+
+func _test_team_color_objective_carrier_override() -> void:
+	_ran += 1
+	var flags := int(DriftTeamColors.FLAG_OBJECTIVE_CARRIER)
+	var expected := int(DriftTeamColors.NAMEPLATE_PRIORITY_COLOR_INDEX)
+
+	# Override should beat friendly team color.
+	var friendly_override := int(DriftTeamColors.get_nameplate_color_index(1, 1, flags))
+	if friendly_override != expected:
+		_fail("team_colors (objective carrier expected %d got %d)" % [expected, friendly_override])
+		return
+
+	# Override should beat enemy team color.
+	var enemy_override := int(DriftTeamColors.get_nameplate_color_index(1, 2, flags))
+	if enemy_override != expected:
+		_fail("team_colors (objective carrier expected %d got %d)" % [expected, enemy_override])
+		return
+
+	_pass("team_color_objective_carrier_override")
+
+
+func _test_team_colors_radar_mapping_helpers() -> void:
+	_ran += 1
+	# Radar/minimap requirements:
+	# - Dot color comes from team_colors.gd
+	# - Self is a distinct shape, not just color
+	# - Objective carrier uses override color
+
+	var my_freq := 1
+	var friendly := DriftTeamColors.get_radar_dot_color(my_freq, 1, 0)
+	var enemy := DriftTeamColors.get_radar_dot_color(my_freq, 2, 0)
+	if friendly == enemy:
+		_fail("radar_colors (expected friendly/enemy dot colors to differ)")
+		return
+
+	var flags := int(DriftTeamColors.FLAG_OBJECTIVE_CARRIER)
+	var expected_priority := DriftTeamColors.RADAR_PRIORITY_MARKER_COLOR
+	var prio_friendly := DriftTeamColors.get_radar_dot_color(my_freq, 1, flags)
+	var prio_enemy := DriftTeamColors.get_radar_dot_color(my_freq, 2, flags)
+	if prio_friendly != expected_priority or prio_enemy != expected_priority:
+		_fail("radar_colors (expected objective carrier override color)")
+		return
+
+	var self_shape := int(DriftTeamColors.get_radar_shape(true, 0))
+	var other_shape := int(DriftTeamColors.get_radar_shape(false, 0))
+	if self_shape == other_shape:
+		_fail("radar_shape (expected self shape distinct from others)")
+		return
+	if self_shape == int(DriftTeamColors.RADAR_SHAPE_DOT):
+		_fail("radar_shape (expected self not DOT)")
+		return
+	if not bool(DriftTeamColors.radar_self_should_blink()):
+		_fail("radar_shape (expected self blink enabled)")
+		return
+
+	_pass("team_colors_radar_mapping_helpers")
+
+
+func _test_set_freq_rejects_when_force_even_violated() -> void:
+	_ran += 1
+	# When team.force_even=true, manual team changes that would create a team-count
+	# variance > 1 must be rejected.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("set_freq_force_even (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	if typeof(rs) != TYPE_DICTIONARY:
+		_fail("set_freq_force_even (ruleset missing)")
+		return
+	rs["team"] = {"max_freq": 2, "force_even": true}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("set_freq_force_even (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", rs)
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	# Create an uneven-but-allowed distribution: team 0 has 2 ships, team 1 has 1 ship.
+	world.add_ship(1, Vector2(64, 64))
+	world.add_ship(2, Vector2(96, 64))
+	world.add_ship(3, Vector2(128, 64))
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	var s2: DriftTypes.DriftShipState = world.ships.get(2)
+	var s3: DriftTypes.DriftShipState = world.ships.get(3)
+	if s1 == null or s2 == null or s3 == null:
+		_fail("set_freq_force_even (ship missing)")
+		return
+	s1.freq = 0
+	s2.freq = 1
+	s3.freq = 0
+
+	# Now moving ship 2 from team 1 -> team 0 would produce 3 vs 0 (variance 3), reject.
+	var res: Dictionary = world.can_set_ship_freq(2, 0)
+	if bool(res.get("ok", false)):
+		_fail("set_freq_force_even (expected rejection)")
+		return
+	var reason: int = int(res.get("reason", -1))
+	if reason != DriftNet.SET_FREQ_REASON_UNEVEN_TEAMS:
+		_fail("set_freq_force_even (expected UNEVEN_TEAMS got %d)" % [reason])
+		return
+	_pass("set_freq_rejects_when_force_even_violated")
 
 
 func _sha256_hex_bytes(bytes: PackedByteArray) -> String:
@@ -563,6 +706,87 @@ func _test_safe_zone_brake_persistent() -> void:
 	_pass("safe_zone_brake_persistent")
 
 
+func _test_safe_zone_time_limit_forces_non_safe_respawn() -> void:
+	_ran += 1
+	# Safe-zone time limit (zones.safe_zone_max_ms):
+	# - accumulates only while alive + in safe zone
+	# - on exceed, forces respawn to a non-safe spawn deterministically
+	var ruleset := {
+		"format": "driftline.ruleset",
+		"schema_version": 2,
+		"physics": {"wall_restitution": 0.85},
+		"weapons": {"ball_friction": 0.98},
+		"abilities": {
+			"afterburner": {"drain_per_sec": 0, "speed_mult_pct": 100, "thrust_mult_pct": 160},
+			"stealth": {"drain_per_sec": 0},
+			"cloak": {"drain_per_sec": 0},
+			"xradar": {"drain_per_sec": 0},
+			"antiwarp": {"drain_per_sec": 0, "radius_px": 0}
+		},
+		"energy": {
+			"max": 200,
+			"recharge_rate_per_sec": 0,
+			"recharge_delay_ms": 0,
+			"bullet_energy_cost": 0,
+			"multifire_energy_cost": 0,
+			"bomb_energy_cost": 0
+		},
+		"combat": {"spawn_protect_ms": 0, "respawn_delay_ms": 0},
+		"zones": {"safe_zone_max_ms": 100}
+	}
+	var valid := DriftValidate.validate_ruleset(ruleset)
+	if not bool(valid.get("ok", false)):
+		_fail("safe_zone_time_limit (ruleset validation failed: %s)" % [str(valid.get("errors", []))])
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", ruleset)
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.set_spawn_rng_seed(1234)
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var ship_id := 1
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, safe_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("safe_zone_time_limit (ship missing)")
+		return
+
+	# Step until the safe-zone limit is exceeded and a forced respawn occurs.
+	var pre_pos := s.position
+	var saw_in_safe := false
+	var relocated := false
+	for _i in range(120):
+		world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false) })
+		if bool(s.in_safe_zone):
+			saw_in_safe = true
+		if s.position != pre_pos:
+			relocated = true
+			break
+	if not saw_in_safe:
+		_fail("safe_zone_time_limit (expected ship to be in safe zone during test)")
+		return
+	if not relocated:
+		_fail("safe_zone_time_limit (expected forced relocation)")
+		return
+	if bool(s.in_safe_zone):
+		_fail("safe_zone_time_limit (expected respawn outside safe zone)")
+		return
+	if int(s.safe_zone_time_used_ticks) != 0:
+		_fail("safe_zone_time_limit (expected timer reset on respawn)")
+		return
+	if int(s.safe_zone_time_max_ticks) <= 0:
+		_fail("safe_zone_time_limit (expected replicated max ticks > 0)")
+		return
+
+	_pass("safe_zone_time_limit_forces_non_safe_respawn")
+
+
 func _test_spawn_protection_blocks_damage() -> void:
 	_ran += 1
 	# apply_damage() must respect spawn protection timers and safe-zone immunity.
@@ -593,10 +817,19 @@ func _test_spawn_protection_blocks_damage() -> void:
 	# Use the spawn/reset primitive so the protection timestamp is initialized.
 	world.reset_ship_for_spawn(2, Vector2(64, 64))
 
+	var attacker: DriftTypes.DriftShipState = world.ships.get(1)
+
 	var target: DriftTypes.DriftShipState = world.ships.get(2)
+	if attacker == null:
+		_fail("spawn_protection (attacker ship missing)")
+		return
 	if target == null:
 		_fail("spawn_protection (target ship missing)")
 		return
+
+	# Ensure friendly-fire prevention doesn't interfere with this test.
+	attacker.freq = 1
+	target.freq = 2
 	# Give the target energy to "damage".
 	target.energy_current = 100
 	target.energy = float(target.energy_current)
@@ -642,6 +875,204 @@ func _test_spawn_protection_blocks_damage() -> void:
 		return
 
 	_pass("spawn_protection_blocks_damage")
+
+
+func _test_friendly_fire_blocks_damage() -> void:
+	_ran += 1
+	# Minimal friendly-fire prevention: same-freq damage must be rejected.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("friendly_fire (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	# Ensure spawn protection can't interfere with the invariant under test.
+	rs["combat"] = {"spawn_protect_ms": 0}
+	var valid := DriftValidate.validate_ruleset(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("friendly_fire (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", {})
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	world.add_ship(1, Vector2(32, 32))
+	world.add_ship(2, Vector2(64, 64))
+	var attacker: DriftTypes.DriftShipState = world.ships.get(1)
+	var target: DriftTypes.DriftShipState = world.ships.get(2)
+	if attacker == null or target == null:
+		_fail("friendly_fire (ship missing)")
+		return
+
+	attacker.freq = 1
+	target.freq = 1
+
+	target.energy_current = 100
+	target.energy = float(target.energy_current)
+
+	var ok := world.apply_damage(1, 2, 25, "test")
+	if ok:
+		_fail("friendly_fire (apply_damage succeeded for same-freq)")
+		return
+	if int(target.energy_current) != 100:
+		_fail("friendly_fire (energy changed on same-freq damage)")
+		return
+
+	_pass("friendly_fire_blocks_damage")
+
+
+func _test_enemy_damage_applies() -> void:
+	_ran += 1
+	# Damage must still apply against different freq.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("enemy_damage (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	# Ensure spawn protection can't interfere with the invariant under test.
+	rs["combat"] = {"spawn_protect_ms": 0}
+	var valid := DriftValidate.validate_ruleset(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("enemy_damage (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", {})
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	world.add_ship(1, Vector2(32, 32))
+	world.add_ship(2, Vector2(64, 64))
+	var attacker: DriftTypes.DriftShipState = world.ships.get(1)
+	var target: DriftTypes.DriftShipState = world.ships.get(2)
+	if attacker == null or target == null:
+		_fail("enemy_damage (ship missing)")
+		return
+
+	attacker.freq = 1
+	target.freq = 2
+
+	target.energy_current = 100
+	target.energy = float(target.energy_current)
+
+	var ok := world.apply_damage(1, 2, 25, "test")
+	if not ok:
+		_fail("enemy_damage (apply_damage rejected for different-freq)")
+		return
+	var expected_after: int = 75
+	if int(target.energy_current) != expected_after:
+		_fail("enemy_damage (expected energy_current %d, got %d)" % [expected_after, int(target.energy_current)])
+		return
+
+	_pass("enemy_damage_applies")
+
+
+func _test_team_auto_balance_assigns_even_teams() -> void:
+	_ran += 1
+	# When team.max_freq=2, respawning ships should be auto-balanced deterministically.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("team_auto_balance (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	rs["team"] = {"max_freq": 2, "force_even": true}
+	# Ensure spawn protection can't interfere with later damage tests.
+	rs["combat"] = {"spawn_protect_ms": 0, "friendly_fire": false}
+	var valid := DriftValidate.validate_ruleset(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("team_auto_balance (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", {})
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	world.respawn_ship(1)
+	world.respawn_ship(2)
+	world.respawn_ship(3)
+	world.respawn_ship(4)
+
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	var s2: DriftTypes.DriftShipState = world.ships.get(2)
+	var s3: DriftTypes.DriftShipState = world.ships.get(3)
+	var s4: DriftTypes.DriftShipState = world.ships.get(4)
+	if s1 == null or s2 == null or s3 == null or s4 == null:
+		_fail("team_auto_balance (ship missing)")
+		return
+	var f1: int = int(s1.freq)
+	var f2: int = int(s2.freq)
+	var f3: int = int(s3.freq)
+	var f4: int = int(s4.freq)
+	if f1 != 0 or f2 != 1 or f3 != 0 or f4 != 1:
+		_fail("team_auto_balance (expected freqs 0,1,0,1 got %d,%d,%d,%d)" % [f1, f2, f3, f4])
+		return
+
+	_pass("team_auto_balance_assigns_even_teams")
+
+
+func _test_ffa_allows_damage_even_same_freq_when_friendly_fire_enabled() -> void:
+	_ran += 1
+	# In FFA mode (team.max_freq=0), damage must be allowed even if both ships are freq=0,
+	# as long as friendly_fire is enabled.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("ffa_friendly_fire (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	rs["team"] = {"max_freq": 0, "force_even": true}
+	rs["combat"] = {"spawn_protect_ms": 0, "friendly_fire": true}
+	var valid := DriftValidate.validate_ruleset(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("ffa_friendly_fire (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", {})
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	world.respawn_ship(1)
+	world.respawn_ship(2)
+	var a: DriftTypes.DriftShipState = world.ships.get(1)
+	var t: DriftTypes.DriftShipState = world.ships.get(2)
+	if a == null or t == null:
+		_fail("ffa_friendly_fire (ship missing)")
+		return
+	if int(a.freq) != 0 or int(t.freq) != 0:
+		_fail("ffa_friendly_fire (expected both ships freq=0)")
+		return
+
+	t.energy_current = 100
+	t.energy = float(t.energy_current)
+	var ok := world.apply_damage(1, 2, 25, "test")
+	if not ok:
+		_fail("ffa_friendly_fire (apply_damage rejected)")
+		return
+	if int(t.energy_current) != 75:
+		_fail("ffa_friendly_fire (expected energy_current 75, got %d)" % [int(t.energy_current)])
+		return
+
+	_pass("ffa_allows_damage_even_same_freq_when_friendly_fire_enabled")
 
 
 func _test_energy_deterministic_recharge_and_costs() -> void:

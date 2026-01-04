@@ -106,6 +106,11 @@ In-game:
 - `Esc`: toggle the in-game menu (non-blocking)
 - In the menu: "Back to Menu" returns to the connection screen
 
+Help / training ticker:
+
+- `Esc` + `F6`: toggle the help ticker
+- `F1`: cycle help pages
+
 Abilities (default bindings):
 
 - `Shift` (hold) + thrust: afterburner (drains energy)
@@ -151,6 +156,8 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Server runs an authoritative fixed tick.
 - Client sends input commands; server broadcasts snapshots.
 - Core simulation logic lives in `shared/` so both sides agree on movement/collisions.
+- Team/friendliness rendering is derived from replicated `ship.freq`.
+- Client-side color mapping is centralized in `client/team_colors.gd` (includes a reserved priority color for objective carrier and radar/minimap helper mapping APIs).
 - Server spawn locations can come from map `entities` with `type="spawn"`.
 - Wall-bounce sound is triggered from shared collision events (client-side audio).
 

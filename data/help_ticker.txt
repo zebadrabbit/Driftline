@@ -1,0 +1,19 @@
+# Driftline in-game help ticker
+# Pages are separated by a line with: ---
+
+Controls: W/S thrust, A/D rotate.
+Weapons: Space = primary fire. (Secondary fire is bound in Input Map.)
+Abilities: Hold Shift + Z Stealth, X Cloak, C XRadar, V Antiwarp.
+Help: F1 cycles pages. Hold Esc + press F6 toggles the ticker.
+
+---
+
+Energy: HP and resource share the same bar.
+Damage reduces energy; weapons/abilities also consume energy.
+Energy recharges after a short delay. Watch ENG and the recharge timer (R:).
+
+---
+
+Safe Zone: immune to damage while inside.
+Safe Zone time can be limited; HUD shows SZ countdown when enabled.
+Map/Radar: learn the arena lanes, doors, and safe-zone geometry.

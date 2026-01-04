@@ -1,0 +1,21 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 2,
+  "physics": {"wall_restitution": 0.85},
+  "abilities": {
+    "afterburner": {"drain_per_sec": 0},
+    "stealth": {"drain_per_sec": 0},
+    "cloak": {"drain_per_sec": 0},
+    "xradar": {"drain_per_sec": 0},
+    "antiwarp": {"drain_per_sec": 0}
+  },
+  "energy": {
+    "max": 200,
+    "recharge_rate_per_sec": 0,
+    "recharge_delay_ms": 0,
+    "bullet_energy_cost": 0,
+    "multifire_energy_cost": 0,
+    "bomb_energy_cost": 0
+  },
+  "zones": {"safe_zone_max_ms": 15000}
+}

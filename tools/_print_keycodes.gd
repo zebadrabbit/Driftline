@@ -17,6 +17,10 @@ func _initialize() -> void:
 		"KEY_3": KEY_3,
 		"KEY_SPACE": KEY_SPACE,
 		"KEY_SHIFT": KEY_SHIFT,
+		"KEY_CTRL": KEY_CTRL,
+		"KEY_ALT": KEY_ALT,
+		"KEY_META": KEY_META,
+		"KEY_CAPSLOCK": KEY_CAPSLOCK,
 		"KEY_TAB": KEY_TAB,
 		"KEY_BACKSPACE": KEY_BACKSPACE,
 		"KEY_MINUS": KEY_MINUS,
@@ -25,6 +29,8 @@ func _initialize() -> void:
 		"KEY_KP_SUBTRACT": KEY_KP_SUBTRACT,
 		"KEY_ENTER": KEY_ENTER,
 		"KEY_ESCAPE": KEY_ESCAPE,
+		"KEY_F1": KEY_F1,
+		"KEY_F6": KEY_F6,
 		"KEY_F10": KEY_F10,
 	}
 	print(JSON.stringify(codes, "\t", false))

@@ -60,6 +60,21 @@ This project didn’t previously have a formal changelog. The entries below were
 - Bullet progression supports level-based tactical profiles (e.g. bounce/multishot/shrapnel/spread/cooldown) replicated deterministically.
 - Safe-zone bot braking (“fire-to-stop”) is gated (cooldown + probability + speed threshold) to avoid robotic perfect braking.
 
+## 0.5.7 - 2026-01-04
+
+### Added
+
+- Ruleset knob `zones.safe_zone_max_ms` enforcing a server-authoritative safe-zone time cap.
+- Ruleset UI thresholds `ui.low_energy_frac` and `ui.critical_energy_frac` with strict validation and HUD warnings.
+- Team/frequency support (`ship.freq`) replicated via snapshots; client friendliness rendering derives from `freq`.
+- Friendly-fire control via `combat.friendly_fire` (safe-zone and spawn protection still take precedence).
+- Set-frequency request feedback packet `PKT_SET_FREQ_RESULT` with stable enum reasons (client logs only; freq still authoritative via snapshots).
+- Help ticker priority interrupts (client-only) triggered by authoritative state edges (safe-zone entry, first death, critical energy).
+- Client team color helpers in `client/team_colors.gd`:
+  - Role/condition flags with objective-carrier priority color override.
+  - Radar/minimap mapping helpers (dot color + self shape hints).
+- Headless smoke tests covering set-freq rejection reasons and team color mapping/overrides.
+
 ## Unreleased
 
 ### Added

@@ -1,0 +1,14 @@
+{
+  "format": "driftline.ruleset",
+  "schema_version": 2,
+  "physics": {"wall_restitution": 0.85},
+  "energy": {
+    "max": 200,
+    "recharge_rate_per_sec": 0,
+    "recharge_delay_ms": 0,
+    "bullet_energy_cost": 0,
+    "multifire_energy_cost": 0,
+    "bomb_energy_cost": 0
+  },
+  "zones": {"not_a_real_key": 1}
+}

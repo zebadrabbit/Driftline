@@ -21,6 +21,7 @@ const DriftMap = preload("res://shared/drift_map.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
+const DriftTeamColors = preload("res://client/team_colors.gd")
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
@@ -96,6 +97,18 @@ var ball_position: Vector2 = Vector2.ZERO
 var ball_velocity: Vector2 = Vector2.ZERO
 var authoritative_bullets: Array = [] # Array[DriftTypes.DriftBulletState]
 var authoritative_prizes: Array = [] # Array[DriftTypes.DriftPrizeState]
+
+# UI thresholds (server-authoritative via validated ruleset).
+var ui_low_energy_frac: float = 0.33
+var ui_critical_energy_frac: float = 0.15
+
+# Help ticker interrupt edge-trigger flags (client-only; no net/sim changes).
+var _help_interrupt_seen_safe_zone_entry: bool = false
+var _help_interrupt_seen_first_death: bool = false
+var _help_interrupt_seen_energy_critical: bool = false
+var _help_interrupt_prev_in_safe_zone: bool = false
+var _help_interrupt_prev_dead: bool = false
+var _help_interrupt_prev_energy_frac: float = 1.0
 
 # Interpolation state for remote ships and ball
 var snap_a_tick := -1
@@ -430,7 +443,62 @@ func _process(delta: float) -> void:
 				var ck_on: bool = bool(ss.cloak_on) if ("cloak_on" in ss) else false
 				var xr_on: bool = bool(ss.xradar_on) if ("xradar_on" in ss) else false
 				var aw_on: bool = bool(ss.antiwarp_on) if ("antiwarp_on" in ss) else false
-				hud.call("set_ship_stats", float(ss.velocity.length()), float(rad_to_deg(ss.rotation)), float(ec), float(em), wt, ab_on, st_on, ck_on, xr_on, aw_on)
+				var in_sz: bool = bool(ss.in_safe_zone) if ("in_safe_zone" in ss) else false
+				var sz_used: int = int(ss.safe_zone_time_used_ticks) if ("safe_zone_time_used_ticks" in ss) else 0
+				var sz_max: int = int(ss.safe_zone_time_max_ticks) if ("safe_zone_time_max_ticks" in ss) else 0
+				var now_tick: int = int(world.tick)
+				var dpt: int = int(ss.damage_protect_until_tick) if ("damage_protect_until_tick" in ss) else 0
+				var dut: int = int(ss.dead_until_tick) if ("dead_until_tick" in ss) else 0
+				var gun_lvl: int = int(ss.gun_level) if ("gun_level" in ss) else 1
+				var bomb_lvl: int = int(ss.bomb_level) if ("bomb_level" in ss) else 1
+				var mf: bool = bool(ss.multi_fire_enabled) if ("multi_fire_enabled" in ss) else false
+				# Proximity bombs are not implemented yet; keep false.
+				var prox: bool = false
+				hud.call(
+					"set_ship_stats",
+					float(ss.velocity.length()),
+					float(rad_to_deg(ss.rotation)),
+					float(ec),
+					float(em),
+					wt,
+					ab_on,
+					st_on,
+					ck_on,
+					xr_on,
+					aw_on,
+					in_sz,
+					sz_used,
+					sz_max,
+					now_tick,
+					dpt,
+					dut,
+					gun_lvl,
+					bomb_lvl,
+					mf,
+					prox
+				)
+				# Help ticker interrupt events are driven from authoritative snapshot state,
+				# and are edge-triggered (fire once per event type per session).
+				if hud.has_method("show_help_interrupt"):
+					var now_in_sz: bool = in_sz
+					if (not _help_interrupt_seen_safe_zone_entry) and now_in_sz and (not _help_interrupt_prev_in_safe_zone):
+						_help_interrupt_seen_safe_zone_entry = true
+						hud.call("show_help_interrupt", "Entered safe zone", 3.0)
+					_help_interrupt_prev_in_safe_zone = now_in_sz
+
+					var now_dead: bool = (dut > 0 and int(world.tick) < dut)
+					if (not _help_interrupt_seen_first_death) and now_dead and (not _help_interrupt_prev_dead):
+						_help_interrupt_seen_first_death = true
+						hud.call("show_help_interrupt", "You died", 3.0)
+					_help_interrupt_prev_dead = now_dead
+
+					var frac: float = 1.0
+					if em > 0:
+						frac = clampf(float(ec) / float(em), 0.0, 1.0)
+					if (not _help_interrupt_seen_energy_critical) and frac <= ui_critical_energy_frac and _help_interrupt_prev_energy_frac > ui_critical_energy_frac:
+						_help_interrupt_seen_energy_critical = true
+						hud.call("show_help_interrupt", "Energy critical", 3.0)
+					_help_interrupt_prev_energy_frac = frac
 
 
 func _latest_tick_step() -> void:
@@ -571,6 +639,9 @@ func _draw() -> void:
 	if ship_state == null:
 		return
 
+	# Friend/enemy colors are derived from replicated team frequency.
+	var my_freq: int = int(ship_state.freq)
+
 	var font: Font = ThemeDB.fallback_font
 	var font_size: int = 16
 	var name_offset := Vector2(24, 16)
@@ -600,12 +671,15 @@ func _draw() -> void:
 			var interp_pos = a.position.lerp(b.position, alpha)
 			var interp_rot = lerp_angle(a.rotation, b.rotation, alpha)
 			var interp_state = DriftTypes.DriftShipState.new(ship_id, interp_pos, Vector2.ZERO, interp_rot)
-			_draw_remote_ship_triangle(interp_state)
-			# Draw username and bounty
+			# Determine friendliness from authoritative snapshot state.
 			var remote_state = latest_snapshot.ships.get(ship_id)
+			var remote_freq: int = int(remote_state.freq) if remote_state != null else -1
+			_draw_remote_ship_triangle(interp_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
+			# Draw username and bounty
 			if remote_state != null:
 				var label = "%s (%d)" % [remote_state.username, remote_state.bounty]
-				SpriteFontLabelScript.draw_text(self, interp_pos + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
+				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
+				SpriteFontLabelScript.draw_text(self, interp_pos + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				# Draw crown if king
 				if king_id == ship_id:
 					_draw_crown(interp_pos + Vector2(0, -48))
@@ -621,12 +695,14 @@ func _draw() -> void:
 			if ship_id == local_ship_id:
 				continue
 			var remote_state: DriftTypes.DriftShipState = remote_ships[ship_id]
-			_draw_remote_ship_triangle(remote_state)
-			# Draw username and bounty
 			var snap_state = latest_snapshot.ships.get(ship_id)
+			var remote_freq: int = int(snap_state.freq) if snap_state != null else -1
+			_draw_remote_ship_triangle(remote_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
+			# Draw username and bounty
 			if snap_state != null:
 				var label = "%s (%d)" % [snap_state.username, snap_state.bounty]
-				SpriteFontLabelScript.draw_text(self, remote_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
+				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
+				SpriteFontLabelScript.draw_text(self, remote_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				# Draw crown if king
 				if king_id == ship_id:
 					_draw_crown(remote_state.position + Vector2(0, -48))
@@ -649,6 +725,16 @@ func _draw() -> void:
 
 	# _draw_authoritative_ghost_ship()  # Disabled - no ghost ship
 	_draw_debug_overlay(ship_state, latest_snapshot.tick)
+
+	# Critical-energy in-world readout (authoritative snapshot state).
+	var local_snap = latest_snapshot.ships.get(local_ship_id)
+	if local_snap != null:
+		var ec: int = int(local_snap.energy_current) if ("energy_current" in local_snap) else int(round(float(local_snap.energy)))
+		var em: int = int(local_snap.energy_max) if ("energy_max" in local_snap) else 0
+		if em > 0:
+			var frac := clampf(float(ec) / float(em), 0.0, 1.0)
+			if frac <= ui_critical_energy_frac:
+				SpriteFontLabelScript.draw_text(self, ship_state.position + Vector2(-8, 28), "%d" % ec, SpriteFontLabelScript.FontSize.SMALL, 3, 0)
 
 	# HUD: King
 	var king_label = "KING: none"
@@ -747,7 +833,7 @@ func _draw_ball() -> void:
 	# Optionally, draw velocity vector
 	var vel_end := ball_position + ball_velocity * VELOCITY_DRAW_SCALE
 	draw_line(ball_position, vel_end, Color(1.0, 0.7, 0.2, 1.0), 2.0)
-func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
+func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_color: Color) -> void:
 	# Smaller triangle for remote ships
 	var local_points: PackedVector2Array = PackedVector2Array([
 		Vector2(10.0, 0.0),
@@ -758,7 +844,7 @@ func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 	world_points.resize(local_points.size())
 	for i in range(local_points.size()):
 		world_points[i] = local_points[i].rotated(ship_state.rotation) + ship_state.position
-	draw_colored_polygon(world_points, Color(0.7, 0.7, 1.0, 1.0))
+	draw_colored_polygon(world_points, fill_color)
 
 
 func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
@@ -939,6 +1025,26 @@ func _draw_connection_ui() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# Help ticker (client-only UI). Does not affect sim/input cmd collection.
+	if not show_connect_ui:
+		if event.is_action_pressed("drift_help_next"):
+			var hud := get_node_or_null("HUD")
+			if hud != null and hud.has_method("help_ticker_next_page"):
+				hud.call("help_ticker_next_page")
+				get_viewport().set_input_as_handled()
+				return
+		if event.is_action_pressed("drift_help_toggle"):
+			# SubSpace-style chord: Esc+F6. We avoid hardcoded key polling by
+			# checking the existing pause-menu action state.
+			var esc_down := Input.is_action_pressed("drift_toggle_pause_menu")
+			if not esc_down and not pause_menu_visible:
+				return
+			var hud2 := get_node_or_null("HUD")
+			if hud2 != null and hud2.has_method("help_ticker_toggle"):
+				hud2.call("help_ticker_toggle")
+				get_viewport().set_input_as_handled()
+				return
+
 	# In-game ESC menu toggle (does not pause the sim)
 	if not show_connect_ui:
 		if event.is_action_pressed("drift_toggle_pause_menu"):
@@ -1175,6 +1281,18 @@ func _poll_network_packets() -> void:
 			continue
 
 		var pkt_type: int = DriftNet.get_packet_type(bytes)
+		if pkt_type == DriftNet.PKT_SET_FREQ_RESULT:
+			var r: Dictionary = DriftNet.unpack_set_freq_result(bytes)
+			if r.is_empty():
+				continue
+			var ok: bool = bool(r.get("ok", false))
+			var f: int = int(r.get("freq", 0))
+			var reason: int = int(r.get("reason", DriftNet.SET_FREQ_REASON_NOT_ALLOWED))
+			if ok:
+				print("[NET] set freq ok freq=", f)
+			else:
+				print("[NET] set freq rejected freq=", f, " reason=", _set_freq_reason_to_string(reason))
+			continue
 		if pkt_type == DriftNet.PKT_WELCOME:
 			var w: Dictionary = DriftNet.unpack_welcome_packet(bytes)
 			if not w.is_empty():
@@ -1247,7 +1365,20 @@ func _poll_network_packets() -> void:
 							enet_peer.close()
 							enet_peer = null
 						return
-					world.apply_ruleset(validated.get("ruleset", {}))
+					var canon: Dictionary = validated.get("ruleset", {})
+					world.apply_ruleset(canon)
+					# UI thresholds are client-side, but must come from the validated server ruleset.
+					var ui: Dictionary = canon.get("ui", {})
+					if typeof(ui) == TYPE_DICTIONARY:
+						if ui.has("low_energy_frac"):
+							ui_low_energy_frac = clampf(float(ui.get("low_energy_frac")), 0.0, 1.0)
+						if ui.has("critical_energy_frac"):
+							ui_critical_energy_frac = clampf(float(ui.get("critical_energy_frac")), 0.0, 1.0)
+						if ui_critical_energy_frac > ui_low_energy_frac:
+							ui_critical_energy_frac = ui_low_energy_frac
+					var hud := get_node_or_null("HUD")
+					if hud != null and hud.has_method("set_ui_thresholds"):
+						hud.call("set_ui_thresholds", ui_low_energy_frac, ui_critical_energy_frac)
 				else:
 					# Backward compat: accept wall_restitution-only handshake.
 					var wr: float = float(w.get("wall_restitution", -1.0))
@@ -1290,6 +1421,37 @@ func _poll_network_packets() -> void:
 
 	if best_snapshot_tick != -1:
 		_apply_snapshot_dict(best_snapshot_dict)
+
+
+func request_set_freq(desired_freq: int) -> void:
+	# Client helper to request a manual team/frequency change.
+	# Security: ship_id comes from the locally assigned welcome packet, not UI.
+	if enet_peer == null or not is_connected:
+		print("[NET] request_set_freq ignored (not connected)")
+		return
+	if local_ship_id < 0:
+		print("[NET] request_set_freq ignored (no local_ship_id)")
+		return
+	var packet: PackedByteArray = DriftNet.pack_set_freq_request(int(local_ship_id), int(desired_freq))
+	enet_peer.set_transfer_channel(NET_CHANNEL)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_target_peer(1)
+	enet_peer.put_packet(packet)
+	print("[NET] request_set_freq sent desired_freq=", int(desired_freq))
+
+
+func _set_freq_reason_to_string(reason: int) -> String:
+	match int(reason):
+		DriftNet.SET_FREQ_REASON_OUT_OF_BOUNDS:
+			return "OUT_OF_BOUNDS"
+		DriftNet.SET_FREQ_REASON_UNEVEN_TEAMS:
+			return "UNEVEN_TEAMS"
+		DriftNet.SET_FREQ_REASON_COOLDOWN:
+			return "COOLDOWN"
+		DriftNet.SET_FREQ_REASON_NOT_ALLOWED:
+			return "NOT_ALLOWED"
+		_:
+			return "UNKNOWN"
 
 
 func _update_connection_state() -> void:

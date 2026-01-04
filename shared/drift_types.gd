@@ -50,8 +50,16 @@ class DriftShipState:
 	var position: Vector2
 	var velocity: Vector2
 	var rotation: float
+	# Team / frequency. 0 means unassigned / neutral.
+	var freq: int = 0
 	var username: String = ""
 	var bounty: int = 0
+
+	# Safe-zone time limit tracking (deterministic; server authoritative).
+	# - safe_zone_time_used_ticks accumulates only while alive and in safe zone.
+	# - safe_zone_time_max_ticks is the configured cap in ticks (0 disables).
+	var safe_zone_time_used_ticks: int = 0
+	var safe_zone_time_max_ticks: int = 0
 
 	# Death/respawn (server-authoritative, replicated via snapshots).
 	# If world.tick < dead_until_tick, the ship is considered dead and non-interactive.
@@ -134,19 +142,22 @@ class DriftShipState:
 		stealth_on_value: bool = false,
 		cloak_on_value: bool = false,
 		xradar_on_value: bool = false,
-		antiwarp_on_value: bool = false
-		,
+		antiwarp_on_value: bool = false,
 		in_safe_zone_value: bool = false,
 		damage_protect_until_tick_value: int = 0,
 		dead_until_tick_value: int = 0,
 		last_energy_change_reason_value: int = 0,
 		last_energy_change_source_id_value: int = -1,
-		last_energy_change_tick_value: int = 0
+		last_energy_change_tick_value: int = 0,
+		freq_value: int = 0
 	) -> void:
 		id = ship_id
 		position = position_value
 		velocity = velocity_value
 		rotation = rotation_value
+		freq = int(freq_value)
+		safe_zone_time_used_ticks = 0
+		safe_zone_time_max_ticks = 0
 		username = username_value
 		bounty = bounty_value
 		gun_level = clampi(int(gun_level_value), 1, 3)

@@ -34,6 +34,23 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Help ticker (client-only UI)
+	if event.is_action_pressed(&"drift_help_next"):
+		var h := get_node_or_null("HUD")
+		if h != null and h.has_method("help_ticker_next_page"):
+			h.call("help_ticker_next_page")
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed(&"drift_help_toggle"):
+		# SubSpace-style chord: Esc+F6.
+		if not Input.is_action_pressed(&"drift_toggle_pause_menu"):
+			return
+		var h2 := get_node_or_null("HUD")
+		if h2 != null and h2.has_method("help_ticker_toggle"):
+			h2.call("help_ticker_toggle")
+		get_viewport().set_input_as_handled()
+		return
+
 	# Open map editor (InputMap)
 	if event.is_action_pressed(&"drift_open_map_editor"):
 		get_viewport().set_input_as_handled()

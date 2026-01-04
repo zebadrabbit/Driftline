@@ -18,6 +18,16 @@ const PKT_SNAPSHOT: int = 2
 const PKT_WELCOME: int = 3
 const PKT_HELLO: int = 4
 const PKT_PRIZE_EVENT: int = 5
+const PKT_SET_FREQ_REQUEST: int = 6
+const PKT_SET_FREQ_RESULT: int = 7
+
+# Reasons for PKT_SET_FREQ_RESULT.
+# Keep these stable; they are part of the network contract.
+const SET_FREQ_REASON_NONE: int = 0
+const SET_FREQ_REASON_OUT_OF_BOUNDS: int = 1
+const SET_FREQ_REASON_UNEVEN_TEAMS: int = 2
+const SET_FREQ_REASON_COOLDOWN: int = 3
+const SET_FREQ_REASON_NOT_ALLOWED: int = 4
 
 const PRIZE_EVENT_PICKUP: int = 1
 
@@ -71,6 +81,75 @@ static func unpack_hello(bytes: PackedByteArray) -> String:
 	var length = buffer.get_u16()
 	var data = buffer.get_data(length)
 	return data.get_string_from_utf8()
+
+
+static func pack_set_freq_request(ship_id: int, desired_freq: int) -> PackedByteArray:
+	var buffer := StreamPeerBuffer.new()
+	buffer.seek(0)
+	buffer.put_u8(PKT_SET_FREQ_REQUEST)
+	buffer.put_32(int(ship_id))
+	buffer.put_16(int(clampi(int(desired_freq), 0, 65535)))
+	return buffer.data_array
+
+
+static func unpack_set_freq_request(bytes: PackedByteArray) -> Dictionary:
+	var buffer := StreamPeerBuffer.new()
+	buffer.data_array = bytes
+	buffer.seek(0)
+	var pkt_type: int = buffer.get_u8()
+	if pkt_type != PKT_SET_FREQ_REQUEST:
+		return {}
+	# ship_id (4) + desired_freq (2)
+	if buffer.get_available_bytes() < 6:
+		return {}
+	var ship_id: int = int(buffer.get_32())
+	var desired_freq: int = int(buffer.get_16())
+	return {
+		"type": pkt_type,
+		"ship_id": ship_id,
+		"desired_freq": desired_freq,
+	}
+
+
+static func pack_set_freq_result(ship_id: int, ok: bool, freq: int, reason: int) -> PackedByteArray:
+	# Result for PKT_SET_FREQ_REQUEST.
+	# Layout:
+	#   u8  type
+	#   u32 ship_id
+	#   u8  ok (0/1)
+	#   u16 freq (requested)
+	#   u8  reason (enum)
+	var buffer := StreamPeerBuffer.new()
+	buffer.seek(0)
+	buffer.put_u8(PKT_SET_FREQ_RESULT)
+	buffer.put_32(int(ship_id))
+	buffer.put_u8(1 if bool(ok) else 0)
+	buffer.put_16(int(clampi(int(freq), 0, 65535)))
+	buffer.put_u8(int(clampi(int(reason), 0, 255)))
+	return buffer.data_array
+
+
+static func unpack_set_freq_result(bytes: PackedByteArray) -> Dictionary:
+	var buffer := StreamPeerBuffer.new()
+	buffer.data_array = bytes
+	buffer.seek(0)
+	var pkt_type: int = buffer.get_u8()
+	if pkt_type != PKT_SET_FREQ_RESULT:
+		return {}
+	# ship_id (4) + ok (1) + freq (2) + reason (1)
+	if buffer.get_available_bytes() < 8:
+		return {}
+	var ship_id: int = int(buffer.get_32())
+	var ok_flag: bool = (int(buffer.get_u8()) != 0)
+	var freq: int = int(buffer.get_16())
+	var reason: int = int(buffer.get_u8())
+	return {
+		"type": pkt_type,
+		"ship_id": ship_id,
+		"ok": ok_flag,
+		"freq": freq,
+		"reason": reason,
+	}
 
 
 static func get_packet_type(bytes: PackedByteArray) -> int:
@@ -261,6 +340,15 @@ static func pack_snapshot_packet(
 	#   [optional] repeated ship_death_v1_count times:
 	#     u32 id
 	#     u32 dead_until_tick
+	#   [optional] u16 ship_safe_zone_timer_v1_count
+	#   [optional] repeated ship_safe_zone_timer_v1_count times:
+	#     u32 id
+	#     u32 safe_zone_time_used_ticks
+	#     u32 safe_zone_time_max_ticks
+	#   [optional] u16 ship_freq_v1_count
+	#   [optional] repeated ship_freq_v1_count times:
+	#     u32 id
+	#     u16 freq
 	var bullet_count: int = bullets.size()
 	if bullet_count < 0:
 		bullet_count = 0
@@ -410,6 +498,21 @@ static func pack_snapshot_packet(
 		var sx = ships[i]
 		buffer.put_32(int(sx.id))
 		buffer.put_32(int(maxi(0, int(sx.dead_until_tick))))
+
+	# Ship safe-zone timer v1 (optional trailing; append-only).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var st = ships[i]
+		buffer.put_32(int(st.id))
+		buffer.put_32(int(maxi(0, int(st.safe_zone_time_used_ticks))))
+		buffer.put_32(int(maxi(0, int(st.safe_zone_time_max_ticks))))
+
+	# Ship freq v1 (optional trailing; append-only).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sf = ships[i]
+		buffer.put_32(int(sf.id))
+		buffer.put_u16(int(clampi(int(sf.freq), 0, 65535)))
 
 	return buffer.data_array
 
@@ -820,6 +923,44 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			if ship_by_id6.has(sid6):
 				var ss6: DriftTypes.DriftShipState = ship_by_id6[sid6]
 				ss6.dead_until_tick = maxi(0, dead_until)
+
+	# Optional ship safe-zone timer v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_sz_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 + 4 = 12 bytes.
+		if buffer.get_available_bytes() < (ship_sz_count * 12):
+			return {}
+		var ship_by_id7: Dictionary = {}
+		for s7 in ships:
+			if s7 == null:
+				continue
+			ship_by_id7[int(s7.id)] = s7
+		for _m in range(ship_sz_count):
+			var sid7: int = int(buffer.get_32())
+			var used_ticks: int = int(buffer.get_32())
+			var max_ticks: int = int(buffer.get_32())
+			if ship_by_id7.has(sid7):
+				var ss7: DriftTypes.DriftShipState = ship_by_id7[sid7]
+				ss7.safe_zone_time_used_ticks = maxi(0, used_ticks)
+				ss7.safe_zone_time_max_ticks = maxi(0, max_ticks)
+
+	# Optional ship freq v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_freq_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 2 = 6 bytes.
+		if buffer.get_available_bytes() < (ship_freq_count * 6):
+			return {}
+		var ship_by_id8: Dictionary = {}
+		for s8 in ships:
+			if s8 == null:
+				continue
+			ship_by_id8[int(s8.id)] = s8
+		for _n in range(ship_freq_count):
+			var sid8: int = int(buffer.get_32())
+			var freq: int = int(buffer.get_u16())
+			if ship_by_id8.has(sid8):
+				var ss8: DriftTypes.DriftShipState = ship_by_id8[sid8]
+				ss8.freq = maxi(0, freq)
 
 	return {
 		"type": pkt_type,

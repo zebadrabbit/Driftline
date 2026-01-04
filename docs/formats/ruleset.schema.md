@@ -84,9 +84,102 @@ Top-level object:
     "bullet_energy_cost": 30,
     "multifire_energy_cost": 90,
     "bomb_energy_cost": 150
+  },
+  "combat": {
+    "spawn_protect_ms": 250,
+    "respawn_delay_ms": 1500,
+    "friendly_fire": false
+  },
+  "team": {
+    "max_freq": 2,
+    "force_even": true
+  },
+  "zones": {
+    "safe_zone_max_ms": 15000
   }
 }
 ```
+
+### `zones` (optional, schema v2)
+
+- Type: object
+- Unknown keys are rejected.
+
+Zone tuning is declarative data; the engine interprets it.
+
+#### `zones.safe_zone_max_ms` (optional)
+
+- Type: number
+- Range: `0..600000`
+
+Maximum cumulative time (in milliseconds) a ship may remain in a safe zone **while alive** before the authoritative sim forces a respawn to a non-safe spawn point.
+
+- `0` disables the limit.
+
+### `ui` (optional, schema v2)
+
+- Type: object
+- Unknown keys are rejected.
+
+UI tuning is declarative data; the client interprets it.
+
+#### `ui.low_energy_frac` (optional)
+
+- Type: number
+- Range: `0.0..1.0`
+- Default (engine): `0.33`
+
+When `energy_current/energy_max <= low_energy_frac`, the HUD energy indicator enters a warning state.
+
+#### `ui.critical_energy_frac` (optional)
+
+- Type: number
+- Range: `0.0..1.0`
+- Default (engine): `0.15`
+
+When `energy_current/energy_max <= critical_energy_frac`, the HUD energy indicator enters a critical state and the client may display an in-world numeric energy readout.
+
+Constraint: `critical_energy_frac` must be $\le$ `low_energy_frac`.
+
+### `combat` (optional, schema v2)
+
+- Type: object
+- Unknown keys are rejected.
+
+Combat tuning is declarative data; the engine interprets it.
+
+#### `combat.friendly_fire` (optional)
+
+- Type: boolean
+- Default (engine): `false`
+
+When `false`, the authoritative sim rejects same-team damage (same `ship.freq`).
+
+In FFA mode (`team.max_freq == 0`), friendly-fire is treated as effectively enabled to avoid degenerate "all ships freq=0 -> no damage" behavior.
+
+### `team` (optional, schema v2)
+
+- Type: object
+- Unknown keys are rejected.
+
+Team configuration controls authoritative team/frequency assignment.
+
+#### `team.max_freq` (optional)
+
+- Type: integer
+- Range: `0..16`
+- Default (engine): `2`
+
+If `0`, the game is in FFA mode and ships are assigned `freq = 0`.
+
+If `> 0`, ships are assigned `freq` in `0..max_freq-1` using deterministic auto-balance based on active non-dead ships.
+
+#### `team.force_even` (optional)
+
+- Type: boolean
+- Default (engine): `true`
+
+When `true`, the server rejects manual team changes that would make team sizes differ by more than 1 active non-dead ship.
 
 ### `format` (required)
 
