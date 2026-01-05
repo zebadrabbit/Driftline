@@ -47,6 +47,7 @@ extends CanvasLayer
 
 const SpriteFontLabelScript := preload("res://client/SpriteFontLabel.gd")
 const DriftConstants := preload("res://shared/drift_constants.gd")
+const MinimapScene := preload("res://client/scenes/Minimap.tscn")
 
 @onready var name_bounty = $Root/SpriteFontLabel
 @onready var rest_label = $Root/RestLabel
@@ -77,10 +78,14 @@ var _help_interrupt_text: String = ""
 var _help_interrupt_remaining_s: float = 0.0
 var _help_interrupt_was_active: bool = false
 
+var _minimap = null
+
 
 func _ready() -> void:
 	# Keep HUD in screen-space above gameplay.
 	layer = 10
+	_minimap = MinimapScene.instantiate()
+	add_child(_minimap)
 	if name_bounty != null:
 		name_bounty.set_font_size(SpriteFontLabelScript.FontSize.SMALL)
 		name_bounty.set_color_index(2) # blue
@@ -196,6 +201,16 @@ func set_ship_stats(
 	ship_bomb_proximity_enabled = bool(p_bomb_proximity_enabled)
 
 	_update_right_islands()
+
+
+func set_minimap_static(meta: Dictionary, solid_cells: Array, safe_cells: Array) -> void:
+	if _minimap != null and _minimap.has_method("set_static_geometry"):
+		_minimap.call("set_static_geometry", meta, solid_cells, safe_cells)
+
+
+func set_minimap_dynamic(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
+	if _minimap != null and _minimap.has_method("set_dynamic_state"):
+		_minimap.call("set_dynamic_state", snapshot, local_ship_id, my_freq, player_world_pos, xradar_active)
 
 
 func _process(delta: float) -> void:

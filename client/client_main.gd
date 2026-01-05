@@ -23,10 +23,13 @@ const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
-const SHIPS_TEX: Texture2D = preload("res://client/graphics/ships/ships.png")
+const SHIPS_TEX_FALLBACK: Texture2D = preload("res://client/graphics/ships/ships.png")
+
+var _ships_tex: Texture2D = null
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
+const EscMenuScene: PackedScene = preload("res://client/scenes/EscMenu.tscn")
 
 const PRIZE_TEX: Texture2D = preload("res://client/graphics/entities/prizes.png")
 const PRIZE_FRAME_PX: int = 16
@@ -45,6 +48,9 @@ const SERVER_PORT: int = 5000
 const CLIENT_MAP_PATH: String = "res://maps/default.json"
 
 const DEBUG_NET: bool = false
+
+# Client-only debug UI (must not affect sim determinism).
+@export var debug_show_overlay: bool = false
 
 # Use a non-zero channel so Godot's high-level multiplayer (RPC/scene cache)
 # does not try to parse our custom packets.
@@ -65,6 +71,8 @@ var pause_menu_visible: bool = false
 var pause_menu_layer: CanvasLayer
 var pause_menu_panel: Panel
 
+var esc_menu: CanvasLayer = null
+
 # Wall-bounce audio (driven by shared simulation collision events)
 @export var bounce_sound_min_speed: float = 160.0
 @export var bounce_sound_cooldown: float = 0.10
@@ -81,6 +89,11 @@ var world: DriftWorld
 var client_map_checksum: PackedByteArray = PackedByteArray()
 var client_map_version: int = 0
 var accumulator_seconds: float = 0.0
+
+# Minimap static geometry cache (client-only UI)
+var client_map_meta: Dictionary = {}
+var client_map_solid_cells: Array = []
+var client_map_safe_cells: Array = []
 
 # Camera2D reference
 var cam: Camera2D = null
@@ -150,6 +163,9 @@ var _last_door_anim_key: int = -999999
 
 
 func _ready() -> void:
+	_ships_tex = DriftShipAtlas.get_ships_texture()
+	if _ships_tex == null:
+		_ships_tex = SHIPS_TEX_FALLBACK
 	z_index = 0
 	set_z_as_relative(false)
 	for child in get_children():
@@ -167,6 +183,13 @@ func _ready() -> void:
 
 	_build_pause_menu_ui()
 	_set_pause_menu_visible(false)
+
+	_ensure_ui_escape_menu_action_has_escape_binding()
+	esc_menu = EscMenuScene.instantiate()
+	add_child(esc_menu)
+	# Make sure the overlay starts closed.
+	if esc_menu.has_method("close"):
+		esc_menu.call("close")
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -186,6 +209,14 @@ func _ready() -> void:
 	if sfx is AudioStream:
 		_prize_audio.stream = sfx
 	add_child(_prize_audio)
+
+	# Input regression guard for local UX: ensure the boost modifier action is bound to Shift.
+	# Some platforms/layouts may not match a purely-physical SHIFT binding; using keycode here
+	# preserves the action-based input contract without hardcoding keys in gameplay logic.
+	_ensure_modifier_action_has_shift_binding()
+	# Input UX guard: core actions should continue to work while Shift is held (Shift is a modifier
+	# for abilities/afterburner, but should not cancel movement/fire bindings).
+	_ensure_actions_work_with_shift_held()
 
 	# Thruster loop SFX (W/S). Prefer scene-provided player, but ensure stream loops.
 	if _rev_audio != null:
@@ -220,6 +251,98 @@ func _ready() -> void:
 	_update_ui_visibility()
 
 
+func _ensure_actions_work_with_shift_held() -> void:
+	# Godot key events include modifier flags (shift/ctrl/alt/meta). If an action is bound to a key
+	# with shift_pressed=false, it may stop matching while Shift is held. Duplicate key bindings with
+	# shift_pressed=true so movement/fire continues during afterburner and chorded inputs.
+	for action in [
+		StringName("drift_thrust_forward"),
+		StringName("drift_thrust_reverse"),
+		StringName("drift_rotate_left"),
+		StringName("drift_rotate_right"),
+		StringName("drift_fire_primary"),
+		StringName("drift_fire_secondary"),
+	]:
+		_ensure_action_has_shift_variant(action)
+
+
+func _ensure_action_has_shift_variant(action: StringName) -> void:
+	if not InputMap.has_action(action):
+		return
+	var events: Array = InputMap.action_get_events(action)
+	# Build a small set of signatures so we don't add duplicates.
+	var have: Dictionary = {}
+	for ev in events:
+		if ev is InputEventKey:
+			var k := ev as InputEventKey
+			var sig := "%d|%d|%d|%d|%d|%d" % [int(k.keycode), int(k.physical_keycode), int(k.shift_pressed), int(k.ctrl_pressed), int(k.alt_pressed), int(k.meta_pressed)]
+			have[sig] = true
+
+	for ev in events:
+		if ev is InputEventKey:
+			var k2 := ev as InputEventKey
+			# Only add a Shift-held variant if the binding is not already Shift-specific.
+			if bool(k2.shift_pressed):
+				continue
+			# Skip invalid "empty" key bindings.
+			if int(k2.keycode) == 0 and int(k2.physical_keycode) == 0:
+				continue
+			var shifted := InputEventKey.new()
+			shifted.keycode = k2.keycode
+			shifted.physical_keycode = k2.physical_keycode
+			shifted.shift_pressed = true
+			shifted.ctrl_pressed = k2.ctrl_pressed
+			shifted.alt_pressed = k2.alt_pressed
+			shifted.meta_pressed = k2.meta_pressed
+			var sig2 := "%d|%d|%d|%d|%d|%d" % [int(shifted.keycode), int(shifted.physical_keycode), 1, int(shifted.ctrl_pressed), int(shifted.alt_pressed), int(shifted.meta_pressed)]
+			if have.has(sig2):
+				continue
+			InputMap.action_add_event(action, shifted)
+			have[sig2] = true
+
+
+func _ensure_modifier_action_has_shift_binding() -> void:
+	var action := StringName("drift_modifier_ability")
+	if not InputMap.has_action(action):
+		return
+	# Use OS lookup to avoid hardcoded key constants in gameplay code.
+	# Some platforms return 0 for "Shift"; fall back to the stable SHIFT keycode integer.
+	var shift_keycode: int = int(OS.find_keycode_from_string("Shift"))
+	if shift_keycode <= 0:
+		shift_keycode = 4194325
+	var events: Array = InputMap.action_get_events(action)
+	for ev in events:
+		if ev is InputEventKey:
+			var k := ev as InputEventKey
+			# Accept either keycode or physical_keycode bindings.
+			if (int(k.keycode) != 0 and int(k.keycode) == shift_keycode) or int(k.physical_keycode) == shift_keycode:
+				return
+
+	# Add a keycode-based SHIFT binding (applies to either shift key and survives layout differences).
+	var shift := InputEventKey.new()
+	shift.keycode = shift_keycode
+	shift.physical_keycode = 0
+	InputMap.action_add_event(action, shift)
+
+
+func _ensure_ui_escape_menu_action_has_escape_binding() -> void:
+	var action := StringName("ui_escape_menu")
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+	var escape_keycode: int = int(OS.find_keycode_from_string("Escape"))
+	var events: Array = InputMap.action_get_events(action)
+	for ev in events:
+		if ev is InputEventKey:
+			var k := ev as InputEventKey
+			if int(k.keycode) == escape_keycode or int(k.physical_keycode) == escape_keycode:
+				return
+
+	var esc := InputEventKey.new()
+	esc.keycode = escape_keycode
+	esc.physical_keycode = 0
+	InputMap.action_add_event(action, esc)
+
+
 func _load_client_map() -> void:
 	"""Load map for client-side rendering and collision detection."""
 	var tilemaps := {
@@ -234,6 +357,26 @@ func _load_client_map() -> void:
 	if meta_applied.is_empty():
 		push_error("Failed to load client map")
 		return
+
+	# Cache validated map meta + derived solid/safe cells for UI consumers (e.g., minimap).
+	var raw_map: Dictionary = LevelIO.read_map_data(CLIENT_MAP_PATH)
+	if not raw_map.is_empty():
+		var validated := DriftMap.validate_and_canonicalize(raw_map)
+		if bool(validated.get("ok", false)):
+			var canonical: Dictionary = validated.get("map", {})
+			client_map_meta = canonical.get("meta", {})
+			var tileset_name: String = String(client_map_meta.get("tileset", "")).strip_edges()
+			var tileset_def := DriftTileDefs.load_tileset(tileset_name)
+			if bool(tileset_def.get("ok", false)):
+				client_map_solid_cells = DriftTileDefs.build_solid_cells(canonical, tileset_def)
+				client_map_safe_cells = DriftTileDefs.build_safe_zone_cells(canonical, tileset_def)
+			else:
+				client_map_solid_cells = []
+				client_map_safe_cells = []
+		else:
+			client_map_meta = {}
+			client_map_solid_cells = []
+			client_map_safe_cells = []
 
 	# Also read raw map for checksum/manifest verification and canonical layers for collision.
 	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
@@ -425,6 +568,10 @@ func _process(delta: float) -> void:
 	# Demo HUD line (SpriteFontLabel): feed it simple live values.
 	var hud := get_node_or_null("HUD")
 	if hud != null and hud.has_method("set_values"):
+		# Minimap static geometry (client-only UI)
+		if hud.has_method("set_minimap_static") and not client_map_meta.is_empty():
+			hud.call("set_minimap_static", client_map_meta, client_map_solid_cells, client_map_safe_cells)
+
 		var name_value := player_username
 		var bounty_value := 0
 		if latest_snapshot != null and latest_snapshot.ships.has(local_ship_id):
@@ -479,6 +626,12 @@ func _process(delta: float) -> void:
 					mf,
 					prox
 				)
+				# Minimap dynamic state (client-only UI; uses authoritative snapshot)
+				if hud.has_method("set_minimap_dynamic"):
+					var my_freq: int = int(ss.freq) if ("freq" in ss) else 0
+					var xr_on2: bool = bool(ss.xradar_on) if ("xradar_on" in ss) else false
+					var pos2: Vector2 = ss.position if ("position" in ss) else Vector2.ZERO
+					hud.call("set_minimap_dynamic", latest_snapshot, local_ship_id, my_freq, pos2, xr_on2)
 				# Help ticker interrupt events are driven from authoritative snapshot state,
 				# and are edge-triggered (fire once per event type per session).
 				if hud.has_method("show_help_interrupt"):
@@ -634,7 +787,8 @@ func _draw() -> void:
 		return
 
 	if local_ship_id < 0:
-		_draw_debug_overlay(DriftTypes.DriftShipState.new(-1, Vector2.ZERO), 0)
+		if debug_show_overlay:
+			_draw_debug_overlay(DriftTypes.DriftShipState.new(-1, Vector2.ZERO), 0)
 		return
 
 	var ship_state: DriftTypes.DriftShipState = latest_snapshot.ships.get(local_ship_id)
@@ -726,7 +880,8 @@ func _draw() -> void:
 			_draw_crown(ship_state.position + Vector2(0, -48))
 
 	# _draw_authoritative_ghost_ship()  # Disabled - no ghost ship
-	_draw_debug_overlay(ship_state, latest_snapshot.tick)
+	if debug_show_overlay:
+		_draw_debug_overlay(ship_state, latest_snapshot.tick)
 
 	# Critical-energy in-world readout (authoritative snapshot state).
 	var local_snap = latest_snapshot.ships.get(local_ship_id)
@@ -841,7 +996,8 @@ func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_colo
 	var ship_index := 0
 	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
 	var heading_deg := -rad_to_deg(float(ship_state.rotation))
-	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	var tex := _ships_tex if _ships_tex != null else SHIPS_TEX_FALLBACK
+	var src := DriftShipAtlas.region_rect_px(tex, ship_index, heading_deg)
 	if src.size.x <= 0.0 or src.size.y <= 0.0:
 		# Fallback to old triangle if the atlas is invalid.
 		var local_points: PackedVector2Array = PackedVector2Array([
@@ -857,7 +1013,7 @@ func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_colo
 		return
 
 	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
-	draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
+	draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, 1))
 
 
 func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
@@ -865,7 +1021,8 @@ func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 	var ship_index := 0
 	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
 	var heading_deg := -rad_to_deg(float(ship_state.rotation))
-	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	var tex := _ships_tex if _ships_tex != null else SHIPS_TEX_FALLBACK
+	var src := DriftShipAtlas.region_rect_px(tex, ship_index, heading_deg)
 	if src.size.x <= 0.0 or src.size.y <= 0.0:
 		# Fallback to old triangle if the atlas is invalid.
 		var local_points: PackedVector2Array = PackedVector2Array([
@@ -881,7 +1038,7 @@ func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 		return
 
 	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
-	draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
+	draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, 1))
 
 
 func _draw_authoritative_ghost_ship() -> void:
@@ -1046,6 +1203,19 @@ func _draw_connection_ui() -> void:
 
 
 func _input(event: InputEvent) -> void:
+	# ESC menu overlay (client-only UI; must not pause the sim)
+	if not show_connect_ui and esc_menu != null and esc_menu.has_method("is_open"):
+		var menu_open: bool = bool(esc_menu.call("is_open"))
+		if event.is_action_pressed("ui_escape_menu"):
+			if esc_menu.has_method("toggle"):
+				esc_menu.call("toggle")
+			get_viewport().set_input_as_handled()
+			return
+		# While the menu is open, do not handle any other global UI hotkeys here.
+		# The menu itself enforces click-away and "unbound input dismiss" in _unhandled_input.
+		if menu_open:
+			return
+
 	# Help ticker (client-only UI). Does not affect sim/input cmd collection.
 	if not show_connect_ui:
 		if event.is_action_pressed("drift_help_next"):
@@ -1066,12 +1236,8 @@ func _input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 
-	# In-game ESC menu toggle (does not pause the sim)
-	if not show_connect_ui:
-		if event.is_action_pressed("drift_toggle_pause_menu"):
-			_set_pause_menu_visible(not pause_menu_visible)
-			get_viewport().set_input_as_handled()
-			return
+	# NOTE: legacy pause menu toggle is intentionally not bound here.
+	# The new EscMenu overlay owns ESC behavior via ui_escape_menu.
 
 	if show_connect_ui:
 		if event.is_action_pressed("drift_menu_connect"):

@@ -24,14 +24,17 @@ func _initialize() -> void:
 	_test_controls_default_bindings_wasd()
 	_test_controls_weapon_defaults_present()
 	_test_no_hardcoded_keys_in_gameplay()
+	_test_hud_name_and_bounty_present()
 	_test_welcome_includes_ruleset_payload()
 	_test_energy_deterministic_recharge_and_costs()
 	_test_abilities_continuous_drain_and_auto_disable()
 	_test_safe_zone_mechanics()
+	_test_reverse_thrust_does_not_hard_stop_outside_safe_zone()
 	_test_energy_fire_costs_and_damage_safe_zone()
 	_test_safe_zone_brake_persistent()
 	_test_safe_zone_time_limit_forces_non_safe_respawn()
 	_test_spawn_protection_blocks_damage()
+	_test_bullet_bounce_restitution_is_level_based_per_projectile()
 	_test_team_auto_balance_assigns_even_teams()
 	_test_set_freq_rejects_when_force_even_violated()
 	_test_team_color_mapping_flips_with_freq()
@@ -1377,6 +1380,158 @@ func _test_no_hardcoded_keys_in_gameplay() -> void:
 				_fail("no_hardcoded_keys_in_gameplay (found %s in %s)" % [String(n), path])
 				return
 	_pass("no_hardcoded_keys_in_gameplay")
+
+
+func _test_hud_name_and_bounty_present() -> void:
+	_ran += 1
+	# Regression guard: HUD must keep player name + bounty display.
+	var packed := load("res://client/HUD.tscn")
+	if packed == null or not (packed is PackedScene):
+		_fail("hud_name_bounty (failed to load HUD.tscn)")
+		return
+	var hud = (packed as PackedScene).instantiate()
+	if hud == null:
+		_fail("hud_name_bounty (failed to instantiate HUD)")
+		return
+	# Ensure expected nodes exist.
+	if not hud.has_node("Root/SpriteFontLabel"):
+		_fail("hud_name_bounty (missing Root/SpriteFontLabel)")
+		return
+	if not hud.has_node("Root/RestLabel"):
+		_fail("hud_name_bounty (missing Root/RestLabel)")
+		return
+	# Ensure API for updating values exists (we avoid calling _process here because HUD
+	# expects a fully running scene tree).
+	if not hud.has_method("set_values"):
+		_fail("hud_name_bounty (HUD missing set_values API)")
+		return
+	hud.call("set_values", "Alice", 42, 0, 1)
+	# Avoid leaking instantiated UI resources in headless mode.
+	if hud is Node:
+		(hud as Node).free()
+	_pass("hud_name_and_bounty_present")
+
+
+func _test_reverse_thrust_does_not_hard_stop_outside_safe_zone() -> void:
+	_ran += 1
+	# Regression guard: reverse thrust is acceleration-only; no hard stop outside safe zones.
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("reverse_thrust (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	world.add_boundary_tiles(32, 32)
+	world.set_map_dimensions(32, 32)
+
+	var ship_id := 1
+	var start_pos := Vector2(16 * 16 + 8, 16 * 16 + 8)
+	world.add_ship(ship_id, start_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("reverse_thrust (ship missing)")
+		return
+	# Give the ship some drift so a hard-stop would be obvious.
+	s.velocity = Vector2(220.0, 40.0)
+	# Apply one tick of reverse thrust.
+	world.step_tick({ ship_id: DriftTypes.DriftInputCmd.new(-1.0, 0.0, false, false, false) })
+	if bool(s.in_safe_zone):
+		_fail("reverse_thrust (unexpectedly in safe zone)")
+		return
+	if s.velocity == Vector2.ZERO:
+		_fail("reverse_thrust (velocity hard-stopped; expected inertia to remain)")
+		return
+	if s.position == start_pos:
+		_fail("reverse_thrust (expected movement to continue; got no displacement)")
+		return
+	_pass("reverse_thrust_does_not_hard_stop_outside_safe_zone")
+
+
+func _test_bullet_bounce_restitution_is_level_based_per_projectile() -> void:
+	_ran += 1
+	# Regression guard: bounce behavior is per projectile and depends on weapon level/type.
+	# Two ships fire bullets with different gun levels; the first bounce should reflect
+	# different x-velocity magnitudes due to different bounce restitution.
+	var ruleset := {
+		"format": "driftline.ruleset",
+		"schema_version": 2,
+		"physics": {"wall_restitution": 0.85},
+		"weapons": {
+			"ball_friction": 0.98,
+			"bullet": {
+				"speed": 950.0,
+				"lifetime_s": 2.0,
+				"bounces": 1,
+				"bounce_restitution": 1.0,
+				"levels": {
+					"1": {"bounce_restitution": 0.5},
+					"3": {"bounce_restitution": 1.5},
+				},
+			}
+		},
+		"abilities": {
+			"afterburner": {"drain_per_sec": 0, "speed_mult_pct": 100, "thrust_mult_pct": 160},
+			"stealth": {"drain_per_sec": 0},
+			"cloak": {"drain_per_sec": 0},
+			"xradar": {"drain_per_sec": 0},
+			"antiwarp": {"drain_per_sec": 0, "radius_px": 0},
+		},
+		"energy": {"max": 2000, "recharge_rate_per_sec": 0, "recharge_delay_ms": 0, "bullet_energy_cost": 0, "multifire_energy_cost": 0, "bomb_energy_cost": 0},
+	}
+	var valid := DriftValidate.validate_ruleset_dict(ruleset)
+	if not bool(valid.get("ok", false)):
+		_fail("bullet_bounce_level (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", ruleset)
+
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	# Add an explicit wall tile so collision normal is stable.
+	world.set_solid_tiles([
+		[2, 4, 0, 0],
+		[2, 6, 0, 0],
+	])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	# Seed two bullets directly (avoids relying on fire edge triggers/timing).
+	# Place each bullet just to the right of the wall tile and moving left so next_pos is blocked.
+	var y1 := float(4 * 16 + 8)
+	var y2 := float(6 * 16 + 8)
+	# Note: bullet_radius=2, wall tile x=2 spans [32..48). Start far enough right to not overlap,
+	# and move just far enough left that next_pos overlaps without the center entering the tile.
+	# This avoids the degenerate "center inside tile" normal fallback.
+	world.bullets[1] = DriftTypes.DriftBulletState.new(1, 1, 1, Vector2(51.0, y1), Vector2(-72.0, 0.0), int(world.tick), int(world.tick) + 600, 1)
+	world.bullets[2] = DriftTypes.DriftBulletState.new(2, 2, 3, Vector2(51.0, y2), Vector2(-72.0, 0.0), int(world.tick), int(world.tick) + 600, 1)
+
+	world.step_tick({})
+	if not world.bullets.has(1) or not world.bullets.has(2):
+		_fail("bullet_bounce_level (bullet despawned unexpectedly)")
+		return
+	var b1: DriftTypes.DriftBulletState = world.bullets.get(1)
+	var b2: DriftTypes.DriftBulletState = world.bullets.get(2)
+	if b1 == null or b2 == null:
+		_fail("bullet_bounce_level (bullet missing after step)")
+		return
+	if int(b1.bounces_left) != 0 or int(b2.bounces_left) != 0:
+		_fail("bullet_bounce_level (expected first bounce to consume bounces_left)")
+		return
+	if float(b1.velocity.x) <= 0.0 or float(b2.velocity.x) <= 0.0:
+		_fail("bullet_bounce_level (expected both bullets to bounce to +X)")
+		return
+	var vx1: float = absf(float(b1.velocity.x))
+	var vx2: float = absf(float(b2.velocity.x))
+	# Level 3 should have significantly higher post-bounce x speed than level 1.
+	if vx2 <= vx1 + 1.0:
+		_fail("bullet_bounce_level (expected level3 bounce vx > level1; got %0.3f vs %0.3f)" % [vx2, vx1])
+		return
+	_pass("bullet_bounce_restitution_is_level_based_per_projectile")
 
 
 func _collect_gd_files(root: String, out_files: Array) -> void:

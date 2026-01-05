@@ -1,0 +1,36 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://client/scenes/Minimap.gd" id="1"]
+[ext_resource type="Script" path="res://client/scenes/MinimapView.gd" id="2"]
+
+[node name="Minimap" type="Control"]
+anchors_preset = 11
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -176.0
+offset_top = -212.0
+offset_right = -16.0
+offset_bottom = -16.0
+script = ExtResource("1")
+
+[node name="VBox" type="VBoxContainer" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="TimeLabel" type="Label" parent="VBox"]
+horizontal_alignment = 2
+text = "Time:"
+
+[node name="CoordLabel" type="Label" parent="VBox"]
+horizontal_alignment = 2
+text = "Pos:"
+
+[node name="MinimapView" type="Control" parent="VBox"]
+custom_minimum_size = Vector2(160, 160)
+size_flags_horizontal = 3
+size_flags_vertical = 3
+mouse_filter = 1
+script = ExtResource("2")

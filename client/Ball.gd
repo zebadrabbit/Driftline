@@ -7,13 +7,15 @@ const DriftConstants = preload("res://shared/drift_constants.gd")
 ## Inertial movement with friction damping, wall bouncing.
 
 @export_range(0.0, 1.0, 0.01) var wall_restitution: float = 0.8  # Bounce damping on walls
+@export_range(0.0, 1.0, 0.01) var friction: float = 0.98
+@export_range(0.0, 5000.0, 1.0) var max_speed: float = 600.0
 
 var velocity: Vector2 = Vector2.ZERO
 
 # Use shared ball constants
 var _radius: float = DriftBall.BALL_RADIUS
-var _friction: float = DriftBall.BALL_FRICTION
-var _max_speed: float = DriftBall.BALL_MAX_SPEED
+var _friction: float = friction
+var _max_speed: float = max_speed
 
 
 func _ready() -> void:
@@ -21,6 +23,8 @@ func _ready() -> void:
 	global_position = Vector2(512, 384)
 	# Give it some initial velocity for testing
 	velocity = Vector2(200, 150)
+	_friction = friction
+	_max_speed = max_speed
 	queue_redraw()
 
 

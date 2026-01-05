@@ -152,31 +152,33 @@ var bullet_shrapnel_lifetime_ticks: int = 10
 var bullet_shrapnel_cone_deg: float = 70.0
 
 
-func _resolve_bullet_bounce_restitution_for_ship(ship_id: int) -> float:
+func _resolve_bullet_bounce_restitution_for_bullet(owner_id: int, bullet_level: int) -> float:
+	# IMPORTANT: bounce is per-projectile.
+	# Use the bullet's snapshot-stable weapon level (b.level), not any current ship state,
+	# so mid-flight upgrades cannot change existing projectiles.
 	var restitution: float = bullet_bounce_restitution
+	var eff_level: int = clampi(int(bullet_level), 1, 3)
 
 	# Optional level profiles live under ruleset.weapons.bullet.levels.
 	var rs_weapons: Dictionary = ruleset.get("weapons", {})
-	var levels: Dictionary = {}
 	if typeof(rs_weapons) == TYPE_DICTIONARY and rs_weapons.has("bullet") and typeof(rs_weapons.get("bullet")) == TYPE_DICTIONARY:
 		var rs_bullet: Dictionary = rs_weapons.get("bullet")
 		if rs_bullet.has("levels") and typeof(rs_bullet.get("levels")) == TYPE_DICTIONARY:
-			levels = rs_bullet.get("levels")
+			var levels: Dictionary = rs_bullet.get("levels")
+			if typeof(levels) == TYPE_DICTIONARY and levels.has(str(eff_level)) and typeof(levels.get(str(eff_level))) == TYPE_DICTIONARY:
+				var level_cfg: Dictionary = levels.get(str(eff_level))
+				restitution = float(level_cfg.get("bounce_restitution", restitution))
 
-	# Per-ship override.
+	# Per-ship override (static ruleset config; safe to apply without breaking per-projectile behavior).
 	var rs_ships: Dictionary = ruleset.get("ships", {})
 	if typeof(rs_ships) == TYPE_DICTIONARY:
-		var ship_key := str(ship_id)
+		var ship_key := str(int(owner_id))
 		if rs_ships.has(ship_key) and typeof(rs_ships.get(ship_key)) == TYPE_DICTIONARY:
 			var ship_cfg: Dictionary = rs_ships.get(ship_key)
 			if ship_cfg.has("weapons") and typeof(ship_cfg.get("weapons")) == TYPE_DICTIONARY:
 				var ship_weapons: Dictionary = ship_cfg.get("weapons")
 				if ship_weapons.has("bullet") and typeof(ship_weapons.get("bullet")) == TYPE_DICTIONARY:
 					var sb: Dictionary = ship_weapons.get("bullet")
-					var level: int = int(sb.get("level", 1))
-					if typeof(levels) == TYPE_DICTIONARY and levels.has(str(level)) and typeof(levels.get(str(level))) == TYPE_DICTIONARY:
-						var level_cfg: Dictionary = levels.get(str(level))
-						restitution = float(level_cfg.get("bounce_restitution", restitution))
 					restitution = float(sb.get("bounce_restitution", restitution))
 
 	return clampf(restitution, 0.0, 2.0)
@@ -2396,7 +2398,9 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 				else:
 					t_lo = t_mid
 			var contact_pos := b.position.lerp(next_pos, t_lo)
-			b.position = contact_pos - n * SEPARATION_EPSILON
+			# Keep a tiny gap so the bullet doesn't remain in-contact and jitter.
+			# n is the collision normal pointing out of the wall.
+			b.position = contact_pos + n * SEPARATION_EPSILON
 			if is_position_blocked(b.position, bullet_radius):
 				_maybe_spawn_bullet_shrapnel(b)
 				to_remove.append(int(bid))
@@ -2406,7 +2410,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			if vdotn < 0.0:
 				var v_t: Vector2 = b.velocity - n * vdotn
 				var normal_speed: float = -vdotn
-				var restitution: float = _resolve_bullet_bounce_restitution_for_ship(int(b.owner_id))
+				var restitution: float = _resolve_bullet_bounce_restitution_for_bullet(int(b.owner_id), int(b.level))
 				b.velocity = v_t + n * (normal_speed * restitution)
 			b.bounces_left = int(b.bounces_left) - 1
 			continue

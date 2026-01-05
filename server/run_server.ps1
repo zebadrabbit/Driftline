@@ -7,12 +7,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Startup banner (printed before any other logs).
-Write-Host '#    _________      ___________________________             '
-Write-Host '#    ______  /_________(_)__  __/_  /___  /__(_)___________ '
-Write-Host '#    _  __  /__  ___/_  /__  /_ _  __/_  /__  /__  __ \  _ \' 
-Write-Host '#    / /_/ / _  /   _  / _  __/ / /_ _  / _  / _  / / /  __/'
-Write-Host '#    \__,_/  /_/    /_/  /_/    \__/ /_/  /_/  /_/ /_/\___/ '
-Write-Host '#'
+Write-Host '    _________      ___________________________             '
+Write-Host '    ______  /_________(_)__  __/_  /___  /__(_)___________ '
+Write-Host '    _  __  /__  ___/_  /__  /_ _  __/_  /__  /__  __ \  _ \' 
+Write-Host '    / /_/ / _  /   _  / _  __/ / /_ _  / _  / _  / / /  __/'
+Write-Host '    \__,_/  /_/    /_/  /_/    \__/ /_/  /_/  /_/ /_/\___/ '
 
 function Resolve-ProjectRoot {
 	if ($ProjectRoot -and $ProjectRoot.Trim() -ne "") {

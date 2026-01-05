@@ -3,7 +3,9 @@ extends CharacterBody2D
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftConstants = preload("res://shared/drift_constants.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
-const SHIPS_TEX: Texture2D = preload("res://client/graphics/ships/ships.png")
+const SHIPS_TEX_FALLBACK: Texture2D = preload("res://client/graphics/ships/ships.png")
+
+var _ships_tex: Texture2D = null
 
 ## Placeholder SubSpace-like ship movement.
 ## - Top-down 2D, inertial (velocity persists)
@@ -80,6 +82,9 @@ var _last_bounce_time: float = -999.0  # Cooldown for bounce sound spam preventi
 
 func _ready() -> void:
 	add_to_group("player_ship")
+	_ships_tex = DriftShipAtlas.get_ships_texture()
+	if _ships_tex == null:
+		_ships_tex = SHIPS_TEX_FALLBACK
 	queue_redraw()
 
 
@@ -129,10 +134,11 @@ func _draw() -> void:
 	var ship_index := 0
 	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
 	var heading_deg := -rad_to_deg(float(rotation))
-	var src := DriftShipAtlas.region_rect_px(SHIPS_TEX, ship_index, heading_deg)
+	var tex := _ships_tex if _ships_tex != null else SHIPS_TEX_FALLBACK
+	var src := DriftShipAtlas.region_rect_px(tex, ship_index, heading_deg)
 	if src.size.x > 0.0 and src.size.y > 0.0:
 		var dst := Rect2(-src.size * 0.5, src.size)
-		draw_texture_rect_region(SHIPS_TEX, dst, src, Color(1, 1, 1, 1))
+		draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, 1))
 	else:
 		# Fallback triangle if atlas is invalid.
 		var tip := Vector2(14, 0)
