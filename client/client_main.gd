@@ -38,7 +38,7 @@ const PRIZE_ANIM_FPS: float = 12.0
 const PRIZE_DRAW_SCALE: float = 1.5
 const PRIZE_PICKUP_SFX_PATH: String = "res://client/audio/prize.wav"
 const THRUSTER_LOOP_SFX_PATH: String = "res://client/audio/rev.wav"
-const BOOST_LOOP_SFX_PATH: String = "res://client/audio/thrust.wav"
+const BOOST_LOOP_SFX_PATH: String = "res://client/audio/thrust.ogg"
 
 const VELOCITY_DRAW_SCALE: float = 0.10
 
@@ -51,6 +51,16 @@ const DEBUG_NET: bool = false
 
 # Client-only debug UI (must not affect sim determinism).
 @export var debug_show_overlay: bool = false
+
+# Optional local debugging: print key/button events received by the client.
+@export var debug_log_input_events: bool = false
+
+# Optional local debugging: sanity-check ThrustAudio at runtime.
+# If enabled, pressing F8 will attempt to play ThrustAudio and print state.
+@export var debug_probe_thrust_audio: bool = false
+
+# Optional local debugging: print thruster audio state transitions.
+@export var debug_log_thruster_audio: bool = false
 
 # Use a non-zero channel so Godot's high-level multiplayer (RPC/scene cache)
 # does not try to parse our custom packets.
@@ -218,6 +228,9 @@ func _ready() -> void:
 	# for abilities/afterburner, but should not cancel movement/fire bindings).
 	_ensure_actions_work_with_shift_held()
 
+	if debug_probe_thrust_audio:
+		_ensure_debug_probe_action()
+
 	# Thruster loop SFX (W/S). Prefer scene-provided player, but ensure stream loops.
 	if _rev_audio != null:
 		if _rev_audio.stream == null:
@@ -239,6 +252,9 @@ func _ready() -> void:
 		if _thrust_audio.stream is AudioStreamWAV:
 			var wav2: AudioStreamWAV = _thrust_audio.stream
 			wav2.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		elif _thrust_audio.stream is AudioStreamOggVorbis:
+			var ogg: AudioStreamOggVorbis = _thrust_audio.stream
+			ogg.loop = true
 		# Ensure we start silent.
 		_thrust_audio.stop()
 
@@ -290,6 +306,11 @@ func _ensure_action_has_shift_variant(action: StringName) -> void:
 			var shifted := InputEventKey.new()
 			shifted.keycode = k2.keycode
 			shifted.physical_keycode = k2.physical_keycode
+			# Some project bindings use keycode=0 with physical_keycode set.
+			# That works for plain keys, but can fail to match when modifiers are held.
+			# For the Shift-variant, prefer a concrete keycode when available.
+			if int(shifted.keycode) == 0 and int(shifted.physical_keycode) != 0:
+				shifted.keycode = shifted.physical_keycode
 			shifted.shift_pressed = true
 			shifted.ctrl_pressed = k2.ctrl_pressed
 			shifted.alt_pressed = k2.alt_pressed
@@ -504,7 +525,10 @@ func _update_thruster_audio() -> void:
 		boosting = Input.is_action_pressed("drift_modifier_ability")
 	var is_thrusting: bool = absf(thrust_axis) > 0.01
 
-	# When boosting, play thrust.wav and stop rev.wav.
+	# Intended behavior:
+	# - Normal thrust (W/S): play rev.wav
+	# - Boost thrust (Shift + thrust): play thrust.ogg
+	# When boosting, play boost loop and stop the normal rev loop.
 	if boosting and is_thrusting and _thrust_audio != null and _thrust_audio.stream != null:
 		if _rev_audio != null and _rev_audio.playing:
 			_rev_audio.stop()
@@ -743,10 +767,99 @@ func _collect_input_cmd() -> DriftTypes.DriftInputCmd:
 	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn)
 
 
-func _unhandled_input(_event):
-	# Intentionally empty: gameplay input is collected via _collect_input_cmd().
-	# UI inputs are handled in _input().
-	return
+func _ensure_debug_probe_action() -> void:
+	var action := StringName("drift_debug_probe_thrust_audio")
+	if InputMap.has_action(action):
+		return
+	InputMap.add_action(action)
+	var ev := InputEventKey.new()
+	ev.keycode = int(OS.find_keycode_from_string("F8"))
+	ev.physical_keycode = ev.keycode
+	InputMap.action_add_event(action, ev)
+
+
+func _debug_print_audio_player_state(p: AudioStreamPlayer, label: String) -> void:
+	if p == null:
+		print("[audio-probe] %s: null" % label)
+		return
+	var stream_class := "<null>"
+	var stream_len := -1.0
+	if p.stream != null:
+		stream_class = p.stream.get_class()
+		if p.stream.has_method("get_length"):
+			stream_len = float(p.stream.call("get_length"))
+	var bus_name := p.bus
+	var bus_idx := AudioServer.get_bus_index(bus_name)
+	var bus_mute := false
+	var bus_vol := 0.0
+	if bus_idx >= 0:
+		bus_mute = AudioServer.is_bus_mute(bus_idx)
+		bus_vol = AudioServer.get_bus_volume_db(bus_idx)
+	print("[audio-probe] %s: playing=%s vol_db=%.1f pitch=%.2f bus='%s'(idx=%d mute=%s vol_db=%.1f) stream=%s len=%.3f" % [
+		label,
+		str(p.playing),
+		float(p.volume_db),
+		float(p.pitch_scale),
+		bus_name,
+		bus_idx,
+		str(bus_mute),
+		bus_vol,
+		stream_class,
+		stream_len,
+	])
+
+
+func _debug_probe_thrust_audio_now() -> void:
+	print("[audio-probe] ---- probe start ----")
+	_debug_print_audio_player_state(_rev_audio, "RevAudio(before)")
+	_debug_print_audio_player_state(_thrust_audio, "ThrustAudio(before)")
+	if _thrust_audio == null or _thrust_audio.stream == null:
+		push_warning("ThrustAudio missing or has null stream")
+		return
+	_thrust_audio.play()
+	_debug_print_audio_player_state(_thrust_audio, "ThrustAudio(after_play)")
+	await get_tree().create_timer(0.10).timeout
+	_debug_print_audio_player_state(_thrust_audio, "ThrustAudio(+100ms)")
+	print("[audio-probe] ---- probe end ----")
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Gameplay input is collected via _collect_input_cmd(); this hook is only for local debugging.
+	if debug_probe_thrust_audio and event.is_action_pressed("drift_debug_probe_thrust_audio"):
+		_debug_probe_thrust_audio_now()
+		return
+
+	if not debug_log_input_events:
+		return
+
+	# Avoid spamming from mouse motion.
+	if event is InputEventMouseMotion:
+		return
+
+	var parts: Array[String] = []
+	parts.append(event.as_text())
+
+	if event is InputEventKey:
+		var k := event as InputEventKey
+		var key_name := OS.get_keycode_string(k.keycode) if int(k.keycode) != 0 else ""
+		var phys_name := OS.get_keycode_string(k.physical_keycode) if int(k.physical_keycode) != 0 else ""
+		parts.append("pressed=%s" % str(k.pressed))
+		parts.append("keycode=%d(%s)" % [int(k.keycode), key_name])
+		parts.append("physical=%d(%s)" % [int(k.physical_keycode), phys_name])
+		parts.append("mods=S%s C%s A%s M%s" % [
+			str(int(k.shift_pressed)),
+			str(int(k.ctrl_pressed)),
+			str(int(k.alt_pressed)),
+			str(int(k.meta_pressed)),
+		])
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		parts.append("mouse_button=%d pressed=%s" % [int(mb.button_index), str(mb.pressed)])
+	elif event is InputEventJoypadButton:
+		var jb := event as InputEventJoypadButton
+		parts.append("joy_button=%d pressed=%s" % [int(jb.button_index), str(jb.pressed)])
+
+	print("[input] ", " | ".join(parts))
 
 
 func _draw() -> void:

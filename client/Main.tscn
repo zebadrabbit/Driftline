@@ -5,7 +5,7 @@
 [ext_resource type="PackedScene" path="res://client/HUD.tscn" id="3_hud"]
 [ext_resource type="AudioStream" path="res://client/audio/bounce.wav" id="4_bounce"]
 [ext_resource type="AudioStream" path="res://client/audio/rev.wav" id="5_rev"]
-[ext_resource type="AudioStream" path="res://client/audio/thrust.wav" id="6_thrust"]
+[ext_resource type="AudioStream" path="res://client/audio/thrust.ogg" id="6_thrust"]
 [ext_resource type="TileSet" uid="uid://covf7445kc8ex" path="res://client/graphics/tilesets/subspace_base/tileset.tres" id="5_tileset"]
 
 [node name="Main" type="Node2D"]
