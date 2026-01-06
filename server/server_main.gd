@@ -19,6 +19,7 @@ const DriftMap = preload("res://shared/drift_map.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const DriftRuleset = preload("res://shared/drift_ruleset.gd")
 const DriftPrizeConfig = preload("res://server/prize_config.gd")
+const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
 
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
@@ -68,6 +69,12 @@ var quit_after_seconds: float = -1.0
 var runtime_seconds: float = 0.0
 var shutdown_requested: bool = false
 
+# Optional replay recording (JSONL). Enabled only when replay_record_path is non-empty.
+var replay_record_path: String = ""
+var replay_notes: String = ""
+var _replay: DriftReplayRecorder = null
+var _replay_map_hash: int = 0
+
 var quit_poll_accumulator_seconds: float = 0.0
 
 # tick -> Dictionary[ship_id, DriftInputCmd]
@@ -115,6 +122,7 @@ func _initialize() -> void:
 		_request_shutdown("map_load_failed")
 		quit()
 		return
+	_maybe_start_replay_recording()
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
 
 	# Load prize config (non-fatal; prizes can be disabled by config).
@@ -140,6 +148,9 @@ func _initialize() -> void:
 func _finalize() -> void:
 	# Best-effort cleanup so headless exits don't look like crashes.
 	shutdown_requested = true
+	if _replay != null:
+		_replay.stop()
+		_replay = null
 	if enet_peer != null:
 		enet_peer.close()
 		enet_peer = null
@@ -174,7 +185,15 @@ func _process(delta: float) -> bool:
 	while accumulator_seconds >= DriftConstants.TICK_DT:
 		accumulator_seconds -= DriftConstants.TICK_DT
 
+		# Advance the simulation when there are ships (normal) OR when replay
+		# recording is enabled (so the JSONL contains tick lines even during
+		# empty-server runs).
+		var should_step: bool = false
 		if world != null and world.ships.size() > 0:
+			should_step = true
+		elif _replay != null and bool(_replay.enabled):
+			should_step = true
+		if should_step:
 			_step_authoritative_tick()
 
 	# Keep running.
@@ -198,6 +217,8 @@ func _parse_user_args() -> void:
 	# Supported:
 	#   --quit_after=SECONDS
 	#   --quit_flag=user://server.quit
+	#   --replay_record_path=user://replays/session.jsonl
+	#   --replay_notes=optional
 	var args: PackedStringArray = OS.get_cmdline_user_args()
 	for raw in args:
 		var s: String = String(raw)
@@ -214,6 +235,10 @@ func _parse_user_args() -> void:
 			quit_after_seconds = float(value)
 		elif key == "quit_flag":
 			quit_flag_path = value
+		elif key == "replay_record_path":
+			replay_record_path = value
+		elif key == "replay_notes":
+			replay_notes = value
 
 
 func _load_map(path: String) -> void:
@@ -318,7 +343,43 @@ func _load_selected_map_from_config() -> bool:
 		if typeof(e) == TYPE_DICTIONARY and String((e as Dictionary).get("type", "")) == "spawn":
 			spawn_count += 1
 	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ")")
+
+	# Static map hash for replay headers (computed once).
+	_replay_map_hash = 0
+	if map_checksum != null and map_checksum.size() > 0:
+		_replay_map_hash = int(DriftMap.bytes_to_hex(map_checksum).hash())
 	return true
+
+
+func _maybe_start_replay_recording() -> void:
+	if replay_record_path == "":
+		return
+	if _replay != null:
+		return
+
+	_replay = DriftReplayRecorder.new()
+	var map_id_value: String = map_path if map_path != "" else "unknown"
+
+	# Header fields in stable insertion order.
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": map_id_value,
+		"map_hash": int(_replay_map_hash),
+	}
+	if replay_notes != "":
+		header["notes"] = replay_notes
+
+	_replay.start(replay_record_path, header)
+	if not bool(_replay.enabled):
+		print("[REPLAY] failed to open: ", replay_record_path)
+		_replay = null
+	else:
+		print("[REPLAY] recording to ", replay_record_path)
 
 
 func _on_peer_connected(peer_id: int) -> void:
@@ -504,7 +565,15 @@ func _step_authoritative_tick() -> void:
 	if inputs_by_tick.has(intended_tick):
 		inputs_by_tick.erase(intended_tick)
 
+	var t_before: int = int(world.tick)
+
 	latest_snapshot = world.step_tick(inputs_for_step, true, world.ships.size())
+
+	# Replay contract: record tick index BEFORE stepping; hash is computed AFTER stepping.
+	if _replay != null and bool(_replay.enabled):
+		var h_after: int = int(world.compute_world_hash())
+		_replay.record_tick(t_before, inputs_for_step, h_after)
+
 	# Collect prize events from this tick; snapshots are not sent every tick.
 	if world != null and (world.prize_events is Array) and world.prize_events.size() > 0:
 		for ev in (world.prize_events as Array):

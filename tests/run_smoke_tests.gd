@@ -12,14 +12,21 @@ const DriftRuleset = preload("res://shared/drift_ruleset.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
+const DriftInput = preload("res://shared/drift_input.gd")
+const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
+const DriftReplayVerifier = preload("res://shared/replay/drift_replay_verifier.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
+const UserSettings = preload("res://client/settings/user_settings.gd")
 
 var _failures: int = 0
 var _ran: int = 0
 
 
 func _initialize() -> void:
+	_test_drift_input_roundtrip()
+	_test_tick_increments_at_end()
+	_test_user_settings_roundtrip()
 	_test_controls_actions_present()
 	_test_controls_default_bindings_wasd()
 	_test_controls_weapon_defaults_present()
@@ -47,10 +54,151 @@ func _initialize() -> void:
 	_test_death_damage_to_zero_kills_and_respawns()
 	_test_death_safe_zone_damage_impossible()
 	_test_determinism_checksum_fixed_input()
+	_test_world_hash_matches_across_worlds()
+	_test_replay_recorder_writes_jsonl()
+	_test_replay_verifier_replays_and_hashes()
+	_test_replay_verifier_detects_mismatch()
 	_test_prizes_spawn_walkable()
 	_test_ship_sprite_atlas_mapping()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_user_settings_roundtrip() -> void:
+	_ran += 1
+	# Client-only persistent settings must load/save robustly.
+	# This test avoids touching shared sim and restores any prior file contents.
+	var path: String = UserSettings.SETTINGS_PATH
+	var had_file: bool = FileAccess.file_exists(path)
+	var backup_text: String = ""
+	if had_file:
+		var f0 := FileAccess.open(path, FileAccess.READ)
+		if f0 != null:
+			backup_text = f0.get_as_text()
+
+	# Write settings.
+	var s := UserSettings.new()
+	s.master_db = -6.0
+	s.sfx_db = -3.0
+	s.music_db = -12.0
+	s.ui_db = -9.0
+	# Minimal keybind payload (matches SettingsManager dict_to_event format).
+	s.keybinds = {
+		"drift_thrust_forward": [
+			{
+				"type": "key",
+				"device": -1,
+				"keycode": 0,
+				"physical_keycode": 87,
+				"shift": false,
+				"ctrl": false,
+				"alt": false,
+				"meta": false,
+			}
+		]
+	}
+	s.save()
+
+	# Read back.
+	var s2 := UserSettings.load_or_default()
+	if s2 == null:
+		_fail("user_settings_roundtrip (load returned null)")
+		return
+	if absf(float(s2.master_db) - (-6.0)) > 0.0001:
+		_fail("user_settings_roundtrip (master_db mismatch)")
+		return
+	if absf(float(s2.sfx_db) - (-3.0)) > 0.0001:
+		_fail("user_settings_roundtrip (sfx_db mismatch)")
+		return
+	if absf(float(s2.music_db) - (-12.0)) > 0.0001:
+		_fail("user_settings_roundtrip (music_db mismatch)")
+		return
+	if absf(float(s2.ui_db) - (-9.0)) > 0.0001:
+		_fail("user_settings_roundtrip (ui_db mismatch)")
+		return
+	if typeof(s2.keybinds) != TYPE_DICTIONARY or not s2.keybinds.has("drift_thrust_forward"):
+		_fail("user_settings_roundtrip (missing keybinds)")
+		return
+	var evs_any: Variant = s2.keybinds.get("drift_thrust_forward", [])
+	if typeof(evs_any) != TYPE_ARRAY:
+		_fail("user_settings_roundtrip (keybinds not array)")
+		return
+	var evs: Array = evs_any
+	if evs.size() != 1 or typeof(evs[0]) != TYPE_DICTIONARY:
+		_fail("user_settings_roundtrip (keybind event missing)")
+		return
+	var ev0: Dictionary = evs[0]
+	if String(ev0.get("type", "")) != "key" or int(ev0.get("physical_keycode", 0)) != 87:
+		_fail("user_settings_roundtrip (keybind event mismatch)")
+		return
+
+	# Restore previous file.
+	if had_file:
+		var f1 := FileAccess.open(path, FileAccess.WRITE)
+		if f1 != null:
+			f1.store_string(backup_text)
+	else:
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+	_pass("user_settings_roundtrip")
+
+
+func _test_drift_input_roundtrip() -> void:
+	_ran += 1
+	# Deterministic input object must round-trip via primitives-only Dictionary.
+	var a := DriftInput.new(
+		1,  # thrust
+		-1, # turn
+		true,  # fire
+		false, # bomb
+		true,  # afterburner
+		false  # ability1
+	)
+	var d := a.to_dict()
+	if typeof(d) != TYPE_DICTIONARY:
+		_fail("drift_input_roundtrip (to_dict not a Dictionary)")
+		return
+	var b = DriftInput.from_dict(d)
+	if b == null:
+		_fail("drift_input_roundtrip (from_dict returned null)")
+		return
+	if not a.equals(b):
+		_fail("drift_input_roundtrip (round-trip mismatch)")
+		return
+	var c = a.clone()
+	if c == null or not a.equals(c):
+		_fail("drift_input_roundtrip (clone mismatch)")
+		return
+	_pass("drift_input_roundtrip")
+
+
+func _test_tick_increments_at_end() -> void:
+	_ran += 1
+	# Tick contract (Option A): DriftWorld.step_tick() simulates tick t and advances
+	# world.tick to t+1 at the end of the call.
+	var world = DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+
+	var start_tick: int = int(world.tick)
+	const N: int = 10
+	for _i in range(N):
+		var snap: DriftTypes.DriftWorldSnapshot = world.step_tick({}, false, 0)
+		if snap == null:
+			_fail("tick_increments_at_end (snapshot null)")
+			return
+		if int(snap.tick) != int(world.tick):
+			_fail("tick_increments_at_end (snapshot.tick != world.tick)")
+			return
+
+	if int(world.tick) != (start_tick + N):
+		_fail("tick_increments_at_end (expected tick=%d got %d)" % [start_tick + N, int(world.tick)])
+		return
+
+	_pass("tick_increments_at_end")
 
 
 func _test_ship_sprite_atlas_mapping() -> void:
@@ -375,6 +523,317 @@ func _test_determinism_checksum_fixed_input() -> void:
 		return
 
 	_pass("determinism_checksum_fixed_input")
+
+
+func _test_world_hash_matches_across_worlds() -> void:
+	_ran += 1
+	# Per-tick world hash should match for identical simulations, and diverge if inputs differ.
+
+	var a = DriftWorld.new()
+	var b = DriftWorld.new()
+
+	a.set_solid_tiles([])
+	b.set_solid_tiles([])
+	a.set_door_tiles([])
+	b.set_door_tiles([])
+	a.add_boundary_tiles(128, 128)
+	b.add_boundary_tiles(128, 128)
+	a.set_map_dimensions(128, 128)
+	b.set_map_dimensions(128, 128)
+
+	# Ensure RNG streams match (and are covered by the hash).
+	a.set_prize_rng_seed(111)
+	b.set_prize_rng_seed(111)
+	a.set_spawn_rng_seed(222)
+	b.set_spawn_rng_seed(222)
+
+	a.add_ship(1, Vector2(1024, 1024))
+	b.add_ship(1, Vector2(1024, 1024))
+
+	var idle := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	var fwd := DriftTypes.DriftInputCmd.new(1.0, 0.0, false, false, false)
+	var turn := DriftTypes.DriftInputCmd.new(0.0, 1.0, false, false, false)
+
+	for t in range(60):
+		var cmd = fwd if t < 30 else idle
+		a.step_tick({1: cmd}, false, 0)
+		b.step_tick({1: cmd}, false, 0)
+		var ha: int = int(a.compute_world_hash())
+		var hb: int = int(b.compute_world_hash())
+		if ha != hb:
+			_fail("world_hash_matches (mismatch at tick %d: %d vs %d)" % [int(a.tick), ha, hb])
+			return
+
+	# Perturb a single tick of input; hash should diverge immediately or shortly after.
+	a.step_tick({1: idle}, false, 0)
+	b.step_tick({1: turn}, false, 0)
+	var ha2: int = int(a.compute_world_hash())
+	var hb2: int = int(b.compute_world_hash())
+	if ha2 == hb2:
+		_fail("world_hash_matches (expected divergence after input perturbation)")
+		return
+
+	_pass("world_hash_matches_across_worlds")
+
+
+func _test_replay_recorder_writes_jsonl() -> void:
+	_ran += 1
+	var path := "user://replays/test_replay.jsonl"
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+	var world = DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_prize_rng_seed(111)
+	world.set_spawn_rng_seed(222)
+	world.add_ship(1, Vector2(256, 256))
+
+	var recorder = DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "test",
+		"map_hash": 0,
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		_fail("replay_recorder_jsonl (failed to open)")
+		return
+
+	var ticks: int = 120
+	var idle_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	for t in range(ticks):
+		# Deterministic input payload for recorder (DriftInput), but sim uses DriftInputCmd.
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		if t % 5 == 0:
+			di = DriftInput.new(0, 0, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+		var t_before: int = int(world.tick)
+		world.step_tick({1: cmd}, false, 0)
+		recorder.record_tick(t_before, {1: di}, int(world.compute_world_hash()))
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		_fail("replay_recorder_jsonl (file missing)")
+		return
+
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		_fail("replay_recorder_jsonl (cannot read)")
+		return
+
+	var header_line: String = f.get_line()
+	var header_obj = JSON.parse_string(header_line)
+	if typeof(header_obj) != TYPE_DICTIONARY:
+		_fail("replay_recorder_jsonl (header not JSON dict)")
+		return
+	if String((header_obj as Dictionary).get("format", "")) != "driftline.replay":
+		_fail("replay_recorder_jsonl (missing/invalid format)")
+		return
+	if int((header_obj as Dictionary).get("schema_version", -1)) != 1:
+		_fail("replay_recorder_jsonl (missing/invalid schema_version)")
+		return
+	if String((header_obj as Dictionary).get("type", "")) != "header":
+		_fail("replay_recorder_jsonl (header type mismatch)")
+		return
+
+	var tick_lines: int = 0
+	while not f.eof_reached():
+		var line: String = f.get_line()
+		if line == "":
+			continue
+		var obj = JSON.parse_string(line)
+		if typeof(obj) != TYPE_DICTIONARY:
+			_fail("replay_recorder_jsonl (tick line not JSON dict)")
+			return
+		if String((obj as Dictionary).get("type", "")) == "tick":
+			tick_lines += 1
+	if tick_lines != ticks:
+		_fail("replay_recorder_jsonl (expected %d tick lines got %d)" % [ticks, tick_lines])
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_pass("replay_recorder_writes_jsonl")
+
+
+func _test_replay_verifier_replays_and_hashes() -> void:
+	_ran += 1
+	var path := "user://replays/test_replay_verify.jsonl"
+	var setup_world := Callable(self, "_setup_world_for_replay_verify_test")
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+	# Record a deterministic replay.
+	var wrec := DriftWorld.new()
+	setup_world.call(wrec, {})
+	var recorder := DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "test",
+		"map_hash": 0,
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		_fail("replay_verify (failed to open recorder)")
+		return
+
+	var ticks: int = 120
+	for t in range(ticks):
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		if t % 5 == 0:
+			di = DriftInput.new(0, 0, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+		var t_before: int = int(wrec.tick)
+		wrec.step_tick({1: cmd}, false, 0)
+		recorder.record_tick(t_before, {1: di}, int(wrec.compute_world_hash()))
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		_fail("replay_verify (file missing)")
+		return
+
+	# Replay + verify hashes.
+	var wplay := DriftWorld.new()
+	var verifier := DriftReplayVerifier.new()
+	var res: Dictionary = verifier.verify(path, wplay, setup_world)
+	if not bool(res.get("ok", false)):
+		_fail("replay_verify (failed: %s)" % str(res.get("error", "unknown")))
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_pass("replay_verifier_replays_and_hashes")
+
+
+func _test_replay_verifier_detects_mismatch() -> void:
+	_ran += 1
+	var path := "user://replays/test_replay_verify_bad.jsonl"
+	var path_bad := "user://replays/test_replay_verify_bad_corrupt.jsonl"
+	var setup_world := Callable(self, "_setup_world_for_replay_verify_test")
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	if FileAccess.file_exists(path_bad):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path_bad))
+
+	# Record a deterministic replay.
+	var wrec := DriftWorld.new()
+	setup_world.call(wrec, {})
+	var recorder := DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "test",
+		"map_hash": 0,
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		_fail("replay_verify_negative (failed to open recorder)")
+		return
+
+	var ticks: int = 30
+	for t in range(ticks):
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		if t % 5 == 0:
+			di = DriftInput.new(0, 0, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+		var t_before: int = int(wrec.tick)
+		wrec.step_tick({1: cmd}, false, 0)
+		recorder.record_tick(t_before, {1: di}, int(wrec.compute_world_hash()))
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		_fail("replay_verify_negative (file missing)")
+		return
+
+	# Create a corrupted replay with a modified hash on the first tick line.
+	var ok_write: bool = _write_replay_with_corrupted_first_tick_hash(path, path_bad)
+	if not ok_write:
+		_fail("replay_verify_negative (failed to write corrupted replay)")
+		return
+
+	var wplay := DriftWorld.new()
+	var verifier := DriftReplayVerifier.new()
+	var res: Dictionary = verifier.verify(path_bad, wplay, setup_world)
+	if bool(res.get("ok", false)):
+		_fail("replay_verify_negative (expected failure, got ok)")
+		return
+	if String(res.get("error", "")) == "":
+		_fail("replay_verify_negative (missing error)")
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path_bad))
+	_pass("replay_verifier_detects_mismatch")
+
+
+func _write_replay_with_corrupted_first_tick_hash(src_path: String, dst_path: String) -> bool:
+	var fin := FileAccess.open(src_path, FileAccess.READ)
+	if fin == null:
+		return false
+	var fout := FileAccess.open(dst_path, FileAccess.WRITE)
+	if fout == null:
+		return false
+
+	# Copy header line.
+	if fin.eof_reached():
+		return false
+	var header_line: String = fin.get_line()
+	fout.store_line(header_line)
+
+	var corrupted: bool = false
+	while not fin.eof_reached():
+		var line: String = fin.get_line()
+		if line == "":
+			continue
+		var obj = JSON.parse_string(line)
+		if typeof(obj) != TYPE_DICTIONARY:
+			# Preserve as-is.
+			fout.store_line(line)
+			continue
+		var d: Dictionary = obj
+		if (not corrupted) and String(d.get("type", "")) == "tick":
+			# Corrupt hash deterministically.
+			d["hash"] = int(d.get("hash", 0)) + 1
+			corrupted = true
+			fout.store_line(JSON.stringify(d))
+			continue
+		fout.store_line(line)
+
+	return corrupted
+
+
+func _setup_world_for_replay_verify_test(w: DriftWorld, _header: Dictionary) -> void:
+	w.set_solid_tiles([])
+	w.set_door_tiles([])
+	w.add_boundary_tiles(64, 64)
+	w.set_map_dimensions(64, 64)
+	w.set_prize_rng_seed(111)
+	w.set_spawn_rng_seed(222)
+	w.add_ship(1, Vector2(256, 256))
 
 
 func _test_safe_zone_mechanics() -> void:

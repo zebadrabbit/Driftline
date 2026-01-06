@@ -1,0 +1,53 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://client/ui/keybinds_menu.gd" id="1"]
+
+[node name="KeybindsMenu" type="Control"]
+script = ExtResource("1")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Root" type="Control" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="Root"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -250.0
+offset_right = 300.0
+offset_bottom = 250.0
+mouse_filter = 1
+
+[node name="VBox" type="VBoxContainer" parent="Root/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Title" type="Label" parent="Root/Panel/VBox"]
+text = "Keybinds"
+
+[node name="Rows" type="VBoxContainer" parent="Root/Panel/VBox"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Status" type="Label" parent="Root/Panel/VBox"]
+text = "Click an action, then press a key or mouse button. (Esc cancels)"
+
+[node name="Buttons" type="HBoxContainer" parent="Root/Panel/VBox"]
+size_flags_horizontal = 3
+
+[node name="BackButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Back"
+
+[node name="ConflictDialog" type="ConfirmationDialog" parent="."]

@@ -1,0 +1,110 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://client/ui/options_menu.gd" id="1"]
+
+[node name="OptionsMenu" type="Control"]
+script = ExtResource("1")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Root" type="Control" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Panel" type="PanelContainer" parent="Root"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -260.0
+offset_top = -200.0
+offset_right = 260.0
+offset_bottom = 200.0
+mouse_filter = 1
+
+[node name="VBox" type="VBoxContainer" parent="Root/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Title" type="Label" parent="Root/Panel/VBox"]
+text = "Options"
+
+[node name="Sliders" type="VBoxContainer" parent="Root/Panel/VBox"]
+size_flags_horizontal = 3
+
+[node name="MasterRow" type="HBoxContainer" parent="Root/Panel/VBox/Sliders"]
+size_flags_horizontal = 3
+
+[node name="MasterLabel" type="Label" parent="Root/Panel/VBox/Sliders/MasterRow"]
+text = "Master Volume (dB)"
+size_flags_horizontal = 3
+
+[node name="MasterSlider" type="HSlider" parent="Root/Panel/VBox/Sliders/MasterRow"]
+min_value = -40.0
+max_value = 0.0
+step = 1.0
+value = 0.0
+size_flags_horizontal = 3
+
+[node name="SfxRow" type="HBoxContainer" parent="Root/Panel/VBox/Sliders"]
+size_flags_horizontal = 3
+
+[node name="SfxLabel" type="Label" parent="Root/Panel/VBox/Sliders/SfxRow"]
+text = "SFX Volume (dB)"
+size_flags_horizontal = 3
+
+[node name="SfxSlider" type="HSlider" parent="Root/Panel/VBox/Sliders/SfxRow"]
+min_value = -40.0
+max_value = 0.0
+step = 1.0
+value = 0.0
+size_flags_horizontal = 3
+
+[node name="MusicRow" type="HBoxContainer" parent="Root/Panel/VBox/Sliders"]
+size_flags_horizontal = 3
+
+[node name="MusicLabel" type="Label" parent="Root/Panel/VBox/Sliders/MusicRow"]
+text = "Music Volume (dB)"
+size_flags_horizontal = 3
+
+[node name="MusicSlider" type="HSlider" parent="Root/Panel/VBox/Sliders/MusicRow"]
+min_value = -40.0
+max_value = 0.0
+step = 1.0
+value = 0.0
+size_flags_horizontal = 3
+
+[node name="UiRow" type="HBoxContainer" parent="Root/Panel/VBox/Sliders"]
+size_flags_horizontal = 3
+
+[node name="UiLabel" type="Label" parent="Root/Panel/VBox/Sliders/UiRow"]
+text = "UI Volume (dB)"
+size_flags_horizontal = 3
+
+[node name="UiSlider" type="HSlider" parent="Root/Panel/VBox/Sliders/UiRow"]
+min_value = -40.0
+max_value = 0.0
+step = 1.0
+value = 0.0
+size_flags_horizontal = 3
+
+[node name="Buttons" type="VBoxContainer" parent="Root/Panel/VBox"]
+size_flags_horizontal = 3
+
+[node name="KeybindsButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Keybinds..."
+disabled = true
+
+[node name="ResetButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Reset to Defaults"
+
+[node name="BackButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Back"

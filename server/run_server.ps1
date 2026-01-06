@@ -1,23 +1,71 @@
 param(
 	[string]$GodotPath = "",
 	[string]$ProjectRoot = "",
-	[string]$QuitFlag = "res://.server.quit"
+	[string]$QuitFlag = "user://server.quit",
+	[string]$ReplayRecordPath = "",
+	[string]$ReplayNotes = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 # Startup banner (printed before any other logs).
-Write-Host '    _________      ___________________________             '
-Write-Host '    ______  /_________(_)__  __/_  /___  /__(_)___________ '
-Write-Host '    _  __  /__  ___/_  /__  /_ _  __/_  /__  /__  __ \  _ \' 
-Write-Host '    / /_/ / _  /   _  / _  __/ / /_ _  / _  / _  / / /  __/'
-Write-Host '    \__,_/  /_/    /_/  /_/    \__/ /_/  /_/  /_/ /_/\___/ '
+# Write-Host '    _________      ___________________________             '
+# Write-Host '    ______  /_________(_)__  __/_  /___  /__(_)___________ '
+# Write-Host '    _  __  /__  ___/_  /__  /_ _  __/_  /__  /__  __ \  _ \' 
+# Write-Host '    / /_/ / _  /   _  / _  __/ / /_ _  / _  / _  / / /  __/'
+# Write-Host '    \__,_/  /_/    /_/  /_/    \__/ /_/  /_/  /_/ /_/\___/ '
 
 function Resolve-ProjectRoot {
 	if ($ProjectRoot -and $ProjectRoot.Trim() -ne "") {
 		return (Resolve-Path $ProjectRoot).Path
 	}
 	return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+}
+
+function Get-ProjectName([string]$root) {
+	# Derive the Godot application name from project.godot, falling back to folder name.
+	$projectGodot = Join-Path $root "project.godot"
+	if (Test-Path $projectGodot) {
+		try {
+			$lines = Get-Content $projectGodot -ErrorAction Stop
+			foreach ($line in $lines) {
+				# Example: config/name="Driftline"
+				if ($line -match '^\s*config/name\s*=\s*"(.+)"\s*$') {
+					return $Matches[1]
+				}
+			}
+		} catch {
+			# ignore
+		}
+	}
+	return (Split-Path -Leaf $root)
+}
+
+function Resolve-QuitFlagAbsolutePath([string]$quitFlag, [string]$root) {
+	if (-not $quitFlag -or $quitFlag.Trim() -eq "") {
+		return ""
+	}
+
+	# Absolute filesystem path.
+	if ([System.IO.Path]::IsPathRooted($quitFlag)) {
+		return $quitFlag
+	}
+
+	# Godot path schemes.
+	if ($quitFlag.StartsWith("user://")) {
+		$projectName = Get-ProjectName -root $root
+		$rel = $quitFlag.Substring("user://".Length)
+		$rel = $rel.TrimStart([char]'/', [char]'\')
+		return Join-Path (Join-Path (Join-Path $env:APPDATA "Godot\app_userdata") $projectName) $rel
+	}
+	if ($quitFlag.StartsWith("res://")) {
+		$rel = $quitFlag.Substring("res://".Length)
+		$rel = $rel.TrimStart([char]'/', [char]'\')
+		return Join-Path $root $rel
+	}
+
+	# Plain relative path: treat as relative to project root.
+	return Join-Path $root $quitFlag
 }
 
 function Resolve-GodotExe([string]$root) {
@@ -78,9 +126,9 @@ if (-not (Test-Path $godot)) {
 	throw "Godot executable not found at: $godot"
 }
 
-# We use a quit flag in the *project folder* so this works even if the Godot exe
-# is a GUI subsystem process (which typically doesn't receive Ctrl+C events on Windows).
-$quitFileAbs = Join-Path $root ".server.quit"
+# We use a quit flag file so this works even if the Godot exe is a GUI subsystem
+# process (which typically doesn't receive Ctrl+C events on Windows).
+$quitFileAbs = Resolve-QuitFlagAbsolutePath -quitFlag $QuitFlag -root $root
 if (Test-Path $quitFileAbs) {
 	Remove-Item $quitFileAbs -Force -ErrorAction SilentlyContinue
 }
@@ -125,6 +173,13 @@ try {
 		"--",
 		"--quit_flag=$QuitFlag"
 	)
+
+	if ($ReplayRecordPath -and $ReplayRecordPath.Trim() -ne "") {
+		$args += "--replay_record_path=$ReplayRecordPath"
+	}
+	if ($ReplayNotes -and $ReplayNotes.Trim() -ne "") {
+		$args += "--replay_notes=$ReplayNotes"
+	}
 
 	# Start a child process so our Ctrl+C handler can run reliably.
 	$script:serverProc = Start-Process -FilePath $godot -ArgumentList $args -PassThru -NoNewWindow

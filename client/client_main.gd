@@ -30,6 +30,7 @@ const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEditor.tscn")
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
 const EscMenuScene: PackedScene = preload("res://client/scenes/EscMenu.tscn")
+const OptionsMenuScene: PackedScene = preload("res://client/ui/options_menu.tscn")
 
 const PRIZE_TEX: Texture2D = preload("res://client/graphics/entities/prizes.png")
 const PRIZE_FRAME_PX: int = 16
@@ -82,6 +83,12 @@ var pause_menu_layer: CanvasLayer
 var pause_menu_panel: Panel
 
 var esc_menu: CanvasLayer = null
+
+# Main-menu (connection screen) options UI overlay.
+var _main_menu_ui_layer: CanvasLayer = null
+var _main_menu_options_panel: Control = null
+var _main_menu_options_btn: Button = null
+var _options_menu_instance: Control = null
 
 # Wall-bounce audio (driven by shared simulation collision events)
 @export var bounce_sound_min_speed: float = 160.0
@@ -193,6 +200,7 @@ func _ready() -> void:
 
 	_build_pause_menu_ui()
 	_set_pause_menu_visible(false)
+	_build_main_menu_ui()
 
 	_ensure_ui_escape_menu_action_has_escape_binding()
 	esc_menu = EscMenuScene.instantiate()
@@ -265,6 +273,7 @@ func _ready() -> void:
 	show_connect_ui = true
 	connection_status_message = "Enter server address to connect"
 	_update_ui_visibility()
+	_update_main_menu_ui_visibility()
 
 
 func _ensure_actions_work_with_shift_held() -> void:
@@ -1500,6 +1509,73 @@ func _update_ui_visibility() -> void:
 
 	# Pause menu is never shown over the connection UI.
 	_set_pause_menu_visible(pause_menu_visible)
+	_update_main_menu_ui_visibility()
+
+
+func _build_main_menu_ui() -> void:
+	# Minimal, client-only UI overlay for the connection screen.
+	_main_menu_ui_layer = CanvasLayer.new()
+	_main_menu_ui_layer.layer = 90
+	add_child(_main_menu_ui_layer)
+
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_main_menu_ui_layer.add_child(root)
+
+	_main_menu_options_panel = PanelContainer.new()
+	_main_menu_options_panel.custom_minimum_size = Vector2(220, 70)
+	_main_menu_options_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	# For bottom-right anchors (all == 1.0), you must set BOTH left/top and right/bottom
+	# offsets to get a positive rect size; otherwise the control ends up with negative size
+	# and will be invisible.
+	var pad: float = 16.0
+	_main_menu_options_panel.offset_right = -pad
+	_main_menu_options_panel.offset_bottom = -pad
+	_main_menu_options_panel.offset_left = -pad - _main_menu_options_panel.custom_minimum_size.x
+	_main_menu_options_panel.offset_top = -pad - _main_menu_options_panel.custom_minimum_size.y
+	_main_menu_options_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(_main_menu_options_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 6)
+	_main_menu_options_panel.add_child(vbox)
+
+	_main_menu_options_btn = Button.new()
+	_main_menu_options_btn.text = "Options"
+	_main_menu_options_btn.pressed.connect(_on_main_menu_options_pressed)
+	vbox.add_child(_main_menu_options_btn)
+
+	_update_main_menu_ui_visibility()
+
+
+func _update_main_menu_ui_visibility() -> void:
+	if _main_menu_ui_layer == null:
+		return
+	var show: bool = show_connect_ui and (_options_menu_instance == null)
+	_main_menu_ui_layer.visible = show
+
+
+func _on_main_menu_options_pressed() -> void:
+	_open_options_menu_from_main_menu()
+
+
+func _open_options_menu_from_main_menu() -> void:
+	if _options_menu_instance != null:
+		return
+	if OptionsMenuScene == null:
+		return
+	_options_menu_instance = OptionsMenuScene.instantiate()
+	add_child(_options_menu_instance)
+	if _options_menu_instance.has_signal("back_requested"):
+		_options_menu_instance.connect("back_requested", _on_options_menu_back_requested)
+	_update_main_menu_ui_visibility()
+
+
+func _on_options_menu_back_requested() -> void:
+	_options_menu_instance = null
+	_update_main_menu_ui_visibility()
 
 
 func _send_hello() -> void:
@@ -1828,6 +1904,10 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 			if p == null:
 				continue
 			authoritative_prizes.append(DriftTypes.DriftPrizeState.new(int(p.id), p.pos, snap_tick, int(p.despawn_tick), int(p.kind), bool(p.is_negative), bool(p.is_death_drop)))
+	# Also attach authoritative prize list to the rendered snapshot so the minimap/radar UI
+	# (which consumes latest_snapshot) can draw prize dots.
+	if latest_snapshot != null:
+		latest_snapshot.prizes = authoritative_prizes
 	# Track remote ships
 	remote_ships.clear()
 	var local_pos_found: bool = false
