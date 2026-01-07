@@ -139,8 +139,45 @@ func _ready() -> void:
 
 	_load_help_pages()
 	_refresh_help_ticker(true)
+	_apply_ui_settings_from_settings_manager()
+	_hook_settings_signals()
 
 	_try_hook_player_ship()
+
+
+func _hook_settings_signals() -> void:
+	if typeof(Settings) == TYPE_NIL or Settings == null:
+		return
+	if not Settings.setting_changed.is_connected(_on_setting_changed):
+		Settings.setting_changed.connect(_on_setting_changed)
+	if Settings.has_signal("settings_loaded") and not Settings.settings_loaded.is_connected(_on_settings_loaded):
+		Settings.settings_loaded.connect(_on_settings_loaded)
+
+
+func _on_settings_loaded() -> void:
+	_apply_ui_settings_from_settings_manager()
+
+
+func _on_setting_changed(path: String, value: Variant) -> void:
+	if path == "ui.show_minimap":
+		_set_minimap_enabled(bool(value))
+		return
+	if path == "ui.help_ticker_enabled":
+		help_ticker_set_enabled(bool(value))
+		return
+
+
+func _apply_ui_settings_from_settings_manager() -> void:
+	if typeof(Settings) == TYPE_NIL or Settings == null:
+		return
+	_set_minimap_enabled(bool(Settings.get_value("ui.show_minimap", true)))
+	help_ticker_set_enabled(bool(Settings.get_value("ui.help_ticker_enabled", true)))
+
+
+func _set_minimap_enabled(enabled: bool) -> void:
+	if _minimap == null:
+		return
+	_minimap.visible = bool(enabled)
 
 
 func set_values(p_name: String, p_bounty: int, p_stars: int, p_ship_id: int) -> void:

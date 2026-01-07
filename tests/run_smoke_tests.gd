@@ -17,7 +17,7 @@ const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.g
 const DriftReplayVerifier = preload("res://shared/replay/drift_replay_verifier.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
-const UserSettings = preload("res://client/settings/user_settings.gd")
+const SettingsManager = preload("res://client/settings/settings_manager.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -68,7 +68,7 @@ func _test_user_settings_roundtrip() -> void:
 	_ran += 1
 	# Client-only persistent settings must load/save robustly.
 	# This test avoids touching shared sim and restores any prior file contents.
-	var path: String = UserSettings.SETTINGS_PATH
+	var path: String = SettingsManager.SETTINGS_PATH
 	var had_file: bool = FileAccess.file_exists(path)
 	var backup_text: String = ""
 	if had_file:
@@ -77,49 +77,55 @@ func _test_user_settings_roundtrip() -> void:
 			backup_text = f0.get_as_text()
 
 	# Write settings.
-	var s := UserSettings.new()
-	s.master_db = -6.0
-	s.sfx_db = -3.0
-	s.music_db = -12.0
-	s.ui_db = -9.0
-	# Minimal keybind payload (matches SettingsManager dict_to_event format).
-	s.keybinds = {
-		"drift_thrust_forward": [
-			{
-				"type": "key",
-				"device": -1,
-				"keycode": 0,
-				"physical_keycode": 87,
-				"shift": false,
-				"ctrl": false,
-				"alt": false,
-				"meta": false,
-			}
-		]
-	}
-	s.save()
+	var mgr := SettingsManager.new()
+	mgr.set_value("format", String(SettingsManager.SETTINGS_FORMAT))
+	mgr.set_value("schema_version", int(SettingsManager.SETTINGS_SCHEMA_VERSION))
+	mgr.set_value("audio.master_db", -6.0)
+	mgr.set_value("audio.sfx_db", -3.0)
+	mgr.set_value("audio.music_db", -12.0)
+	mgr.set_value("audio.ui_db", -9.0)
+	# Minimal keybind payload.
+	mgr.set_value(
+		"controls.bindings",
+		{
+			"drift_thrust_forward": [
+				{
+					"type": "key",
+					"device": -1,
+					"keycode": 0,
+					"physical_keycode": 87,
+					"shift": false,
+					"ctrl": false,
+					"alt": false,
+					"meta": false,
+				}
+			]
+		}
+	)
+	mgr.save_settings()
+	# Not in the scene tree; free explicitly to avoid leak warnings on shutdown.
+	mgr.free()
 
 	# Read back.
-	var s2 := UserSettings.load_or_default()
-	if s2 == null:
-		_fail("user_settings_roundtrip (load returned null)")
+	var mgr2 := SettingsManager.new()
+	mgr2.load_settings()
+	if absf(float(mgr2.get_value("audio.master_db", 0.0)) - (-6.0)) > 0.0001:
+		_fail("user_settings_roundtrip (audio.master_db mismatch)")
 		return
-	if absf(float(s2.master_db) - (-6.0)) > 0.0001:
-		_fail("user_settings_roundtrip (master_db mismatch)")
+	if absf(float(mgr2.get_value("audio.sfx_db", 0.0)) - (-3.0)) > 0.0001:
+		_fail("user_settings_roundtrip (audio.sfx_db mismatch)")
 		return
-	if absf(float(s2.sfx_db) - (-3.0)) > 0.0001:
-		_fail("user_settings_roundtrip (sfx_db mismatch)")
+	if absf(float(mgr2.get_value("audio.music_db", 0.0)) - (-12.0)) > 0.0001:
+		_fail("user_settings_roundtrip (audio.music_db mismatch)")
 		return
-	if absf(float(s2.music_db) - (-12.0)) > 0.0001:
-		_fail("user_settings_roundtrip (music_db mismatch)")
+	if absf(float(mgr2.get_value("audio.ui_db", 0.0)) - (-9.0)) > 0.0001:
+		_fail("user_settings_roundtrip (audio.ui_db mismatch)")
 		return
-	if absf(float(s2.ui_db) - (-9.0)) > 0.0001:
-		_fail("user_settings_roundtrip (ui_db mismatch)")
+	var bindings_any: Variant = mgr2.get_value("controls.bindings", {})
+	if typeof(bindings_any) != TYPE_DICTIONARY or not Dictionary(bindings_any).has("drift_thrust_forward"):
+		_fail("user_settings_roundtrip (missing controls.bindings)")
 		return
-	if typeof(s2.keybinds) != TYPE_DICTIONARY or not s2.keybinds.has("drift_thrust_forward"):
-		_fail("user_settings_roundtrip (missing keybinds)")
-		return
-	var evs_any: Variant = s2.keybinds.get("drift_thrust_forward", [])
+	var evs_any: Variant = Dictionary(bindings_any).get("drift_thrust_forward", [])
 	if typeof(evs_any) != TYPE_ARRAY:
 		_fail("user_settings_roundtrip (keybinds not array)")
 		return
@@ -130,7 +136,10 @@ func _test_user_settings_roundtrip() -> void:
 	var ev0: Dictionary = evs[0]
 	if String(ev0.get("type", "")) != "key" or int(ev0.get("physical_keycode", 0)) != 87:
 		_fail("user_settings_roundtrip (keybind event mismatch)")
+		mgr2.free()
 		return
+	# Not in the scene tree; free explicitly to avoid leak warnings on shutdown.
+	mgr2.free()
 
 	# Restore previous file.
 	if had_file:

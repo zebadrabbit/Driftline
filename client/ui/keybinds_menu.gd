@@ -4,29 +4,9 @@ extends Control
 
 signal back_requested
 
-const ACTIONS_ORDER: Array[String] = [
-	"thrust_forward",
-	"thrust_backward",
-	"turn_left",
-	"turn_right",
-	"fire_primary",
-	"fire_secondary",
-	"afterburner",
-	"drift_help_toggle",
-	"drift_help_next",
-]
-
-const ACTION_LABELS: Dictionary = {
-	"thrust_forward": "Thrust Forward",
-	"thrust_backward": "Thrust Backward",
-	"turn_left": "Turn Left",
-	"turn_right": "Turn Right",
-	"fire_primary": "Fire Primary",
-	"fire_secondary": "Fire Secondary",
-	"afterburner": "Afterburner",
-	"drift_help_toggle": "Help Toggle",
-	"drift_help_next": "Help Next",
-}
+const DriftActions = preload("res://client/input/actions.gd")
+const ACTIONS_ORDER: Array[String] = DriftActions.REBINDABLE_ACTIONS
+const ACTION_LABELS: Dictionary = DriftActions.ACTION_LABELS
 
 @onready var _rows: VBoxContainer = $Root/Panel/VBox/Rows
 @onready var _status: Label = $Root/Panel/VBox/Status
@@ -182,7 +162,7 @@ func _capture_event_for_binding(event: InputEvent) -> InputEvent:
 
 
 func _find_conflicting_action(target_action: String, ev: InputEvent) -> String:
-	var ev_d: Dictionary = SettingsManager.event_to_dict(ev)
+	var ev_d: Dictionary = SettingsManager.serialize_input_event(ev)
 	for a_any in _action_buttons.keys():
 		var action: String = str(a_any)
 		if action == target_action:
@@ -192,7 +172,7 @@ func _find_conflicting_action(target_action: String, ev: InputEvent) -> String:
 			var existing: InputEvent = existing_any
 			if existing == null:
 				continue
-			if SettingsManager.event_to_dict(existing) == ev_d:
+			if SettingsManager.serialize_input_event(existing) == ev_d:
 				return action
 	return ""
 
@@ -201,33 +181,30 @@ func _apply_binding(action: String, ev: InputEvent) -> void:
 	var settings: Node = get_node_or_null("/root/Settings")
 	if settings == null:
 		return
-	if settings.current == null:
-		settings.load_settings()
-	if settings.current == null:
-		return
-
-	if typeof(settings.current.keybinds) != TYPE_DICTIONARY:
-		settings.current.keybinds = {}
-
-	settings.current.keybinds[action] = [SettingsManager.event_to_dict(ev)]
+	var bindings_any: Variant = settings.get_value("controls.bindings", {})
+	var bindings: Dictionary = {}
+	if typeof(bindings_any) == TYPE_DICTIONARY:
+		bindings = Dictionary(bindings_any).duplicate(true)
+	bindings[action] = [SettingsManager.serialize_input_event(ev)]
+	settings.set_value("controls.bindings", bindings)
 	settings.apply_keybinds()
-	settings.save_settings()
 	_refresh_action(action)
 
 
 func _remove_binding_event(action: String, ev: InputEvent) -> void:
 	var settings: Node = get_node_or_null("/root/Settings")
-	if settings == null or settings.current == null:
+	if settings == null:
 		return
-	if typeof(settings.current.keybinds) != TYPE_DICTIONARY:
+	var bindings_any: Variant = settings.get_value("controls.bindings", {})
+	if typeof(bindings_any) != TYPE_DICTIONARY:
 		return
-
-	var list_any: Variant = settings.current.keybinds.get(action, [])
+	var bindings: Dictionary = Dictionary(bindings_any).duplicate(true)
+	var list_any: Variant = bindings.get(action, [])
 	if typeof(list_any) != TYPE_ARRAY:
 		return
 	var list: Array = list_any
 
-	var ev_d: Dictionary = SettingsManager.event_to_dict(ev)
+	var ev_d: Dictionary = SettingsManager.serialize_input_event(ev)
 	var filtered: Array = []
 	for d_any in list:
 		if typeof(d_any) != TYPE_DICTIONARY:
@@ -235,7 +212,8 @@ func _remove_binding_event(action: String, ev: InputEvent) -> void:
 		if Dictionary(d_any) == ev_d:
 			continue
 		filtered.append(d_any)
-	settings.current.keybinds[action] = filtered
+	bindings[action] = filtered
+	settings.set_value("controls.bindings", bindings)
 
 
 func _on_conflict_replace_confirmed() -> void:

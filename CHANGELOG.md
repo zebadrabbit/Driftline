@@ -79,6 +79,8 @@ This project didn’t previously have a formal changelog. The entries below were
 
 ### Added
 
+- Client settings/options UI.
+- Deterministic replay support (client) and world-hash/determinism guardrails.
 - Authoritative server + client architecture with deterministic shared simulation in `shared/`.
 - Tileset packages under `assets/tilesets/<tileset_name>/` (`tiles.png`, `tileset.json`, `tiles_def.json`).
 - Runtime Tilemap Editor tool scene: `tools/tilemap_editor/TilemapEditor.tscn`.
@@ -111,6 +113,7 @@ This project didn’t previously have a formal changelog. The entries below were
 
 ### Changed
 
+- Additional client UX polish and determinism checks.
 - Default map content restored/created with boundary walls and basic obstacles, plus a safezone area.
 - Client scene wiring corrected so the intended main scene is used.
 - Server spawn selection now prefers map `entities` with `type="spawn"` when present.
@@ -120,6 +123,7 @@ This project didn’t previously have a formal changelog. The entries below were
 
 ### Fixed
 
+- Boost thrust SFX (including Shift-chord behavior).
 - Server crash on missing ship data ("Invalid access to property 'ships' on Nil") by introducing shared ship logic and tightening types.
 - Server exits cleanly if the listen port is already in use.
 - Map editor keybind conflicts where `Ctrl+S` / `Ctrl+O` could also trigger movement.

@@ -20,6 +20,7 @@ const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
+const DriftActions = preload("res://client/input/actions.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
@@ -335,11 +336,7 @@ func _ensure_modifier_action_has_shift_binding() -> void:
 	var action := StringName("drift_modifier_ability")
 	if not InputMap.has_action(action):
 		return
-	# Use OS lookup to avoid hardcoded key constants in gameplay code.
-	# Some platforms return 0 for "Shift"; fall back to the stable SHIFT keycode integer.
-	var shift_keycode: int = int(OS.find_keycode_from_string("Shift"))
-	if shift_keycode <= 0:
-		shift_keycode = 4194325
+	var shift_keycode: int = int(DriftActions.SHIFT_KEYCODE)
 	var events: Array = InputMap.action_get_events(action)
 	for ev in events:
 		if ev is InputEventKey:
@@ -359,7 +356,7 @@ func _ensure_ui_escape_menu_action_has_escape_binding() -> void:
 	var action := StringName("ui_escape_menu")
 	if not InputMap.has_action(action):
 		InputMap.add_action(action)
-	var escape_keycode: int = int(OS.find_keycode_from_string("Escape"))
+	var escape_keycode: int = int(DriftActions.ESCAPE_KEYCODE)
 	var events: Array = InputMap.action_get_events(action)
 	for ev in events:
 		if ev is InputEventKey:
@@ -782,7 +779,7 @@ func _ensure_debug_probe_action() -> void:
 		return
 	InputMap.add_action(action)
 	var ev := InputEventKey.new()
-	ev.keycode = int(OS.find_keycode_from_string("F8"))
+	ev.keycode = int(DriftActions.debug_probe_keycode())
 	ev.physical_keycode = ev.keycode
 	InputMap.action_add_event(action, ev)
 

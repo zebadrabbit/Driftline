@@ -101,10 +101,25 @@ Or directly:
 
 Open the project in the Godot editor and run.
 
+Client settings (audio/UI/keybinds) are persisted to `user://settings.json`.
+This is a strict, versioned JSON contract (no silent fallback for unknown formats/versions).
+
+If you have an older `user://settings.json` from before this was versioned, it will be rejected; delete it to reset.
+
+See schema docs:
+
+- `docs/formats/client_settings.schema.md`
+
 In-game:
 
 - `Esc`: toggle the in-game menu (non-blocking)
 - In the menu: "Back to Menu" returns to the connection screen
+
+Options menu:
+
+- Audio sliders apply immediately.
+- UI toggles include minimap visibility and help ticker enable/disable.
+- Keybinds can be rebound from the Options menu and persist via `controls.bindings`.
 
 Help / training ticker:
 

@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://client/ui/options_menu.gd" id="1"]
+[ext_resource type="Script" path="res://client/ui/InputCaptureModal.gd" id="2"]
 
 [node name="OptionsMenu" type="Control"]
 script = ExtResource("1")
@@ -26,6 +27,79 @@ offset_top = -200.0
 offset_right = 260.0
 offset_bottom = 200.0
 mouse_filter = 1
+
+[node name="KeybindsPanel" type="PanelContainer" parent="Root"]
+visible = false
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -360.0
+offset_top = -240.0
+offset_right = 360.0
+offset_bottom = 240.0
+mouse_filter = 1
+
+[node name="VBox" type="VBoxContainer" parent="Root/KeybindsPanel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Title" type="Label" parent="Root/KeybindsPanel/VBox"]
+text = "Keybinds"
+
+[node name="Scroll" type="ScrollContainer" parent="Root/KeybindsPanel/VBox"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Rows" type="VBoxContainer" parent="Root/KeybindsPanel/VBox/Scroll"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Buttons" type="HBoxContainer" parent="Root/KeybindsPanel/VBox"]
+size_flags_horizontal = 3
+
+[node name="ResetAllButton" type="Button" parent="Root/KeybindsPanel/VBox/Buttons"]
+text = "Reset All Keybinds"
+
+[node name="BackButton" type="Button" parent="Root/KeybindsPanel/VBox/Buttons"]
+text = "Back"
+
+[node name="CaptureOverlay" type="Control" parent="Root"]
+visible = false
+script = ExtResource("2")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 1
+
+[node name="Panel" type="PanelContainer" parent="Root/CaptureOverlay"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -160.0
+offset_top = -40.0
+offset_right = 160.0
+offset_bottom = 40.0
+mouse_filter = 1
+
+[node name="Label" type="Label" parent="Root/CaptureOverlay/Panel"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+horizontal_alignment = 1
+vertical_alignment = 1
+text = "Press a key... (Esc cancels)"
+
+[node name="RebindConflictDialog" type="ConfirmationDialog" parent="."]
+title = "Keybind Conflict"
+ok_button_text = "Reassign"
+cancel_button_text = "Cancel"
 
 [node name="VBox" type="VBoxContainer" parent="Root/Panel"]
 anchors_preset = 15
@@ -99,6 +173,17 @@ size_flags_horizontal = 3
 [node name="Buttons" type="VBoxContainer" parent="Root/Panel/VBox"]
 size_flags_horizontal = 3
 
+[node name="UiToggles" type="VBoxContainer" parent="Root/Panel/VBox/Buttons"]
+size_flags_horizontal = 3
+
+[node name="ShowMinimapToggle" type="CheckBox" parent="Root/Panel/VBox/Buttons/UiToggles"]
+text = "Show minimap"
+button_pressed = true
+
+[node name="HelpTickerToggle" type="CheckBox" parent="Root/Panel/VBox/Buttons/UiToggles"]
+text = "Show help ticker"
+button_pressed = true
+
 [node name="KeybindsButton" type="Button" parent="Root/Panel/VBox/Buttons"]
 text = "Keybinds..."
 disabled = true
@@ -106,5 +191,9 @@ disabled = true
 [node name="ResetButton" type="Button" parent="Root/Panel/VBox/Buttons"]
 text = "Reset to Defaults"
 
-[node name="BackButton" type="Button" parent="Root/Panel/VBox/Buttons"]
-text = "Back"
+[node name="ApplyButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Apply"
+
+[node name="CloseButton" type="Button" parent="Root/Panel/VBox/Buttons"]
+text = "Close"
+
