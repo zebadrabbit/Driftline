@@ -30,3 +30,6 @@ $RECYCLE.BIN/
 
 # Crash dumps
 *.dmp
+
+# CI / headless test artifacts (created on failures)
+.ci_artifacts/

@@ -58,6 +58,7 @@ func _initialize() -> void:
 	_test_replay_recorder_writes_jsonl()
 	_test_replay_verifier_replays_and_hashes()
 	_test_replay_verifier_detects_mismatch()
+	_test_replay_deterministic_hash_stable()
 	_test_prizes_spawn_walkable()
 	_test_ship_sprite_atlas_mapping()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
@@ -799,6 +800,206 @@ func _test_replay_verifier_detects_mismatch() -> void:
 	_pass("replay_verifier_detects_mismatch")
 
 
+func _test_replay_deterministic_hash_stable() -> void:
+	_ran += 1
+	# Ensure replay verification is deterministic within a single process.
+	# Record a deterministic 2-ship replay, then verify it twice into fresh worlds,
+	# asserting the final world hash matches across runs.
+	var path := "user://replays/test_replay_hash_stable.jsonl"
+	var setup_world := Callable(self, "_setup_world_for_replay_hash_stable_test")
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+	# Record a deterministic replay (2 ships).
+	var wrec := DriftWorld.new()
+	setup_world.call(wrec, {})
+	var recorder := DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "test",
+		"map_hash": 0,
+		"notes": "smoke: replay hash stable",
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		_fail("replay_hash_stable (failed to open recorder)")
+		return
+
+	var ticks: int = 600 # 10s at 60 Hz
+	for t in range(ticks):
+		# Scripted deterministic inputs (DriftInput) for 2 ships.
+		var di1 := DriftInput.new(
+			1 if (t % 60) < 30 else 0,
+			-1 if (t % 40) < 20 else 1,
+			(t % 15) == 0,
+			(t % 90) == 10,
+			(t % 20) < 5,
+			(t % 120) == 7
+		)
+		var di2 := DriftInput.new(
+			1 if (t % 50) < 25 else 0,
+			1 if (t % 30) < 15 else -1,
+			(t % 17) == 0,
+			(t % 80) == 3,
+			(t % 25) < 8,
+			(t % 100) == 9
+		)
+
+		# Sim uses DriftInputCmd; keep mapping aligned with DriftReplayVerifier._cmd_from_drift_input.
+		var cmd1 := DriftTypes.DriftInputCmd.new(
+			float(di1.thrust),
+			float(di1.turn),
+			bool(di1.fire),
+			bool(di1.bomb),
+			bool(di1.afterburner),
+			bool(di1.ability1),
+			false,
+			false,
+			false
+		)
+		var cmd2 := DriftTypes.DriftInputCmd.new(
+			float(di2.thrust),
+			float(di2.turn),
+			bool(di2.fire),
+			bool(di2.bomb),
+			bool(di2.afterburner),
+			bool(di2.ability1),
+			false,
+			false,
+			false
+		)
+		var t_before: int = int(wrec.tick)
+		wrec.step_tick({1: cmd1, 2: cmd2}, false, 0)
+		recorder.record_tick(t_before, {1: di1, 2: di2}, int(wrec.compute_world_hash()))
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		_fail("replay_hash_stable (file missing)")
+		return
+
+	# Verify twice in-process into fresh worlds.
+	var verifier := DriftReplayVerifier.new()
+
+	var wplay_a := DriftWorld.new()
+	var res_a: Dictionary = verifier.verify(path, wplay_a, setup_world)
+	if not bool(res_a.get("ok", false)):
+		_print_replay_verify_failure("replay_hash_stable (verify A)", res_a, path)
+		var artifact_a: String = _save_ci_replay_artifact("replay_hash_stable_verify_A", path, res_a)
+		if artifact_a != "":
+			print("[SMOKE] bugreport_replay_path=", artifact_a)
+		_fail("replay_hash_stable (verify A failed: %s)" % str(res_a.get("error", "unknown")))
+		return
+	var hash_a: int = int(wplay_a.compute_world_hash())
+
+	var wplay_b := DriftWorld.new()
+	var res_b: Dictionary = verifier.verify(path, wplay_b, setup_world)
+	if not bool(res_b.get("ok", false)):
+		_print_replay_verify_failure("replay_hash_stable (verify B)", res_b, path)
+		var artifact_b: String = _save_ci_replay_artifact("replay_hash_stable_verify_B", path, res_b)
+		if artifact_b != "":
+			print("[SMOKE] bugreport_replay_path=", artifact_b)
+		_fail("replay_hash_stable (verify B failed: %s)" % str(res_b.get("error", "unknown")))
+		return
+	var hash_b: int = int(wplay_b.compute_world_hash())
+
+	if hash_a != hash_b:
+		print("[SMOKE] replay_hash_stable final_hash_mismatch expected=", hash_a, " got=", hash_b, " tick=final")
+		_fail("replay_hash_stable (final hash mismatch: %d vs %d)" % [hash_a, hash_b])
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_pass("replay_deterministic_hash_stable")
+
+
+func _print_replay_verify_failure(context: String, res: Dictionary, replay_path: String) -> void:
+	print("[SMOKE] REPLAY_VERIFY_FAIL ", context, " path=", replay_path)
+	print("[SMOKE]   error=", str(res.get("error", "unknown")))
+	var mismatch_any: Variant = res.get("mismatch", null)
+	if typeof(mismatch_any) == TYPE_DICTIONARY:
+		var m: Dictionary = mismatch_any
+		var tick: Variant = "?"
+		if m.has("t"):
+			tick = m.get("t")
+		elif m.has("at"):
+			tick = m.get("at")
+		if tick != "?":
+			print("[SMOKE]   tick=", tick)
+		if m.has("expected") or m.has("actual"):
+			print("[SMOKE]   expected=", m.get("expected", "?"), " got=", m.get("actual", "?"))
+		print("[SMOKE]   mismatch=", JSON.stringify(m))
+
+
+func _save_ci_replay_artifact(context: String, replay_path: String, res: Dictionary) -> String:
+	# Best-effort: write a replay+mismatch bundle into the CI workspace so the
+	# logs can point at a stable path (res:// is the repo checkout in CI).
+	# Never fails the test if artifact writing fails.
+	var ts: String = Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
+	var safe: String = _sanitize_filename(context)
+	var folder_res: String = "res://.ci_artifacts/replay_failures/%s_%s" % [ts, safe]
+	var folder_abs: String = ProjectSettings.globalize_path(folder_res)
+
+	var mk_ok: bool = DirAccess.make_dir_recursive_absolute(folder_abs) == OK
+	if not mk_ok:
+		print("[SMOKE] WARN failed to create artifact dir: ", folder_abs)
+		return ""
+
+	# Copy replay file.
+	if FileAccess.file_exists(replay_path):
+		var fin := FileAccess.open(replay_path, FileAccess.READ)
+		if fin != null:
+			var fout := FileAccess.open(folder_abs + "/replay.jsonl", FileAccess.WRITE)
+			if fout != null:
+				var n: int = int(fin.get_length())
+				fout.store_buffer(fin.get_buffer(n))
+			else:
+				print("[SMOKE] WARN failed to write replay.jsonl")
+		else:
+			print("[SMOKE] WARN failed to open replay for artifact copy")
+	else:
+		print("[SMOKE] WARN replay file missing; no artifact replay copy")
+
+	# Write mismatch.
+	var mismatch_any: Variant = res.get("mismatch", {})
+	var mismatch_out: Dictionary = {
+		"error": str(res.get("error", "unknown")),
+		"mismatch": mismatch_any if typeof(mismatch_any) == TYPE_DICTIONARY else {},
+		"replay_path": replay_path,
+	}
+	var fm := FileAccess.open(folder_abs + "/mismatch.json", FileAccess.WRITE)
+	if fm != null:
+		fm.store_string(JSON.stringify(mismatch_out, "\t"))
+	else:
+		print("[SMOKE] WARN failed to write mismatch.json")
+
+	return folder_abs
+
+
+func _sanitize_filename(s: String) -> String:
+	var out: String = ""
+	for i in range(s.length()):
+		var ch: String = s[i]
+		var ok: bool = (
+			(ch >= "a" and ch <= "z")
+			or (ch >= "A" and ch <= "Z")
+			or (ch >= "0" and ch <= "9")
+			or ch == "_"
+			or ch == "-"
+			or ch == "."
+		)
+		out += ch if ok else "_"
+	if out == "":
+		return "artifact"
+	return out
+
+
 func _write_replay_with_corrupted_first_tick_hash(src_path: String, dst_path: String) -> bool:
 	var fin := FileAccess.open(src_path, FileAccess.READ)
 	if fin == null:
@@ -843,6 +1044,25 @@ func _setup_world_for_replay_verify_test(w: DriftWorld, _header: Dictionary) -> 
 	w.set_prize_rng_seed(111)
 	w.set_spawn_rng_seed(222)
 	w.add_ship(1, Vector2(256, 256))
+
+
+func _setup_world_for_replay_hash_stable_test(w: DriftWorld, _header: Dictionary) -> void:
+	# Fixed ruleset + fixed map + fixed RNG seeds.
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if bool(rules_res.get("ok", false)):
+		w.apply_ruleset(rules_res.get("ruleset", {}))
+
+	# Minimal fixed map contract for simulation.
+	w.set_solid_tiles([])
+	w.set_door_tiles([])
+	w.add_boundary_tiles(64, 64)
+	w.set_map_dimensions(64, 64)
+	w.set_prize_rng_seed(111)
+	w.set_spawn_rng_seed(222)
+
+	# Two ships at deterministic positions.
+	w.add_ship(1, Vector2(256, 256))
+	w.add_ship(2, Vector2(320, 256))
 
 
 func _test_safe_zone_mechanics() -> void:

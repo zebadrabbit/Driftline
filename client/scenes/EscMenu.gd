@@ -1,5 +1,7 @@
 extends CanvasLayer
 
+signal save_replay_requested
+
 @export var menu_actions: PackedStringArray = [
 	"ui_escape_menu",
 ]
@@ -127,3 +129,7 @@ func _update_bindings_text() -> void:
 
 func _on_resume_pressed() -> void:
 	close()
+
+
+func _on_save_replay_pressed() -> void:
+	save_replay_requested.emit()

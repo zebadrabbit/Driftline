@@ -11,14 +11,17 @@ const DriftInput = preload("res://shared/drift_input.gd")
 const DriftReplayReader = preload("res://shared/replay/drift_replay_reader.gd")
 
 
-func verify(path: String, world, initial_setup: Callable) -> Dictionary:
+func verify(path: String, world, initial_setup: Callable, on_desync: Callable = Callable()) -> Dictionary:
 	var reader := DriftReplayReader.new()
 	var res: Dictionary = reader.load_jsonl(path)
 	if not bool(res.get("ok", false)):
-		return {
+		var out := {
 			"ok": false,
 			"error": "load failed: %s (line=%s)" % [str(res.get("error", "unknown")), str(res.get("line", "?"))],
 		}
+		if on_desync != null and on_desync.is_valid():
+			on_desync.call("replay_verifier_load_failed", {"path": String(path), "error": String(out.get("error", ""))})
+		return out
 
 	var header: Dictionary = res.get("header", {})
 	var ticks: Array = res.get("ticks", [])
@@ -31,22 +34,31 @@ func verify(path: String, world, initial_setup: Callable) -> Dictionary:
 
 	for rec_any in ticks:
 		if typeof(rec_any) != TYPE_DICTIONARY:
-			return {"ok": false, "error": "tick record not dict"}
+			var out := {"ok": false, "error": "tick record not dict"}
+			if on_desync != null and on_desync.is_valid():
+				on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": {}, "path": String(path)})
+			return out
 		var rec: Dictionary = rec_any
 		var t: int = int(rec.get("t", -1))
 		var expected_hash: int = int(rec.get("hash", 0))
 		var inputs_d_any: Variant = rec.get("inputs", {})
 		if typeof(inputs_d_any) != TYPE_DICTIONARY:
-			return {"ok": false, "error": "tick inputs not dict", "mismatch": {"t": t}}
+			var out := {"ok": false, "error": "tick inputs not dict", "mismatch": {"t": t}}
+			if on_desync != null and on_desync.is_valid():
+				on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+			return out
 		var inputs_d: Dictionary = inputs_d_any
 
 		# Replay contract: record tick BEFORE step; hash is computed AFTER step.
 		if int(world.tick) != t:
-			return {
+			var out := {
 				"ok": false,
 				"error": "tick mismatch",
 				"mismatch": {"at": t, "world_tick": int(world.tick)},
 			}
+			if on_desync != null and on_desync.is_valid():
+				on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+			return out
 
 		# Build deterministic input payload (DriftInput) keyed by int ship_id.
 		var inputs_by_id: Dictionary = {}
@@ -56,19 +68,25 @@ func verify(path: String, world, initial_setup: Callable) -> Dictionary:
 			var v: Variant = inputs_d.get(key_s)
 			var norm_res: Dictionary = _normalize_drift_input_variant(v, key_s)
 			if not bool(norm_res.get("ok", false)):
-				return {
+				var out := {
 					"ok": false,
 					"error": "invalid input payload",
 					"mismatch": {"t": t, "ship_id": int(sid), "field": key_s, "reason": str(norm_res.get("error", ""))},
 				}
+				if on_desync != null and on_desync.is_valid():
+					on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+				return out
 			var d_norm: Dictionary = norm_res.get("dict", {})
 			var di = DriftInput.from_dict(d_norm)
 			if di == null:
-				return {
+				var out := {
 					"ok": false,
 					"error": "invalid input payload",
 					"mismatch": {"t": t, "ship_id": int(sid), "reason": "from_dict returned null"},
 				}
+				if on_desync != null and on_desync.is_valid():
+					on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+				return out
 			inputs_by_id[int(sid)] = di
 
 		# Convert to sim command type for stepping.
@@ -84,19 +102,25 @@ func verify(path: String, world, initial_setup: Callable) -> Dictionary:
 		if actual_hash != expected_hash:
 			print("[REPLAY_VERIFY] hash mismatch t=", t, " expected=", expected_hash, " actual=", actual_hash)
 			_print_tiny_ship_dump(world)
-			return {
+			var out := {
 				"ok": false,
 				"error": "hash mismatch",
 				"mismatch": {"t": t, "expected": expected_hash, "actual": actual_hash},
 			}
+			if on_desync != null and on_desync.is_valid():
+				on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+			return out
 
 		# Optional contract alignment check: Option A should advance tick at end.
 		if int(world.tick) != (t + 1):
-			return {
+			var out := {
 				"ok": false,
 				"error": "post-step tick mismatch",
 				"mismatch": {"t": t, "expected_world_tick": t + 1, "world_tick": int(world.tick)},
 			}
+			if on_desync != null and on_desync.is_valid():
+				on_desync.call("replay_verifier_mismatch", {"error": String(out.get("error", "")), "mismatch": out.get("mismatch", {}), "path": String(path)})
+			return out
 
 	return {"ok": true}
 

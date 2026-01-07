@@ -21,6 +21,9 @@ const DriftMap = preload("res://shared/drift_map.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const DriftActions = preload("res://client/input/actions.gd")
+const ReplayRingBuffer = preload("res://client/replay/replay_ring_buffer.gd")
+const ReplayDumpWriter = preload("res://client/replay/replay_dump_writer.gd")
+const ReplayMeta = preload("res://client/replay/replay_meta.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
@@ -169,6 +172,12 @@ const SPAWN_POSITION: Vector2 = Vector2(512.0, 512.0)
 # input_history[tick] = input applied when stepping into that tick.
 var input_history: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
 
+# Client-only replay capture (debug/dev tooling).
+var _replay_ring: ReplayRingBuffer = null
+var _replay_ring_enabled: bool = false
+var _replay_toggle_keycode: int = 0
+var _replay_save_keycode: int = 0
+
 # Optional debugging: store last authoritative state per tick.
 var snapshot_history: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
 
@@ -209,6 +218,9 @@ func _ready() -> void:
 	# Make sure the overlay starts closed.
 	if esc_menu.has_method("close"):
 		esc_menu.call("close")
+	# Debug: allow saving replay ring from the ESC menu without pausing.
+	if esc_menu != null and esc_menu.has_signal("save_replay_requested"):
+		esc_menu.connect("save_replay_requested", Callable(self, "_on_esc_menu_save_replay_requested"))
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -236,6 +248,12 @@ func _ready() -> void:
 	# Input UX guard: core actions should continue to work while Shift is held (Shift is a modifier
 	# for abilities/afterburner, but should not cancel movement/fire bindings).
 	_ensure_actions_work_with_shift_held()
+
+	# Client-only replay ring buffer.
+	_replay_ring = ReplayRingBuffer.new(int(30 * DriftConstants.TICK_RATE), int(DriftConstants.TICK_RATE))
+	# Dev hotkeys (avoid hardcoded key constants).
+	_replay_toggle_keycode = int(OS.find_keycode_from_string("F9"))
+	_replay_save_keycode = int(OS.find_keycode_from_string("F10"))
 
 	if debug_probe_thrust_audio:
 		_ensure_debug_probe_action()
@@ -698,13 +716,22 @@ func _latest_tick_step() -> void:
 
 	var input_cmd: DriftTypes.DriftInputCmd = _collect_input_cmd()
 	var next_tick: int = world.tick + 1
+
+	# Record authoritative input command (pre-prediction mutations) for this tick.
+	if _replay_ring_enabled and _replay_ring != null:
+		var cmds_for_tick: Dictionary = {local_ship_id: input_cmd}
+		_replay_ring.push_tick(next_tick, _encode_input_cmds_sorted(cmds_for_tick))
+
 	input_history[next_tick] = input_cmd
 	_send_input_for_tick(next_tick, input_cmd)
 	latest_snapshot = world.step_tick({ local_ship_id: input_cmd })
 	_play_local_collision_sounds()
 
 	if DEBUG_NET and world.tick != next_tick:
-		print("[NET] local tick mismatch after step: intended=", next_tick, " actual=", world.tick)
+		on_desync_detected("local_tick_contract_violation", {
+			"intended_tick": int(next_tick),
+			"actual_tick": int(world.tick),
+		})
 
 
 func _play_local_collision_sounds() -> void:
@@ -835,6 +862,21 @@ func _unhandled_input(event: InputEvent) -> void:
 		_debug_probe_thrust_audio_now()
 		return
 
+	# Dev-only: replay ring controls.
+	if OS.is_debug_build() and event is InputEventKey:
+		var k: InputEventKey = event
+		if k.pressed and (not k.echo):
+			var code: int = int(k.physical_keycode) if int(k.physical_keycode) != 0 else int(k.keycode)
+			if _replay_toggle_keycode != 0 and code == _replay_toggle_keycode:
+				_replay_ring_enabled = not _replay_ring_enabled
+				print("[replay-ring] recording=", str(_replay_ring_enabled))
+				get_viewport().set_input_as_handled()
+				return
+			if _replay_save_keycode != 0 and code == _replay_save_keycode:
+				_save_replay_ring_manual()
+				get_viewport().set_input_as_handled()
+				return
+
 	if not debug_log_input_events:
 		return
 
@@ -866,6 +908,130 @@ func _unhandled_input(event: InputEvent) -> void:
 		parts.append("joy_button=%d pressed=%s" % [int(jb.button_index), str(jb.pressed)])
 
 	print("[input] ", " | ".join(parts))
+
+
+func _encode_input_cmds_sorted(cmds_by_ship_id: Dictionary) -> Array:
+	# Deterministic encoding: array of [ship_id, cmd_payload] pairs sorted by ship_id.
+	# cmd_payload is an array of primitives in a stable field order.
+	var ship_ids: Array = cmds_by_ship_id.keys()
+	ship_ids.sort()
+	var out: Array = []
+	out.resize(ship_ids.size())
+	for i in range(ship_ids.size()):
+		var sid: int = int(ship_ids[i])
+		var cmd: DriftTypes.DriftInputCmd = cmds_by_ship_id.get(sid)
+		out[i] = [sid, _encode_input_cmd_payload(cmd)]
+	return out
+
+
+func _encode_input_cmd_payload(cmd: DriftTypes.DriftInputCmd) -> Array:
+	if cmd == null:
+		return [0.0, 0.0, false, false, false, false, false, false, false]
+	return [
+		float(cmd.thrust),
+		float(cmd.rotation),
+		bool(cmd.fire_primary),
+		bool(cmd.fire_secondary),
+		bool(cmd.modifier),
+		bool(cmd.stealth_btn),
+		bool(cmd.cloak_btn),
+		bool(cmd.xradar_btn),
+		bool(cmd.antiwarp_btn),
+	]
+
+
+func _save_replay_ring_manual() -> void:
+	if _replay_ring == null:
+		push_warning("[replay-ring] ring is null")
+		return
+	var records: Array = _replay_ring.snapshot()
+	if records.is_empty():
+		print("[replay-ring] No replay buffer data")
+		var hud0 := get_node_or_null("HUD")
+		if hud0 != null and hud0.has_method("show_help_interrupt"):
+			hud0.call("show_help_interrupt", "No replay buffer data", 2.5)
+		return
+	var stamp := _timestamp_for_path()
+	var dir_path: String = "user://replays/manual/%s" % stamp
+	var file_path: String = "%s/replay.jsonl" % dir_path
+
+	var abs_dir: String = ProjectSettings.globalize_path(dir_path)
+	DirAccess.make_dir_recursive_absolute(abs_dir)
+
+	var f: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
+	if f == null:
+		push_error("[replay-ring] failed to open %s" % file_path)
+		return
+	for rec_any in records:
+		if typeof(rec_any) != TYPE_DICTIONARY:
+			continue
+		var rec: Dictionary = rec_any
+		var t: int = int(rec.get("t", 0))
+		var inputs: Variant = rec.get("inputs", [])
+		# Stable JSONL line: fixed key order (t, inputs).
+		var inputs_json: String = JSON.stringify(inputs)
+		f.store_string("{\"t\":%d,\"inputs\":%s}\n" % [t, inputs_json])
+	f.flush()
+	f.close()
+	print("[replay-ring] saved ", file_path, " (ticks=", str(records.size()), ")")
+	var hud := get_node_or_null("HUD")
+	if hud != null and hud.has_method("show_help_interrupt"):
+		hud.call("show_help_interrupt", "Saved last 30s replay: " + dir_path, 3.0)
+
+
+func _on_esc_menu_save_replay_requested() -> void:
+	_save_replay_ring_manual()
+
+
+func on_desync_detected(reason: String, detail: Dictionary) -> void:
+	# Central desync handler:
+	# - snapshot ring
+	# - build meta
+	# - write bugreport bundle
+	# - log one concise line
+	# - optionally show HUD toast
+	var records: Array = []
+	if _replay_ring != null:
+		records = _replay_ring.snapshot()
+
+	var net_state: Dictionary = {
+		"server_addr": "%s:%d" % [server_address, int(SERVER_PORT)],
+		"map_path": String(CLIENT_MAP_PATH),
+		"map_version": int(client_map_version),
+		# Avoid embedding raw bytes in JSON.
+		"map_checksum": DriftMap.bytes_to_hex(client_map_checksum) if client_map_checksum.size() > 0 else "",
+	}
+
+	var meta: Dictionary = ReplayMeta.build_replay_meta(world, net_state)
+	var mismatch: Dictionary = {
+		"reason": String(reason),
+		"detail": detail if detail != null else {},
+	}
+
+	var folder: String = ReplayDumpWriter.write_bugreport(String(reason), meta, records, mismatch)
+	if folder == "":
+		print("[DESYNC] Failed to save bug report replay")
+		return
+
+	print("[DESYNC] Saved bug report replay: ", folder)
+	var hud := get_node_or_null("HUD")
+	if hud != null and hud.has_method("show_help_interrupt"):
+		hud.call("show_help_interrupt", "Saved bug report replay: " + folder, 3.0)
+
+
+func _timestamp_for_path() -> String:
+	# Windows-safe timestamp: YYYYMMDD_HHMMSS_mmm
+	var d: Dictionary = Time.get_datetime_dict_from_system()
+	var ms: int = int(Time.get_ticks_msec() % 1000)
+	return "%04d%02d%02d_%02d%02d%02d_%03d" % [
+		int(d.get("year", 0)),
+		int(d.get("month", 0)),
+		int(d.get("day", 0)),
+		int(d.get("hour", 0)),
+		int(d.get("minute", 0)),
+		int(d.get("second", 0)),
+		ms,
+	]
 
 
 func _draw() -> void:
@@ -1673,6 +1839,10 @@ func _poll_network_packets() -> void:
 				var server_map_version: int = int(w.get("map_version", 0))
 				var server_checksum: PackedByteArray = w.get("map_checksum", PackedByteArray())
 				if server_map_path != "" and server_map_path != CLIENT_MAP_PATH:
+					on_desync_detected("handshake_map_path_mismatch", {
+						"server_map_path": server_map_path,
+						"client_map_path": String(CLIENT_MAP_PATH),
+					})
 					push_error("Map path mismatch. server='" + server_map_path + "' client='" + CLIENT_MAP_PATH + "'")
 					connection_status_message = "Map mismatch with server. Load the same map path." 
 					show_connect_ui = true
@@ -1684,6 +1854,10 @@ func _poll_network_packets() -> void:
 						enet_peer = null
 					return
 				if server_map_version != 0 and client_map_version != 0 and server_map_version != client_map_version:
+					on_desync_detected("handshake_map_version_mismatch", {
+						"server_map_version": int(server_map_version),
+						"client_map_version": int(client_map_version),
+					})
 					push_error("Map version mismatch. server=" + str(server_map_version) + " client=" + str(client_map_version))
 					connection_status_message = "Map mismatch with server. Map version differs." 
 					show_connect_ui = true
@@ -1697,6 +1871,10 @@ func _poll_network_packets() -> void:
 				if server_checksum.size() > 0 and client_map_checksum.size() > 0 and server_checksum != client_map_checksum:
 					var server_hex := DriftMap.bytes_to_hex(server_checksum)
 					var client_hex := DriftMap.bytes_to_hex(client_map_checksum)
+					on_desync_detected("handshake_map_checksum_mismatch", {
+						"server_map_checksum": server_hex,
+						"client_map_checksum": client_hex,
+					})
 					push_error("Map checksum mismatch. server=" + server_hex + " client=" + client_hex)
 					connection_status_message = "Map mismatch with server. Load the same map JSON." 
 					show_connect_ui = true
@@ -1715,6 +1893,10 @@ func _poll_network_packets() -> void:
 					var json := JSON.new()
 					var parse_err := json.parse(ruleset_json)
 					if parse_err != OK or typeof(json.data) != TYPE_DICTIONARY:
+						on_desync_detected("handshake_ruleset_parse_failed", {
+							"parse_err": int(parse_err),
+							"ruleset_json_len": int(ruleset_json.length()),
+						})
 						push_error("Ruleset JSON parse failed from welcome packet")
 						connection_status_message = "Ruleset mismatch with server."
 						show_connect_ui = true
@@ -1728,6 +1910,9 @@ func _poll_network_packets() -> void:
 					var root: Dictionary = json.data
 					var validated := DriftValidate.validate_ruleset(root)
 					if not bool(validated.get("ok", false)):
+						on_desync_detected("handshake_ruleset_validation_failed", {
+							"error": String(validated.get("error", "")),
+						})
 						push_error("Ruleset validation failed from welcome packet")
 						connection_status_message = "Ruleset mismatch with server."
 						show_connect_ui = true
@@ -1785,6 +1970,9 @@ func _poll_network_packets() -> void:
 		if pkt_type == DriftNet.PKT_SNAPSHOT:
 			var snap_dict: Dictionary = DriftNet.unpack_snapshot_packet(bytes)
 			if snap_dict.is_empty():
+				on_desync_detected("snapshot_contract_violation", {
+					"packet_len": int(bytes.size()),
+				})
 				continue
 
 			var snap_tick: int = snap_dict["tick"]
@@ -2065,7 +2253,10 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 
 	# After replay, world.tick should equal current_tick again.
 	if DEBUG_NET and world.tick != current_tick:
-		print("[NET] replay tick mismatch: expected=", current_tick, " actual=", world.tick)
+		on_desync_detected("replay_tick_contract_violation", {
+			"expected_tick": int(current_tick),
+			"actual_tick": int(world.tick),
+		})
 
 	# Update the rendered snapshot to match the post-replay predicted world.
 	if replay_snapshot.ships.size() > 0:

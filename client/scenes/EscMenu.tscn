@@ -50,7 +50,11 @@ fit_content = true
 bbcode_enabled = false
 scroll_active = false
 
+[node name="SaveReplay" type="Button" parent="Root/MenuPanel/VBox"]
+text = "Save last 30s replay"
+
 [node name="Resume" type="Button" parent="Root/MenuPanel/VBox"]
 text = "Resume"
 
+[connection signal="pressed" from="Root/MenuPanel/VBox/SaveReplay" to="." method="_on_save_replay_pressed"]
 [connection signal="pressed" from="Root/MenuPanel/VBox/Resume" to="." method="_on_resume_pressed"]
