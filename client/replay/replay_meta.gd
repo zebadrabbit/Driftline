@@ -115,8 +115,68 @@ static func _get_game_version() -> String:
 
 
 static func _get_git_commit() -> String:
-	# If the build system injects a const or ProjectSettings key later, read it here.
-	# For now, keep it explicit.
+	# Best-effort git commit detection.
+	# - Prefer build-system injected settings (if present)
+	# - Try environment variable (CI)
+	# - Try reading res://.git/HEAD and resolving ref
+	# - Fall back to packed-refs
+	#
+	# Must remain client-only and best-effort.
+	if ProjectSettings.has_setting("application/config/git_commit"):
+		var s: String = String(ProjectSettings.get_setting("application/config/git_commit", "")).strip_edges()
+		if s != "":
+			return s
+	var env: String = String(OS.get_environment("GIT_COMMIT")).strip_edges()
+	if env != "":
+		return env
+	var env2: String = String(OS.get_environment("GITHUB_SHA")).strip_edges()
+	if env2 != "":
+		return env2
+
+	# Repo checkout (editor/CI). In exported builds, res:// is typically read-only/pck.
+	var head_path: String = "res://.git/HEAD"
+	if not FileAccess.file_exists(head_path):
+		return "unknown"
+	var f: FileAccess = FileAccess.open(head_path, FileAccess.READ)
+	if f == null:
+		return "unknown"
+	var head: String = f.get_as_text().strip_edges()
+	f.close()
+	if head == "":
+		return "unknown"
+	# Detached head: HEAD contains commit.
+	if not head.begins_with("ref:"):
+		return head
+	var ref: String = head.replace("ref:", "").strip_edges()
+	if ref == "":
+		return "unknown"
+	# Resolve loose ref.
+	var ref_path: String = "res://.git/" + ref
+	if FileAccess.file_exists(ref_path):
+		var rf: FileAccess = FileAccess.open(ref_path, FileAccess.READ)
+		if rf != null:
+			var sha: String = rf.get_as_text().strip_edges()
+			rf.close()
+			if sha != "":
+				return sha
+	# Fall back to packed-refs.
+	var packed_path: String = "res://.git/packed-refs"
+	if not FileAccess.file_exists(packed_path):
+		return "unknown"
+	var pf: FileAccess = FileAccess.open(packed_path, FileAccess.READ)
+	if pf == null:
+		return "unknown"
+	while not pf.eof_reached():
+		var line: String = pf.get_line().strip_edges()
+		if line == "" or line.begins_with("#") or line.begins_with("^"):
+			continue
+		var parts := line.split(" ", false)
+		if parts.size() >= 2 and String(parts[1]).strip_edges() == ref:
+			var sha2: String = String(parts[0]).strip_edges()
+			pf.close()
+			if sha2 != "":
+				return sha2
+	pf.close()
 	return "unknown"
 
 

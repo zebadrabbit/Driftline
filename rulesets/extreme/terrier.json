@@ -1,0 +1,108 @@
+{
+	"abilities": {
+		"AntiWarpEnergy": 100,
+		"AntiWarpStatus": 1,
+		"CloakEnergy": 100,
+		"CloakStatus": 0,
+		"DisableFastShooting": 0,
+		"ShieldsTime": 4000,
+		"StealthEnergy": 333,
+		"StealthStatus": 1,
+		"SuperTime": 6000,
+		"XRadarEnergy": 250,
+		"XRadarStatus": 1
+	},
+	"economy": {
+		"AttachBounty": 12,
+		"InitialBounty": 0,
+		"PrizeShareLimit": 100
+	},
+	"energy": {
+		"AfterburnerEnergy": 1200,
+		"BombFireEnergy": 300,
+		"BombFireEnergyUpgrade": 50,
+		"BulletFireEnergy": 20,
+		"InitialEnergy": 1000,
+		"InitialRecharge": 400,
+		"LandmineFireEnergy": 300,
+		"LandmineFireEnergyUpgrade": 150,
+		"MaximumEnergy": 1700,
+		"MaximumRecharge": 1150,
+		"MultiFireEnergy": 30,
+		"UpgradeEnergy": 100,
+		"UpgradeRecharge": 166
+	},
+	"extra": {
+
+	},
+	"misc": {
+		"DoubleBarrel": 1,
+		"InitialBrick": 0,
+		"InitialBurst": 0,
+		"InitialDecoy": 0,
+		"InitialPortal": 0,
+		"InitialRepel": 0,
+		"InitialThor": 0,
+		"MultiFireAngle": 500,
+		"MultiFireDelay": 50
+	},
+	"movement": {
+		"BurstSpeed": 3000,
+		"DamageFactor": 30,
+		"Gravity": 1500,
+		"GravityTopSpeed": 100,
+		"InitialRotation": 200,
+		"InitialSpeed": 2010,
+		"InitialThrust": 15,
+		"MaximumRotation": 230,
+		"MaximumSpeed": 3250,
+		"MaximumThrust": 17,
+		"Radius": 0,
+		"UpgradeRotation": 40,
+		"UpgradeSpeed": 250,
+		"UpgradeThrust": 2
+	},
+	"sensors": {
+		"SeeBombLevel": 0,
+		"SeeMines": 0
+	},
+	"ship": "Terrier",
+	"soccer": {
+		"SoccerBallFriction": 12,
+		"SoccerBallProximity": 64,
+		"SoccerBallSpeed": 2500,
+		"SoccerThrowTime": 1200
+	},
+	"turret": {
+		"TurretLimit": 5,
+		"TurretSpeedPenalty": 125,
+		"TurretThrustPenalty": 1
+	},
+	"weapons": {
+		"BombBounceCount": 0,
+		"BombFireDelay": 150,
+		"BombSpeed": 2000,
+		"BombThrust": 400,
+		"BrickMax": 3,
+		"BulletFireDelay": 30,
+		"BulletSpeed": 2000,
+		"BurstMax": 3,
+		"BurstShrapnel": 24,
+		"DecoyMax": 3,
+		"EmpBomb": 0,
+		"InitialBombs": 0,
+		"InitialGuns": 2,
+		"InitialRocket": 0,
+		"LandmineFireDelay": 125,
+		"MaxBombs": 2,
+		"MaxGuns": 3,
+		"MaxMines": 5,
+		"PortalMax": 3,
+		"RepelMax": 3,
+		"RocketMax": 3,
+		"RocketTime": 1000,
+		"ShrapnelMax": 8,
+		"ShrapnelRate": 2,
+		"ThorMax": 3
+	}
+}

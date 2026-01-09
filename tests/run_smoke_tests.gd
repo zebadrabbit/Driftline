@@ -13,8 +13,13 @@ const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftWorld = preload("res://shared/drift_world.gd")
 const DriftTypes = preload("res://shared/drift_types.gd")
 const DriftInput = preload("res://shared/drift_input.gd")
+const DriftClassicRuleset = preload("res://shared/drift_classic_ruleset.gd")
 const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
-const DriftReplayVerifier = preload("res://shared/replay/drift_replay_verifier.gd")
+# NOTE: DriftReplayVerifier is a class_name; avoid shadowing it with a preload.
+const DriftReplayVerifierScript = preload("res://shared/replay/drift_replay_verifier.gd")
+const ScriptedReplayInputs = preload("res://tests/helpers/scripted_replay_inputs.gd")
+const BugReportWriter = preload("res://client/replay/bug_report_writer.gd")
+const ReplayMeta = preload("res://client/replay/replay_meta.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
 const SettingsManager = preload("res://client/settings/settings_manager.gd")
@@ -34,8 +39,14 @@ func _initialize() -> void:
 	_test_hud_name_and_bounty_present()
 	_test_welcome_includes_ruleset_payload()
 	_test_energy_deterministic_recharge_and_costs()
+	_test_energy_spend_and_recharge()
+	_test_classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend()
 	_test_abilities_continuous_drain_and_auto_disable()
 	_test_safe_zone_mechanics()
+	_test_safe_zone_blocks_actions()
+	_test_safe_zone_blocks_damage()
+	_test_safe_zone_fire_cancels_velocity()
+	_test_spawn_prefers_safe_zone()
 	_test_reverse_thrust_does_not_hard_stop_outside_safe_zone()
 	_test_energy_fire_costs_and_damage_safe_zone()
 	_test_safe_zone_brake_persistent()
@@ -55,14 +66,550 @@ func _initialize() -> void:
 	_test_death_safe_zone_damage_impossible()
 	_test_determinism_checksum_fixed_input()
 	_test_world_hash_matches_across_worlds()
+	_test_deterministic_collision_order()
 	_test_replay_recorder_writes_jsonl()
 	_test_replay_verifier_replays_and_hashes()
 	_test_replay_verifier_detects_mismatch()
 	_test_replay_deterministic_hash_stable()
+	if _should_run_replay_hash_soak():
+		_test_replay_deterministic_hash_stable_soak()
+	_test_weaponized_deterministic_replay_scripted_inputs()
+	_test_deterministic_replay_bullets()
+	_test_bugreport_writes_artifact()
+	_test_bugreport_cleanup_after_zip()
 	_test_prizes_spawn_walkable()
 	_test_ship_sprite_atlas_mapping()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_bugreport_cleanup_after_zip() -> void:
+	_ran += 1
+	# Validate bugreport retention policy options:
+	# 1) cleanup flag false -> folder exists after (attempted) zip
+	# 2) cleanup flag true + zip succeeds -> folder removed
+	# 3) cleanup flag true + zip fails -> folder remains
+	#
+	# This runs headless and uses a deterministic forced zip failure for case 3.
+	var world := DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.add_ship(1, Vector2(64, 64))
+
+	var records: Array = [
+		{"t": 0, "inputs": [[1, {"thrust": 0, "turn": 0, "fire": false}]]},
+		{"t": 1, "inputs": [[1, {"thrust": 1, "turn": 0, "fire": true}]]},
+	]
+	var meta: Dictionary = ReplayMeta.build_replay_meta(world, {"map_path": "res://maps/default.json", "ruleset_hash": 0})
+	meta["bugreport_trigger"] = "smoke_test"
+	var mismatch: Dictionary = {"reason": "smoke_bugreport_cleanup", "detail": {"note": "test"}}
+
+	# Use user:// to avoid relying on res:// writability.
+	var root: String = "user://.ci_artifacts/bugreports_smoke_cleanup"
+
+	# Case 1: cleanup false -> folder exists after zip.
+	var res1: Dictionary = BugReportWriter.save_bug_report("smoke_cleanup_false", meta, records, mismatch, {
+		"root": root,
+		"fallback_root": root,
+		"zip": true,
+		"bugreport_cleanup_after_zip": false,
+	})
+	if not bool(res1.get("ok", false)):
+		_fail("bugreport_cleanup_after_zip (case1 save failed: %s)" % String(res1.get("error", "unknown")))
+		return
+	var folder1: String = String(res1.get("folder", ""))
+	var zip1: String = String(res1.get("zip", ""))
+	if folder1 == "":
+		_fail("bugreport_cleanup_after_zip (case1 missing folder)")
+		return
+	var folder1_abs: String = ProjectSettings.globalize_path(folder1)
+	if not DirAccess.dir_exists_absolute(folder1_abs):
+		_fail("bugreport_cleanup_after_zip (case1 folder missing after save)")
+		return
+	if zip1 == "" or not FileAccess.file_exists(zip1):
+		# Zip should succeed in headless editor/CI; if it doesn't, fail loudly so we notice.
+		_fail("bugreport_cleanup_after_zip (case1 zip missing; zip may be unavailable in this environment)")
+		return
+
+	# Cleanup case1 artifacts (best-effort).
+	BugReportWriter._delete_dir_recursive_absolute(folder1_abs)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(zip1))
+
+	# Case 2: cleanup true + zip succeeds -> folder removed.
+	var res2: Dictionary = BugReportWriter.save_bug_report("smoke_cleanup_true", meta, records, mismatch, {
+		"root": root,
+		"fallback_root": root,
+		"zip": true,
+		"bugreport_cleanup_after_zip": true,
+	})
+	if not bool(res2.get("ok", false)):
+		_fail("bugreport_cleanup_after_zip (case2 save failed: %s)" % String(res2.get("error", "unknown")))
+		return
+	var folder2: String = String(res2.get("folder", ""))
+	var zip2: String = String(res2.get("zip", ""))
+	if folder2 == "":
+		_fail("bugreport_cleanup_after_zip (case2 missing folder)")
+		return
+	if zip2 == "" or not FileAccess.file_exists(zip2):
+		_fail("bugreport_cleanup_after_zip (case2 zip missing; cannot validate cleanup-after-zip)")
+		return
+	var folder2_abs: String = ProjectSettings.globalize_path(folder2)
+	if DirAccess.dir_exists_absolute(folder2_abs):
+		# If deletion fails, writer should keep folder; this means cleanup didn't happen.
+		_fail("bugreport_cleanup_after_zip (case2 expected folder deleted, but it still exists)")
+		return
+
+	# Cleanup case2 zip (best-effort).
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(zip2))
+
+	# Case 3: cleanup true but zip fails -> folder remains.
+	var res3: Dictionary = BugReportWriter.save_bug_report("smoke_cleanup_zipfail", meta, records, mismatch, {
+		"root": root,
+		"fallback_root": root,
+		"zip": true,
+		"bugreport_cleanup_after_zip": true,
+		"zip_force_fail": true,
+	})
+	if not bool(res3.get("ok", false)):
+		_fail("bugreport_cleanup_after_zip (case3 save failed: %s)" % String(res3.get("error", "unknown")))
+		return
+	var folder3: String = String(res3.get("folder", ""))
+	var zip3: String = String(res3.get("zip", ""))
+	if folder3 == "":
+		_fail("bugreport_cleanup_after_zip (case3 missing folder)")
+		return
+	if zip3 != "":
+		_fail("bugreport_cleanup_after_zip (case3 expected no zip, got %s)" % zip3)
+		return
+	var folder3_abs: String = ProjectSettings.globalize_path(folder3)
+	if not DirAccess.dir_exists_absolute(folder3_abs):
+		_fail("bugreport_cleanup_after_zip (case3 expected folder to remain on zip failure)")
+		return
+
+	# Cleanup case3 artifacts (best-effort).
+	BugReportWriter._delete_dir_recursive_absolute(folder3_abs)
+
+	_pass("bugreport_cleanup_after_zip")
+
+
+func _should_run_replay_hash_soak() -> bool:
+	# Opt-in only: the soak test is intentionally longer.
+	# Enable in CI/dev via env var:
+	#   DRIFTLINE_SMOKE_SOAK_REPLAY_HASH=1
+	var v: String = String(OS.get_environment("DRIFTLINE_SMOKE_SOAK_REPLAY_HASH"))
+	v = v.strip_edges().to_lower()
+	return v == "1" or v == "true" or v == "yes" or v == "on"
+
+
+func _test_weaponized_deterministic_replay_scripted_inputs() -> void:
+	_ran += 1
+	# CI-friendly deterministic replay test:
+	# 1) boot minimal world
+	# 2) run scripted movement + firing
+	# 3) record replay
+	# 4) re-run same script and assert per-tick hashes match
+	# On mismatch: dump artifact bundle into res://.ci_artifacts/...
+	var test_name: String = "weaponized_deterministic_replay"
+	var path_a := "user://replays/%s_a.jsonl" % test_name
+	var path_b := "user://replays/%s_b.jsonl" % test_name
+	var setup_world := Callable(self, "_setup_world_for_weaponized_deterministic_replay")
+	var ticks: int = 90 # Keep runtime short.
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path_a):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path_a))
+	if FileAccess.file_exists(path_b):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path_b))
+
+	var res_a: Dictionary = _record_scripted_replay(path_a, ticks, setup_world)
+	if not bool(res_a.get("ok", false)):
+		_fail("%s (record A failed: %s)" % [test_name, str(res_a.get("error", "unknown"))])
+		return
+	var res_b: Dictionary = _record_scripted_replay(path_b, ticks, setup_world)
+	if not bool(res_b.get("ok", false)):
+		_fail("%s (record B failed: %s)" % [test_name, str(res_b.get("error", "unknown"))])
+		return
+
+	var hashes_a: Array = res_a.get("hashes", [])
+	var hashes_b: Array = res_b.get("hashes", [])
+	if hashes_a.size() != hashes_b.size():
+		var summary := {
+			"error": "hash_count_mismatch",
+			"expected_count": hashes_a.size(),
+			"actual_count": hashes_b.size(),
+			"final_expected": int(res_a.get("final_hash", 0)),
+			"final_actual": int(res_b.get("final_hash", 0)),
+		}
+		_save_ci_replay_pair_artifact(test_name, path_a, path_b, summary)
+		_fail("%s (hash count mismatch)" % test_name)
+		return
+
+	for i in range(hashes_a.size()):
+		if int(hashes_a[i]) != int(hashes_b[i]):
+			var summary2 := {
+				"error": "hash_mismatch",
+				"tick": i,
+				"expected": int(hashes_a[i]),
+				"actual": int(hashes_b[i]),
+				"final_expected": int(res_a.get("final_hash", 0)),
+				"final_actual": int(res_b.get("final_hash", 0)),
+			}
+			_save_ci_replay_pair_artifact(test_name, path_a, path_b, summary2)
+			_fail("%s (hash mismatch at t=%d)" % [test_name, i])
+			return
+
+	# Also assert that the recorded replays verify cleanly (best-effort artifacts on failure).
+	var verifier := DriftReplayVerifier.new()
+	var wplay_a := DriftWorld.new()
+	var verify_a: Dictionary = verifier.verify(path_a, wplay_a, setup_world, Callable(), {
+		"enable_artifacts": true,
+		"artifact_root": "res://.ci_artifacts/weaponized_replay_verify",
+		"artifact_name": test_name + "_verify_A",
+	})
+	if not bool(verify_a.get("ok", false)):
+		_fail("%s (verify A failed: %s)" % [test_name, str(verify_a.get("error", "unknown"))])
+		return
+
+	var wplay_b := DriftWorld.new()
+	var verify_b: Dictionary = verifier.verify(path_b, wplay_b, setup_world, Callable(), {
+		"enable_artifacts": true,
+		"artifact_root": "res://.ci_artifacts/weaponized_replay_verify",
+		"artifact_name": test_name + "_verify_B",
+	})
+	if not bool(verify_b.get("ok", false)):
+		_fail("%s (verify B failed: %s)" % [test_name, str(verify_b.get("error", "unknown"))])
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path_a))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path_b))
+	_pass("weaponized_deterministic_replay_scripted_inputs")
+
+
+func _setup_world_for_weaponized_deterministic_replay(w: DriftWorld, _header: Dictionary) -> void:
+	# Minimal deterministic world config.
+	w.set_solid_tiles([])
+	w.set_door_tiles([])
+	w.add_boundary_tiles(64, 64)
+	w.set_map_dimensions(64, 64)
+	w.set_prize_rng_seed(111)
+	w.set_spawn_rng_seed(222)
+
+	# Make firing deterministic and likely.
+	w.bullet_energy_cost = 0
+	w.bullet_cooldown_ticks = 1
+	w.bullet_speed = 900.0
+	w.bullet_lifetime_ticks = 60
+	w.bullet_damage = 1
+	w.bullet_knock_impulse = 0.0
+
+	# Two ships at deterministic positions.
+	w.add_ship(1, Vector2(256, 256))
+	w.add_ship(2, Vector2(320, 256))
+	for sid in [1, 2]:
+		if w.ships.has(sid):
+			var s: DriftTypes.DriftShipState = w.ships[sid]
+			s.energy_max = 100
+			s.energy_current = 100
+			s.energy_recharge_rate_per_sec = 0
+			s.energy_recharge_delay_ticks = 0
+			s.energy_recharge_wait_ticks = 0
+			s.energy_recharge_fp_accum = 0
+			s.energy_drain_fp_accum = 0
+			s.energy = s.energy_current
+			s.next_bullet_tick = 0
+
+
+func _record_scripted_replay(path: String, ticks: int, setup_world: Callable) -> Dictionary:
+	var w := DriftWorld.new()
+	setup_world.call(w, {})
+
+	var recorder := DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "smoke_weaponized",
+		"map_hash": 0,
+		"notes": "smoke: weaponized deterministic replay",
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		return {"ok": false, "error": "failed to open recorder"}
+
+	var hashes: Array = []
+	for t in range(int(ticks)):
+		var inputs_by_id: Dictionary = ScriptedReplayInputs.inputs_for_tick(int(t))
+		var cmds: Dictionary = {}
+		# Keep mapping aligned with DriftReplayVerifier._cmd_from_drift_input.
+		for sid in inputs_by_id.keys():
+			var di: DriftInput = inputs_by_id.get(int(sid))
+			cmds[int(sid)] = DriftTypes.DriftInputCmd.new(
+				float(di.thrust),
+				float(di.turn),
+				bool(di.fire),
+				bool(di.bomb),
+				bool(di.afterburner),
+				bool(di.ability1),
+				false,
+				false,
+				false
+			)
+		var t_before: int = int(w.tick)
+		w.step_tick(cmds, false, 0)
+		var h: int = int(w.compute_world_hash())
+		hashes.append(h)
+		recorder.record_tick(t_before, inputs_by_id, h)
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		return {"ok": false, "error": "replay file missing"}
+	return {"ok": true, "hashes": hashes, "final_hash": int(hashes[-1]) if hashes.size() > 0 else int(w.compute_world_hash())}
+
+
+func _save_ci_replay_pair_artifact(context: String, replay_path_a: String, replay_path_b: String, summary: Dictionary) -> String:
+	# Best-effort artifact bundle containing both replays + summary.
+	var ts: String = Time.get_datetime_string_from_system().replace(":", "-").replace(" ", "_")
+	var safe: String = _sanitize_filename(context)
+	var folder_res: String = "res://.ci_artifacts/" + safe + "/" + ts
+	var folder_abs: String = ProjectSettings.globalize_path(folder_res)
+
+	if DirAccess.make_dir_recursive_absolute(folder_abs) != OK:
+		print("[SMOKE] WARN failed to create artifact dir: ", folder_abs)
+		return ""
+
+	_copy_file_best_effort(replay_path_a, folder_abs + "/replay_a.jsonl")
+	_copy_file_best_effort(replay_path_b, folder_abs + "/replay_b.jsonl")
+
+	var fs := FileAccess.open(folder_abs + "/summary.json", FileAccess.WRITE)
+	if fs != null:
+		fs.store_string(JSON.stringify(summary, "\t"))
+	else:
+		print("[SMOKE] WARN failed to write summary.json")
+
+	print("[SMOKE] wrote artifact: ", folder_abs)
+	return folder_abs
+
+
+func _copy_file_best_effort(src: String, dst_abs: String) -> void:
+	if not FileAccess.file_exists(src):
+		print("[SMOKE] WARN missing file to copy: ", src)
+		return
+	var fin := FileAccess.open(src, FileAccess.READ)
+	if fin == null:
+		print("[SMOKE] WARN failed to open file to copy: ", src)
+		return
+	var fout := FileAccess.open(dst_abs, FileAccess.WRITE)
+	if fout == null:
+		print("[SMOKE] WARN failed to open destination: ", dst_abs)
+		return
+	fout.store_buffer(fin.get_buffer(int(fin.get_length())))
+
+
+func _test_bugreport_writes_artifact() -> void:
+	_ran += 1
+	# Headless/dev validation: create a bugreport artifact and ensure the
+	# file structure exists. Zip is best-effort and not required here.
+	var world := DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.add_ship(1, Vector2(64, 64))
+
+	var records: Array = [
+		{"t": 0, "inputs": [[1, {"thrust": 0, "turn": 0, "fire": false}]]},
+		{"t": 1, "inputs": [[1, {"thrust": 1, "turn": 0, "fire": true}]]},
+	]
+	var meta: Dictionary = ReplayMeta.build_replay_meta(world, {"map_path": "res://maps/default.json", "ruleset_hash": 0})
+	meta["bugreport_trigger"] = "smoke_test"
+	var mismatch: Dictionary = {"reason": "smoke_bugreport", "detail": {"note": "test"}}
+
+	var res: Dictionary = BugReportWriter.save_bug_report("smoke_bugreport", meta, records, mismatch, {
+		"root": "res://.ci_artifacts/bugreports_smoke",
+		"fallback_root": "user://.ci_artifacts/bugreports_smoke",
+		"zip": false,
+	})
+	if not bool(res.get("ok", false)):
+		_fail("bugreport_writes_artifact (save failed: %s)" % String(res.get("error", "unknown")))
+		return
+	var folder: String = String(res.get("folder", ""))
+	if folder == "":
+		_fail("bugreport_writes_artifact (missing folder)")
+		return
+	var abs: String = ProjectSettings.globalize_path(folder)
+	var ok_meta: bool = FileAccess.file_exists(abs + "/meta.json")
+	var ok_mismatch: bool = FileAccess.file_exists(abs + "/mismatch.json")
+	var ok_replay: bool = FileAccess.file_exists(abs + "/replay.jsonl")
+	if not ok_meta or not ok_mismatch or not ok_replay:
+		_fail("bugreport_writes_artifact (missing files)")
+		return
+	_pass("bugreport_writes_artifact")
+
+
+func _test_energy_spend_and_recharge() -> void:
+	_ran += 1
+	# Minimal energy semantics:
+	# - firing spends energy (all-or-nothing)
+	# - energy never goes negative
+	# - recharge only starts after delay
+	var world := DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(32, 32)
+	world.set_map_dimensions(32, 32)
+
+	world.bullet_energy_cost = 20
+	world.bullet_cooldown_ticks = 0
+
+	world.add_ship(1, Vector2(128, 128))
+	if not world.ships.has(1):
+		_fail("energy_spend_and_recharge (ship missing)")
+		return
+	var s: DriftTypes.DriftShipState = world.ships[1]
+	# Deterministic per-ship energy tuning.
+	s.energy_max = 100
+	s.energy_current = 40
+	s.energy_recharge_rate_per_sec = 60 # 1 point/tick at 60hz
+	s.energy_recharge_delay_ticks = 10
+	# Avoid pre-fire recharge during this tick (energy stepping runs before firing).
+	s.energy_recharge_wait_ticks = 1
+	s.energy_recharge_fp_accum = 0
+	s.energy_drain_fp_accum = 0
+	s.energy = s.energy_current
+	s.next_bullet_tick = 0
+
+	var fire := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)
+	world.step_tick({1: fire}, false, 0)
+	if int(s.energy_current) != 20:
+		_fail("energy_spend_and_recharge (expected energy 20 after fire, got %d)" % [int(s.energy_current)])
+		return
+	if int(s.energy_recharge_wait_ticks) != 10:
+		_fail("energy_spend_and_recharge (expected recharge_wait 10 after spend, got %d)" % [int(s.energy_recharge_wait_ticks)])
+		return
+
+	# No recharge before delay expires.
+	var idle := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+	for _i in range(9):
+		world.step_tick({1: idle}, false, 0)
+		if int(s.energy_current) != 20:
+			_fail("energy_spend_and_recharge (recharged early)")
+			return
+
+	# Recharge begins after delay reaches 0.
+	world.step_tick({1: idle}, false, 0)
+	# Next tick should recharge at least 1 point at 60/sec.
+	world.step_tick({1: idle}, false, 0)
+	if int(s.energy_current) <= 20:
+		_fail("energy_spend_and_recharge (expected recharge after delay, got %d)" % [int(s.energy_current)])
+		return
+
+	# All-or-nothing spend: cannot go negative.
+	s.energy_current = 10
+	s.energy = 10
+	# Prevent incidental recharge during the insufficient-spend tick.
+	s.energy_recharge_wait_ticks = 999
+	world.step_tick({1: fire}, false, 0)
+	if int(s.energy_current) != 10:
+		_fail("energy_spend_and_recharge (energy changed on insufficient spend)")
+		return
+	if int(s.energy_current) < 0:
+		_fail("energy_spend_and_recharge (energy went negative)")
+		return
+
+	_pass("energy_spend_and_recharge")
+
+
+func _setup_world_for_replay_bullets_test(world: DriftWorld, _header: Dictionary) -> void:
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_prize_rng_seed(111)
+	world.set_spawn_rng_seed(222)
+	# Make bullet interactions very likely.
+	world.bullet_energy_cost = 0
+	world.bullet_cooldown_ticks = 1
+	world.bullet_speed = 2000.0
+	world.bullet_lifetime_ticks = 60
+	world.bullet_damage = 1
+	world.bullet_knock_impulse = 0.0
+	world.add_ship(1, Vector2(256, 256))
+	world.add_ship(2, Vector2(320, 256))
+	# Ensure deterministic energy config for both ships.
+	for sid in [1, 2]:
+		if world.ships.has(sid):
+			var s: DriftTypes.DriftShipState = world.ships[sid]
+			s.energy_max = 100
+			s.energy_current = 100
+			s.energy_recharge_rate_per_sec = 0
+			s.energy_recharge_delay_ticks = 0
+			s.energy_recharge_wait_ticks = 0
+			s.energy = s.energy_current
+
+
+func _test_deterministic_replay_bullets() -> void:
+	_ran += 1
+	# Record a short replay with firing and verify hashes match when replayed.
+	var path := "user://replays/test_replay_bullets.jsonl"
+	var setup_world := Callable(self, "_setup_world_for_replay_bullets_test")
+
+	# Best-effort cleanup from previous runs.
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+
+	var wrec := DriftWorld.new()
+	setup_world.call(wrec, {})
+
+	var recorder := DriftReplayRecorder.new()
+	var header: Dictionary = {
+		"format": "driftline.replay",
+		"schema_version": 1,
+		"type": "header",
+		"version": 1,
+		"tick_rate": int(DriftConstants.TICK_RATE),
+		"ruleset_hash": 0,
+		"map_id": "test",
+		"map_hash": 0,
+	}
+	recorder.start(path, header)
+	if not bool(recorder.enabled):
+		_fail("deterministic_replay_bullets (failed to open recorder)")
+		return
+
+	var ticks: int = 120
+	for t in range(ticks):
+		# Ship 1 fires a burst; ship 2 stays idle.
+		var fire_now: bool = t < 40
+		var di1 := DriftInput.new(0, 0, fire_now, false, false, false)
+		var di2 := DriftInput.new(0, 0, false, false, false, false)
+		var cmd1 := DriftTypes.DriftInputCmd.new(float(di1.thrust), float(di1.turn), bool(di1.fire), bool(di1.bomb), bool(di1.afterburner))
+		var cmd2 := DriftTypes.DriftInputCmd.new(float(di2.thrust), float(di2.turn), bool(di2.fire), bool(di2.bomb), bool(di2.afterburner))
+		var t_before: int = int(wrec.tick)
+		wrec.step_tick({1: cmd1, 2: cmd2}, false, 0)
+		recorder.record_tick(t_before, {1: di1, 2: di2}, int(wrec.compute_world_hash()))
+
+	recorder.stop()
+	if not FileAccess.file_exists(path):
+		_fail("deterministic_replay_bullets (file missing)")
+		return
+
+	# Replay + verify hashes.
+	var wplay := DriftWorld.new()
+	var verifier := DriftReplayVerifier.new()
+	var res: Dictionary = verifier.verify(path, wplay, setup_world)
+	if not bool(res.get("ok", false)):
+		_fail("deterministic_replay_bullets (verify failed: %s)" % str(res.get("error", "unknown")))
+		return
+
+	# Cleanup.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_pass("deterministic_replay_bullets")
 
 
 func _test_user_settings_roundtrip() -> void:
@@ -586,6 +1133,107 @@ func _test_world_hash_matches_across_worlds() -> void:
 	_pass("world_hash_matches_across_worlds")
 
 
+func _test_deterministic_collision_order() -> void:
+	_ran += 1
+	# Determinism requirement:
+	# - When multiple bullet hits occur in the same tick, resolution must be deterministic.
+	# Priority rule: lowest bullet id first, then lowest ship id.
+	# This test builds two worlds with different bullet insertion order and asserts:
+	# - same ship energy/death outcome
+	# - same world hash after stepping
+
+	var world_a := DriftWorld.new()
+	var world_b := DriftWorld.new()
+	for w in [world_a, world_b]:
+		w.set_solid_tiles([])
+		w.set_door_tiles([])
+		w.set_safe_zone_tiles([])
+		w.add_boundary_tiles(32, 32)
+		w.set_map_dimensions(32, 32)
+		# Keep RNG streams aligned; hash includes RNG state.
+		w.set_prize_rng_seed(111)
+		w.prize_enabled = false
+		w.set_spawn_rng_seed(222)
+		w.bullet_damage = 50
+		w.bullet_knock_impulse = 0.0
+		w.bullet_radius = 2.0
+		w.add_ship(1, Vector2(128, 128))
+		w.add_ship(2, Vector2(160, 128))
+		# Ensure bullets can damage (default friendly-fire is off; ships must be on different teams).
+		var s1: DriftTypes.DriftShipState = w.ships.get(1)
+		var s2: DriftTypes.DriftShipState = w.ships.get(2)
+		if s1 == null or s2 == null:
+			_fail("deterministic_collision_order (ship missing)")
+			return
+		s1.freq = 0
+		s2.freq = 1
+		# Make the target die from exactly one hit so order matters if non-deterministic.
+		s2.energy_max = 50
+		s2.energy_current = 50
+
+	# Two bullets overlapping ship 2 in the same tick.
+	var target_pos_a: Vector2 = (world_a.ships.get(2) as DriftTypes.DriftShipState).position
+	var target_pos_b: Vector2 = (world_b.ships.get(2) as DriftTypes.DriftShipState).position
+	var die_tick := 999999
+	var b1a := DriftTypes.DriftBulletState.new(1, 1, 1, target_pos_a, Vector2.ZERO, 0, die_tick, 0)
+	var b2a := DriftTypes.DriftBulletState.new(2, 1, 1, target_pos_a, Vector2.ZERO, 0, die_tick, 0)
+	# Insert in ascending order for A.
+	world_a.bullets[1] = b1a
+	world_a.bullets[2] = b2a
+	# Insert in reverse order for B.
+	var b1b := DriftTypes.DriftBulletState.new(1, 1, 1, target_pos_b, Vector2.ZERO, 0, die_tick, 0)
+	var b2b := DriftTypes.DriftBulletState.new(2, 1, 1, target_pos_b, Vector2.ZERO, 0, die_tick, 0)
+	world_b.bullets[2] = b2b
+	world_b.bullets[1] = b1b
+
+	# Step one tick.
+	world_a.step_tick({})
+	world_b.step_tick({})
+
+	var s2a: DriftTypes.DriftShipState = world_a.ships.get(2)
+	var s2b: DriftTypes.DriftShipState = world_b.ships.get(2)
+	if s2a == null or s2b == null:
+		_fail("deterministic_collision_order (ship missing after step)")
+		return
+	# Both should be dead (damage-as-energy).
+	if int(s2a.energy_current) != 0 or int(s2b.energy_current) != 0:
+		_fail("deterministic_collision_order (expected energy 0)")
+		return
+	if int(s2a.dead_until_tick) <= 0 or int(s2b.dead_until_tick) <= 0:
+		_fail("deterministic_collision_order (expected dead_until_tick set)")
+		return
+	# Deterministic ordering rule implies bullet 1 resolves first and is consumed.
+	# Bullet 2 remains because collisions skip dead ships.
+	if int(world_a.bullets.size()) != 1 or int(world_b.bullets.size()) != 1:
+		_fail("deterministic_collision_order (expected exactly one bullet remaining)")
+		return
+	if world_a.bullets.has(1) or world_b.bullets.has(1):
+		_fail("deterministic_collision_order (expected bullet 1 consumed)")
+		return
+	if not world_a.bullets.has(2) or not world_b.bullets.has(2):
+		_fail("deterministic_collision_order (expected bullet 2 remaining)")
+		return
+
+	var ha: int = int(world_a.compute_world_hash())
+	var hb: int = int(world_b.compute_world_hash())
+	if ha != hb:
+		print("[SMOKE_DIAG] deterministic_collision_order hash mismatch ha=", ha, " hb=", hb)
+		var da: DriftTypes.DriftShipState = world_a.ships.get(2)
+		var db: DriftTypes.DriftShipState = world_b.ships.get(2)
+		if da != null and db != null:
+			print("[SMOKE_DIAG] ship2 a: e_wait=", int(da.energy_recharge_wait_ticks), " lecr=", int(da.last_energy_change_reason), " lecs=", int(da.last_energy_change_source_id), " lect=", int(da.last_energy_change_tick), " racc=", int(da.energy_recharge_fp_accum), " dacc=", int(da.energy_drain_fp_accum))
+			print("[SMOKE_DIAG] ship2 b: e_wait=", int(db.energy_recharge_wait_ticks), " lecr=", int(db.last_energy_change_reason), " lecs=", int(db.last_energy_change_source_id), " lect=", int(db.last_energy_change_tick), " racc=", int(db.energy_recharge_fp_accum), " dacc=", int(db.energy_drain_fp_accum))
+		print("[SMOKE_DIAG] next_bullet_id a=", int(world_a.next_bullet_id), " b=", int(world_b.next_bullet_id))
+		print("[SMOKE_DIAG] spawn_rng a(seed/state)=", int(world_a._spawn_rng.seed), "/", int(world_a._spawn_rng.state), " b=", int(world_b._spawn_rng.seed), "/", int(world_b._spawn_rng.state))
+		print("[SMOKE_DIAG] prize_rng a(seed/state)=", int(world_a._prize_rng.seed), "/", int(world_a._prize_rng.state), " b=", int(world_b._prize_rng.seed), "/", int(world_b._prize_rng.state))
+		DriftReplayVerifier._print_world_dump_small(world_a)
+		DriftReplayVerifier._print_world_dump_small(world_b)
+		_fail("deterministic_collision_order (world hash mismatch)")
+		return
+
+	_pass("deterministic_collision_order")
+
+
 func _test_replay_recorder_writes_jsonl() -> void:
 	_ran += 1
 	var path := "user://replays/test_replay.jsonl"
@@ -803,9 +1451,18 @@ func _test_replay_verifier_detects_mismatch() -> void:
 func _test_replay_deterministic_hash_stable() -> void:
 	_ran += 1
 	# Ensure replay verification is deterministic within a single process.
-	# Record a deterministic 2-ship replay, then verify it twice into fresh worlds,
-	# asserting the final world hash matches across runs.
-	var path := "user://replays/test_replay_hash_stable.jsonl"
+	# Default is short to keep headless CI under ~2-3 seconds.
+	_run_replay_hash_stable_test(180, "replay_hash_stable")
+
+
+func _test_replay_deterministic_hash_stable_soak() -> void:
+	_ran += 1
+	# Longer soak variant (opt-in only). Useful when chasing rare nondeterminism.
+	_run_replay_hash_stable_test(600, "replay_hash_stable_soak")
+
+
+func _run_replay_hash_stable_test(ticks: int, label: String) -> void:
+	var path := "user://replays/test_%s.jsonl" % _sanitize_filename(label)
 	var setup_world := Callable(self, "_setup_world_for_replay_hash_stable_test")
 
 	# Best-effort cleanup from previous runs.
@@ -825,15 +1482,14 @@ func _test_replay_deterministic_hash_stable() -> void:
 		"ruleset_hash": 0,
 		"map_id": "test",
 		"map_hash": 0,
-		"notes": "smoke: replay hash stable",
+		"notes": "smoke: %s" % label,
 	}
 	recorder.start(path, header)
 	if not bool(recorder.enabled):
-		_fail("replay_hash_stable (failed to open recorder)")
+		_fail("%s (failed to open recorder)" % label)
 		return
 
-	var ticks: int = 600 # 10s at 60 Hz
-	for t in range(ticks):
+	for t in range(int(ticks)):
 		# Scripted deterministic inputs (DriftInput) for 2 ships.
 		var di1 := DriftInput.new(
 			1 if (t % 60) < 30 else 0,
@@ -881,7 +1537,7 @@ func _test_replay_deterministic_hash_stable() -> void:
 
 	recorder.stop()
 	if not FileAccess.file_exists(path):
-		_fail("replay_hash_stable (file missing)")
+		_fail("%s (file missing)" % label)
 		return
 
 	# Verify twice in-process into fresh worlds.
@@ -890,33 +1546,37 @@ func _test_replay_deterministic_hash_stable() -> void:
 	var wplay_a := DriftWorld.new()
 	var res_a: Dictionary = verifier.verify(path, wplay_a, setup_world)
 	if not bool(res_a.get("ok", false)):
-		_print_replay_verify_failure("replay_hash_stable (verify A)", res_a, path)
-		var artifact_a: String = _save_ci_replay_artifact("replay_hash_stable_verify_A", path, res_a)
+		_print_replay_verify_failure("%s (verify A)" % label, res_a, path)
+		var artifact_a: String = _save_ci_replay_artifact(label + "_verify_A", path, res_a)
 		if artifact_a != "":
 			print("[SMOKE] bugreport_replay_path=", artifact_a)
-		_fail("replay_hash_stable (verify A failed: %s)" % str(res_a.get("error", "unknown")))
+		_fail("%s (verify A failed: %s)" % [label, str(res_a.get("error", "unknown"))])
 		return
 	var hash_a: int = int(wplay_a.compute_world_hash())
 
 	var wplay_b := DriftWorld.new()
 	var res_b: Dictionary = verifier.verify(path, wplay_b, setup_world)
 	if not bool(res_b.get("ok", false)):
-		_print_replay_verify_failure("replay_hash_stable (verify B)", res_b, path)
-		var artifact_b: String = _save_ci_replay_artifact("replay_hash_stable_verify_B", path, res_b)
+		_print_replay_verify_failure("%s (verify B)" % label, res_b, path)
+		var artifact_b: String = _save_ci_replay_artifact(label + "_verify_B", path, res_b)
 		if artifact_b != "":
 			print("[SMOKE] bugreport_replay_path=", artifact_b)
-		_fail("replay_hash_stable (verify B failed: %s)" % str(res_b.get("error", "unknown")))
+		_fail("%s (verify B failed: %s)" % [label, str(res_b.get("error", "unknown"))])
 		return
 	var hash_b: int = int(wplay_b.compute_world_hash())
 
 	if hash_a != hash_b:
-		print("[SMOKE] replay_hash_stable final_hash_mismatch expected=", hash_a, " got=", hash_b, " tick=final")
-		_fail("replay_hash_stable (final hash mismatch: %d vs %d)" % [hash_a, hash_b])
+		print("[SMOKE] %s final_hash_mismatch expected=", label, " got=", hash_b, " tick=final")
+		var res_final := {"ok": false, "error": "final hash mismatch", "mismatch": {"expected": hash_a, "actual": hash_b}}
+		var artifact_f: String = _save_ci_replay_artifact(label + "_final_hash_mismatch", path, res_final)
+		if artifact_f != "":
+			print("[SMOKE] bugreport_replay_path=", artifact_f)
+		_fail("%s (final hash mismatch: %d vs %d)" % [label, hash_a, hash_b])
 		return
 
 	# Cleanup.
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
-	_pass("replay_deterministic_hash_stable")
+	_pass("replay_deterministic_hash_stable" if label == "replay_hash_stable" else label)
 
 
 func _print_replay_verify_failure(context: String, res: Dictionary, replay_path: String) -> void:
@@ -1128,6 +1788,183 @@ func _test_safe_zone_mechanics() -> void:
 		return
 
 	_pass("safe_zone_mechanics")
+
+
+func _test_safe_zone_blocks_actions() -> void:
+	_ran += 1
+	# Requirement:
+	# - Ships inside safe zones cannot fire, lay mines, or use abilities.
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("safe_zone_blocks_actions (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	# Mark tile (2,2) as safe zone.
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.set_spawn_rng_seed(222)
+
+	var ship_id := 1
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, safe_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("safe_zone_blocks_actions (ship missing)")
+		return
+
+	# Prime derived in_safe_zone.
+	world.step_tick({})
+	if not bool(s.in_safe_zone):
+		_fail("safe_zone_blocks_actions (expected in safe zone)")
+		return
+
+	var energy_before: int = int(s.energy_current)
+	# Attempt: fire primary + fire secondary + ability buttons.
+	var cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, true, true, true, true, true, true)
+	world.step_tick({ship_id: cmd})
+
+	# Fire must not spawn bullets.
+	if not world.bullets.is_empty():
+		_fail("safe_zone_blocks_actions (bullets spawned in safe zone)")
+		return
+	# Abilities must not become active.
+	if bool(s.afterburner_on) or bool(s.stealth_on) or bool(s.cloak_on) or bool(s.xradar_on) or bool(s.antiwarp_on):
+		_fail("safe_zone_blocks_actions (ability activated in safe zone)")
+		return
+	# Firing must not spend energy in safe zone.
+	if int(s.energy_current) != energy_before:
+		_fail("safe_zone_blocks_actions (energy changed in safe zone)")
+		return
+
+	_pass("safe_zone_blocks_actions")
+
+
+func _test_safe_zone_blocks_damage() -> void:
+	_ran += 1
+	# Requirement:
+	# - Ships inside safe zones take zero damage from all sources.
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("safe_zone_blocks_damage (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.set_spawn_rng_seed(222)
+
+	var safe_id := 1
+	var outside_id := 2
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	var outside_pos := Vector2(5 * 16 + 8, 5 * 16 + 8)
+	world.add_ship(safe_id, safe_pos)
+	world.add_ship(outside_id, outside_pos)
+	var s_safe: DriftTypes.DriftShipState = world.ships.get(safe_id)
+	var s_out: DriftTypes.DriftShipState = world.ships.get(outside_id)
+	if s_safe == null or s_out == null:
+		_fail("safe_zone_blocks_damage (ship missing)")
+		return
+
+	# Prime derived in_safe_zone.
+	world.step_tick({})
+	if not bool(s_safe.in_safe_zone) or bool(s_out.in_safe_zone):
+		_fail("safe_zone_blocks_damage (unexpected safe zone flags)")
+		return
+
+	var e0: int = int(s_safe.energy_current)
+	var ok1: bool = world.apply_damage(outside_id, safe_id, 50, "bullet")
+	if ok1:
+		_fail("safe_zone_blocks_damage (damage applied to ship in safe zone)")
+		return
+	if int(s_safe.energy_current) != e0:
+		_fail("safe_zone_blocks_damage (energy changed for safe-zone target)")
+		return
+
+	# Also block damage originating from inside safe zone.
+	s_safe.position = safe_pos
+	s_out.position = outside_pos
+	world.step_tick({})
+	var e1: int = int(s_out.energy_current)
+	var ok2: bool = world.apply_damage(safe_id, outside_id, 50, "bullet")
+	if ok2:
+		_fail("safe_zone_blocks_damage (damage applied from safe-zone attacker)")
+		return
+	if int(s_out.energy_current) != e1:
+		_fail("safe_zone_blocks_damage (energy changed for target from safe-zone attacker)")
+		return
+
+	_pass("safe_zone_blocks_damage")
+
+
+func _test_safe_zone_fire_cancels_velocity() -> void:
+	_ran += 1
+	# Requirement:
+	# - If a ship is drifting inside a safe zone and presses fire, velocity/inertia forced to zero deterministically.
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("safe_zone_fire_cancels_velocity (failed to load base ruleset)")
+		return
+	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
+	var world = DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([[2, 2, 0, 0]])
+	world.add_boundary_tiles(16, 16)
+	world.set_map_dimensions(16, 16)
+	world.set_spawn_rng_seed(222)
+
+	var ship_id := 1
+	var safe_pos := Vector2(2 * 16 + 8, 2 * 16 + 8)
+	world.add_ship(ship_id, safe_pos)
+	var s: DriftTypes.DriftShipState = world.ships.get(ship_id)
+	if s == null:
+		_fail("safe_zone_fire_cancels_velocity (ship missing)")
+		return
+	# Force drift.
+	s.velocity = Vector2(120.0, 0.0)
+	# Prime derived in_safe_zone.
+	world.step_tick({})
+	if not bool(s.in_safe_zone):
+		_fail("safe_zone_fire_cancels_velocity (expected in safe zone)")
+		return
+	# Press fire while drifting.
+	world.step_tick({ship_id: DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)})
+	if s.velocity.length() > 0.01:
+		_fail("safe_zone_fire_cancels_velocity (velocity not cancelled)")
+		return
+	_pass("safe_zone_fire_cancels_velocity")
+
+
+func _test_spawn_prefers_safe_zone() -> void:
+	_ran += 1
+	# Requirement:
+	# - Spawn/respawn prefer safe zones if any exist; otherwise fall back to deterministic random spawn.
+	var world := DriftWorld.new()
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(32, 32)
+	world.set_map_dimensions(32, 32)
+	world.set_spawn_rng_seed(222)
+	# Single safe tile to make the choice unambiguous.
+	var safe_tile := Vector2i(10, 10)
+	world.set_safe_zone_tiles([[safe_tile.x, safe_tile.y, 0, 0]])
+	var p: Vector2 = world.get_spawn_point()
+	var tx: int = int(floor(p.x / 16.0))
+	var ty: int = int(floor(p.y / 16.0))
+	if tx != safe_tile.x or ty != safe_tile.y:
+		_fail("spawn_prefers_safe_zone (spawn not in safe zone tile)")
+		return
+	_pass("spawn_prefers_safe_zone")
 
 
 func _test_death_spend_to_zero_does_not_kill() -> void:
@@ -1875,6 +2712,128 @@ func _test_energy_deterministic_recharge_and_costs() -> void:
 		return
 
 	_pass("energy_deterministic_recharge_and_costs")
+
+
+func _make_world_for_classic_ship_spec(spec: Dictionary) -> DriftWorld:
+	var world := DriftWorld.new()
+	world.set_ship_spec(spec)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.set_safe_zone_tiles([])
+	# Use a large map so high bullet speeds don't hit the boundary during this test.
+	world.add_boundary_tiles(256, 256)
+	world.set_map_dimensions(256, 256)
+	world.set_spawn_rng_seed(222)
+	# Avoid recharge confounding spend assertions.
+	world.energy_recharge_rate_per_sec = 0
+	world.energy_recharge_delay_ticks = 999999
+	# Keep bullets around so this test can count spawns deterministically.
+	world.bullet_lifetime_ticks = 0
+	world.add_ship(1, Vector2(2048, 2048))
+	return world
+
+
+func _simulate_hold_fire_for_ticks(world: DriftWorld, ship_id: int, ticks_to_sim: int) -> Array[int]:
+	var fire_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)
+	var spawn_ticks: Array[int] = []
+	for _i in range(ticks_to_sim):
+		var t := int(world.tick)
+		var before := int(world.bullets.size())
+		world.step_tick({ ship_id: fire_cmd })
+		var after := int(world.bullets.size())
+		if after > before:
+			spawn_ticks.append(t)
+	return spawn_ticks
+
+
+func _test_classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend() -> void:
+	_ran += 1
+	# Classic ship specs must drive authoritative bullet firing:
+	# - Warbird fires every 25 ticks; Terrier every 30 ticks
+	# - Total energy spent over a fixed window differs due to cooldown
+	# - next_bullet_tick is set deterministically
+
+	var classic := DriftClassicRuleset.new()
+	if not classic.load():
+		_fail("classic_wb_vs_tr (failed to load classic ship specs)")
+		return
+	var wb: Dictionary = classic.get_ship_spec("Warbird")
+	var tr: Dictionary = classic.get_ship_spec("Terrier")
+	if wb.is_empty() or tr.is_empty():
+		_fail("classic_wb_vs_tr (missing Warbird/Terrier spec)")
+		return
+
+	var wb_e: Dictionary = wb.get("energy", {})
+	var tr_e: Dictionary = tr.get("energy", {})
+	var wb_w: Dictionary = wb.get("weapons", {})
+	var tr_w: Dictionary = tr.get("weapons", {})
+	var wb_cost: int = maxi(0, int(wb_e.get("BulletFireEnergy", -1)))
+	var tr_cost: int = maxi(0, int(tr_e.get("BulletFireEnergy", -1)))
+	var wb_delay: int = maxi(0, int(wb_w.get("BulletFireDelay", -1)))
+	var tr_delay: int = maxi(0, int(tr_w.get("BulletFireDelay", -1)))
+	var wb_init: int = maxi(0, int(wb_e.get("InitialEnergy", -1)))
+	var tr_init: int = maxi(0, int(tr_e.get("InitialEnergy", -1)))
+	if wb_cost < 0 or tr_cost < 0 or wb_delay < 0 or tr_delay < 0 or wb_init < 0 or tr_init < 0:
+		_fail("classic_wb_vs_tr (spec missing required energy/weapons fields)")
+		return
+
+	# Expected classic values (guards against exporter regressions).
+	if wb_delay != 25 or tr_delay != 30:
+		_fail("classic_wb_vs_tr (expected delays wb=25 tr=30, got wb=%d tr=%d)" % [wb_delay, tr_delay])
+		return
+	if wb_cost != 20 or tr_cost != 20:
+		_fail("classic_wb_vs_tr (expected costs wb=20 tr=20, got wb=%d tr=%d)" % [wb_cost, tr_cost])
+		return
+
+	var wb_world := _make_world_for_classic_ship_spec(wb)
+	var tr_world := _make_world_for_classic_ship_spec(tr)
+	var wb_ship: DriftTypes.DriftShipState = wb_world.ships.get(1)
+	var tr_ship: DriftTypes.DriftShipState = tr_world.ships.get(1)
+	if wb_ship == null or tr_ship == null:
+		_fail("classic_wb_vs_tr (ship missing)")
+		return
+
+	if int(wb_ship.energy_current) != wb_init or int(tr_ship.energy_current) != tr_init:
+		_fail("classic_wb_vs_tr (expected InitialEnergy applied on spawn)")
+		return
+
+	const SIM_TICKS: int = 30 # simulate ticks 0..29
+	var wb_spawn_ticks := _simulate_hold_fire_for_ticks(wb_world, 1, SIM_TICKS)
+	var tr_spawn_ticks := _simulate_hold_fire_for_ticks(tr_world, 1, SIM_TICKS)
+
+	if wb_spawn_ticks != [0, 25]:
+		_fail("classic_wb_vs_tr (expected Warbird spawn ticks [0,25], got %s)" % [str(wb_spawn_ticks)])
+		return
+	if tr_spawn_ticks != [0]:
+		_fail("classic_wb_vs_tr (expected Terrier spawn ticks [0], got %s)" % [str(tr_spawn_ticks)])
+		return
+
+	if int(wb_world.bullets.size()) != wb_spawn_ticks.size() or int(tr_world.bullets.size()) != tr_spawn_ticks.size():
+		_fail("classic_wb_vs_tr (bullet count mismatch with spawn ticks)")
+		return
+
+	# next_bullet_tick should reflect the last fire.
+	if int(wb_ship.next_bullet_tick) != 50:
+		_fail("classic_wb_vs_tr (expected Warbird next_bullet_tick=50, got %d)" % [int(wb_ship.next_bullet_tick)])
+		return
+	if int(tr_ship.next_bullet_tick) != 30:
+		_fail("classic_wb_vs_tr (expected Terrier next_bullet_tick=30, got %d)" % [int(tr_ship.next_bullet_tick)])
+		return
+
+	# Total energy spent differs due to cooldown (recharge disabled above).
+	var wb_spent := wb_init - int(wb_ship.energy_current)
+	var tr_spent := tr_init - int(tr_ship.energy_current)
+	if wb_spent != wb_cost * wb_spawn_ticks.size():
+		_fail("classic_wb_vs_tr (Warbird spent %d, expected %d)" % [wb_spent, wb_cost * wb_spawn_ticks.size()])
+		return
+	if tr_spent != tr_cost * tr_spawn_ticks.size():
+		_fail("classic_wb_vs_tr (Terrier spent %d, expected %d)" % [tr_spent, tr_cost * tr_spawn_ticks.size()])
+		return
+	if wb_spent <= tr_spent:
+		_fail("classic_wb_vs_tr (expected Warbird to spend more energy over %d ticks)" % [SIM_TICKS])
+		return
+
+	_pass("classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend")
 
 
 func _test_abilities_continuous_drain_and_auto_disable() -> void:

@@ -18,6 +18,8 @@ const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 const DriftRuleset = preload("res://shared/drift_ruleset.gd")
+const DriftShipConfig = preload("res://server/ship_config.gd")
+const DriftHash = preload("res://shared/drift_hash.gd")
 const DriftPrizeConfig = preload("res://server/prize_config.gd")
 const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
 
@@ -74,6 +76,7 @@ var replay_record_path: String = ""
 var replay_notes: String = ""
 var _replay: DriftReplayRecorder = null
 var _replay_map_hash: int = 0
+var _replay_ruleset_hash: int = 0
 
 var quit_poll_accumulator_seconds: float = 0.0
 
@@ -272,6 +275,32 @@ func _load_selected_map_from_config() -> bool:
 	world.apply_ruleset(canonical_ruleset)
 	wall_restitution = world.wall_restitution
 
+	# Deterministic ruleset hash for replay headers and handshake.
+	# Includes both the JSON ruleset and any ship tuning loaded from server.cfg.
+	_replay_ruleset_hash = 0
+	var ruleset_json_for_hash: String = ""
+	if canonical_ruleset != null and typeof(canonical_ruleset) == TYPE_DICTIONARY and not canonical_ruleset.is_empty():
+		ruleset_json_for_hash = JSON.stringify(canonical_ruleset)
+	var ship_res: Dictionary = DriftShipConfig.load_config()
+	if bool(ship_res.get("ok", false)):
+		# Inject ship spec into the authoritative world for deterministic spawn init.
+		# For now DriftWorld holds a single ship spec (no per-ship-type selection yet),
+		# so we pick Warbird as the canonical default.
+		var ships_obj: Dictionary = ship_res.get("ships", {})
+		var warbird_spec: Dictionary = ships_obj.get("Warbird", {})
+		if warbird_spec != null and typeof(warbird_spec) == TYPE_DICTIONARY:
+			world.set_ship_spec(warbird_spec)
+		else:
+			world.set_ship_spec({})
+
+		var ships_hash: int = int(ship_res.get("ships_hash", 0))
+		var joined: String = "ruleset_json=" + ruleset_json_for_hash + "\nships_hash=" + str(ships_hash)
+		_replay_ruleset_hash = int(DriftHash.int31_from_string_sha256(joined))
+	else:
+		world.set_ship_spec({})
+		# If ship config fails to load (missing server.cfg), keep hash based only on ruleset.
+		_replay_ruleset_hash = int(DriftHash.int31_from_string_sha256("ruleset_json=" + ruleset_json_for_hash))
+
 	# Strict: no fallback map. Missing/invalid is fatal.
 	var res: Dictionary = DriftMapLoader.load_map(selected_path)
 	if not bool(res.get("ok", false)):
@@ -367,7 +396,7 @@ func _maybe_start_replay_recording() -> void:
 		"type": "header",
 		"version": 1,
 		"tick_rate": int(DriftConstants.TICK_RATE),
-		"ruleset_hash": 0,
+		"ruleset_hash": int(_replay_ruleset_hash),
 		"map_id": map_id_value,
 		"map_hash": int(_replay_map_hash),
 	}

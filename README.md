@@ -114,6 +114,10 @@ In-game:
 
 - `Esc`: toggle the in-game menu (non-blocking)
 - In the menu: "Back to Menu" returns to the connection screen
+- In the menu: "Save Bug Report" writes a client-only artifact bundle containing the last ~30s replay buffer and metadata.
+	- Output: `res://.ci_artifacts/bugreports/...` when writable (CI/workspace), otherwise `user://.ci_artifacts/bugreports/...`
+	- A `.zip` is created best-effort; the folder is always written.
+	- Maintainer option: `bugreport_cleanup_after_zip=true` deletes the folder after a successful zip (best-effort; on failure the folder is kept).
 
 Options menu:
 

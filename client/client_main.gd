@@ -24,6 +24,7 @@ const DriftActions = preload("res://client/input/actions.gd")
 const ReplayRingBuffer = preload("res://client/replay/replay_ring_buffer.gd")
 const ReplayDumpWriter = preload("res://client/replay/replay_dump_writer.gd")
 const ReplayMeta = preload("res://client/replay/replay_meta.gd")
+const BugReportWriter = preload("res://client/replay/bug_report_writer.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
@@ -44,6 +45,11 @@ const PRIZE_DRAW_SCALE: float = 1.5
 const PRIZE_PICKUP_SFX_PATH: String = "res://client/audio/prize.wav"
 const THRUSTER_LOOP_SFX_PATH: String = "res://client/audio/rev.wav"
 const BOOST_LOOP_SFX_PATH: String = "res://client/audio/thrust.ogg"
+
+const GUN_SFX_LEVEL_1_PATH: String = "res://client/audio/gun1.wav"
+const GUN_SFX_LEVEL_2_PATH: String = "res://client/audio/gun2.wav"
+const GUN_SFX_LEVEL_3_PATH: String = "res://client/audio/gun3.wav"
+const GUN_SFX_LEVEL_4_PATH: String = "res://client/audio/gun4.wav"
 
 const VELOCITY_DRAW_SCALE: float = 0.10
 
@@ -104,6 +110,13 @@ var _last_bounce_time_s: float = -999.0
 @onready var _thrust_audio: AudioStreamPlayer = get_node_or_null("ThrustAudio")
 
 var _prize_audio: AudioStreamPlayer = null
+
+# Client-only combat feedback (must not affect sim determinism).
+var _gun_audio: AudioStreamPlayer = null
+var _gun_streams_by_level: Dictionary = {} # Dictionary[int, AudioStream]
+var _muzzle_flashes: Array = [] # Array[Dictionary] {pos: Vector2, expire_tick: int}
+var _hit_markers: Array = [] # Array[Dictionary] {pos: Vector2, damage: int, start_tick: int, expire_tick: int}
+var _hit_confirm_until_tick: int = -1
 
 var world: DriftWorld
 
@@ -178,6 +191,10 @@ var _replay_ring_enabled: bool = false
 var _replay_toggle_keycode: int = 0
 var _replay_save_keycode: int = 0
 
+# Last known mismatch (best-effort) to include in manual bug reports.
+var _last_mismatch_reason: String = ""
+var _last_mismatch_detail: Dictionary = {}
+
 # Optional debugging: store last authoritative state per tick.
 var snapshot_history: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
 
@@ -219,8 +236,8 @@ func _ready() -> void:
 	if esc_menu.has_method("close"):
 		esc_menu.call("close")
 	# Debug: allow saving replay ring from the ESC menu without pausing.
-	if esc_menu != null and esc_menu.has_signal("save_replay_requested"):
-		esc_menu.connect("save_replay_requested", Callable(self, "_on_esc_menu_save_replay_requested"))
+	if esc_menu != null and esc_menu.has_signal("save_bug_report_requested"):
+		esc_menu.connect("save_bug_report_requested", Callable(self, "_on_esc_menu_save_bug_report_requested"))
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -240,6 +257,20 @@ func _ready() -> void:
 	if sfx is AudioStream:
 		_prize_audio.stream = sfx
 	add_child(_prize_audio)
+
+	# Gun SFX (client-side). Created programmatically to avoid scene edits.
+	_gun_audio = AudioStreamPlayer.new()
+	_gun_audio.name = "GunAudio"
+	_gun_streams_by_level = {
+		1: load(GUN_SFX_LEVEL_1_PATH),
+		2: load(GUN_SFX_LEVEL_2_PATH),
+		3: load(GUN_SFX_LEVEL_3_PATH),
+		4: load(GUN_SFX_LEVEL_4_PATH),
+	}
+	# Default to level 1 stream when present.
+	if _gun_streams_by_level.has(1) and _gun_streams_by_level[1] is AudioStream:
+		_gun_audio.stream = _gun_streams_by_level[1]
+	add_child(_gun_audio)
 
 	# Input regression guard for local UX: ensure the boost modifier action is bound to Shift.
 	# Some platforms/layouts may not match a purely-physical SHIFT binding; using keycode here
@@ -437,6 +468,22 @@ func _load_client_map() -> void:
 	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
 	print("Client map path: ", CLIENT_MAP_PATH)
 	print("Client map version: ", client_map_version)
+
+	# Deterministic RNG seeds for client-side prediction.
+	# Must match server logic so spawns/respawns (including safe-zone-first) predict consistently.
+	var prize_seed: int = 1
+	if client_map_checksum != null and client_map_checksum.size() > 0:
+		var acc: int = 0
+		var n: int = mini(8, client_map_checksum.size())
+		for i in range(n):
+			acc = int((acc * 31 + int(client_map_checksum[i])) & 0x7fffffff)
+		if acc != 0:
+			prize_seed = acc
+	world.set_prize_rng_seed(prize_seed)
+	var spawn_seed: int = int((prize_seed ^ 0x2f7a3d19) & 0x7fffffff)
+	if spawn_seed == 0:
+		spawn_seed = 1
+	world.set_spawn_rng_seed(spawn_seed)
 	var meta: Dictionary = canonical.get("meta", {})
 	var tileset_name: String = String(meta.get("tileset", "")).strip_edges()
 	if tileset_name == "":
@@ -478,9 +525,12 @@ func _load_client_map() -> void:
 			orient = "h"
 		_door_cells.append({"cell": Vector2i(int(arr[0]), int(arr[1])), "orient": orient})
 	
-	world.add_boundary_tiles(int(meta.get("w", 0)), int(meta.get("h", 0)))
+	var w_tiles: int = int(meta.get("w", 0))
+	var h_tiles: int = int(meta.get("h", 0))
+	world.add_boundary_tiles(w_tiles, h_tiles)
+	world.set_map_dimensions(w_tiles, h_tiles)
 	
-	print("Client map loaded: ", meta.get("w", 0), "x", meta.get("h", 0), " tiles")
+	print("Client map loaded: ", w_tiles, "x", h_tiles, " tiles")
 	_update_door_tilemap_visual()
 
 
@@ -726,6 +776,7 @@ func _latest_tick_step() -> void:
 	_send_input_for_tick(next_tick, input_cmd)
 	latest_snapshot = world.step_tick({ local_ship_id: input_cmd })
 	_play_local_collision_sounds()
+	_consume_local_combat_events()
 
 	if DEBUG_NET and world.tick != next_tick:
 		on_desync_detected("local_tick_contract_violation", {
@@ -768,6 +819,85 @@ func _play_local_collision_sounds() -> void:
 		_bounce_audio.play()
 		_last_bounce_time_s = now_s
 		break
+
+
+func _consume_local_combat_events() -> void:
+	# Drive client-only muzzle flash / shot SFX / hit confirm from predicted sim events.
+	if world == null:
+		return
+	if latest_snapshot == null:
+		return
+	if local_ship_id < 0:
+		return
+	var events: Array = world.collision_events
+	if events.is_empty():
+		_prune_local_combat_fx(int(latest_snapshot.tick))
+		return
+
+	var cur_tick: int = int(latest_snapshot.tick)
+	for ev in events:
+		if typeof(ev) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = ev
+		var ty: String = String(d.get("type", ""))
+		if ty == "bullet_fire":
+			if int(d.get("ship_id", -1)) != local_ship_id:
+				continue
+			var pos_any: Variant = d.get("pos", Vector2.ZERO)
+			var pos: Vector2 = pos_any if pos_any is Vector2 else Vector2.ZERO
+			_muzzle_flashes.append({
+				"pos": pos,
+				"expire_tick": cur_tick + 2,
+			})
+			_play_gun_sfx(int(d.get("level", 1)))
+		elif ty == "bullet_hit":
+			if int(d.get("attacker_id", -1)) != local_ship_id:
+				continue
+			var pos2_any: Variant = d.get("pos", Vector2.ZERO)
+			var pos2: Vector2 = pos2_any if pos2_any is Vector2 else Vector2.ZERO
+			var dmg: int = maxi(0, int(d.get("damage", 0)))
+			_hit_confirm_until_tick = maxi(_hit_confirm_until_tick, cur_tick + 6)
+			_hit_markers.append({
+				"pos": pos2,
+				"damage": dmg,
+				"start_tick": cur_tick,
+				"expire_tick": cur_tick + 20,
+			})
+
+	_prune_local_combat_fx(cur_tick)
+	queue_redraw()
+
+
+func _play_gun_sfx(level: int) -> void:
+	if _gun_audio == null:
+		return
+	var lvl: int = clampi(int(level), 1, 4)
+	var stream_any: Variant = _gun_streams_by_level.get(lvl)
+	if stream_any is AudioStream:
+		_gun_audio.stream = stream_any
+	# Conservative mix: avoid being too loud.
+	_gun_audio.volume_db = -10.0
+	_gun_audio.pitch_scale = 1.0
+	_gun_audio.play()
+
+
+func _prune_local_combat_fx(cur_tick: int) -> void:
+	# Remove expired transient visuals.
+	var kept_flashes: Array = []
+	for f in _muzzle_flashes:
+		if typeof(f) != TYPE_DICTIONARY:
+			continue
+		if int((f as Dictionary).get("expire_tick", -1)) >= cur_tick:
+			kept_flashes.append(f)
+	_muzzle_flashes = kept_flashes
+
+	var kept_hits: Array = []
+	for h in _hit_markers:
+		if typeof(h) != TYPE_DICTIONARY:
+			continue
+		if int((h as Dictionary).get("expire_tick", -1)) >= cur_tick:
+			kept_hits.append(h)
+	_hit_markers = kept_hits
 
 
 func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void:
@@ -980,7 +1110,76 @@ func _save_replay_ring_manual() -> void:
 
 
 func _on_esc_menu_save_replay_requested() -> void:
-	_save_replay_ring_manual()
+	# Backward compat (in case the scene/script is older).
+	_save_bug_report_manual("manual")
+
+
+func _on_esc_menu_save_bug_report_requested() -> void:
+	_save_bug_report_manual("manual")
+
+
+func _save_bug_report_manual(trigger: String) -> void:
+	if _replay_ring == null:
+		push_warning("[bugreport] replay ring is null")
+		return
+	var records: Array = _replay_ring.snapshot()
+	if records.is_empty():
+		var hud0 := get_node_or_null("HUD")
+		if hud0 != null and hud0.has_method("show_help_interrupt"):
+			hud0.call("show_help_interrupt", "No replay buffer data", 2.5)
+		return
+
+	var reason: String = _last_mismatch_reason
+	var detail: Dictionary = _last_mismatch_detail
+	if reason.strip_edges() == "":
+		reason = String(trigger)
+		detail = {}
+
+	var net_state: Dictionary = _build_bugreport_net_state()
+	var meta: Dictionary = ReplayMeta.build_replay_meta(world, net_state)
+	meta["bugreport_trigger"] = String(trigger)
+
+	var mismatch: Dictionary = {
+		"reason": String(reason),
+		"detail": detail if detail != null else {},
+	}
+
+	var res: Dictionary = BugReportWriter.save_bug_report(String(reason), meta, records, mismatch, {
+		# Prefer repo-local artifacts when possible; fall back to user://.
+		"root": "res://.ci_artifacts/bugreports",
+		"fallback_root": "user://.ci_artifacts/bugreports",
+		# Zip is best-effort; folder is always written.
+		"zip": true,
+	})
+	if not bool(res.get("ok", false)):
+		print("[bugreport] Failed: ", String(res.get("error", "unknown")))
+		return
+	var folder: String = String(res.get("folder", ""))
+	var zip_path: String = String(res.get("zip", ""))
+	print("[bugreport] Saved: ", folder, (" (zip=" + zip_path + ")" if zip_path != "" else ""))
+	var hud := get_node_or_null("HUD")
+	if hud != null and hud.has_method("show_help_interrupt"):
+		var msg := "Saved bug report: " + folder
+		if zip_path != "":
+			msg = "Saved bug report: " + zip_path
+		hud.call("show_help_interrupt", msg, 3.0)
+
+
+func _build_bugreport_net_state() -> Dictionary:
+	var ruleset_hash: int = 0
+	if world != null and "ruleset" in world and typeof(world.ruleset) == TYPE_DICTIONARY:
+		# DriftValidate returns canonical ordering; JSON.stringify should be stable.
+		var rs_json: String = JSON.stringify(world.ruleset)
+		ruleset_hash = int(DriftHash.int31_from_string_sha256("ruleset_json=" + rs_json))
+
+	return {
+		"server_addr": "%s:%d" % [server_address, int(SERVER_PORT)],
+		"map_path": String(CLIENT_MAP_PATH),
+		"map_version": int(client_map_version),
+		"map_checksum": DriftMap.bytes_to_hex(client_map_checksum) if client_map_checksum.size() > 0 else "",
+		"ruleset_path": "",
+		"ruleset_hash": ruleset_hash,
+	}
 
 
 func on_desync_detected(reason: String, detail: Dictionary) -> void:
@@ -990,33 +1189,38 @@ func on_desync_detected(reason: String, detail: Dictionary) -> void:
 	# - write bugreport bundle
 	# - log one concise line
 	# - optionally show HUD toast
+	_last_mismatch_reason = String(reason)
+	_last_mismatch_detail = detail if detail != null else {}
+
 	var records: Array = []
 	if _replay_ring != null:
 		records = _replay_ring.snapshot()
-
-	var net_state: Dictionary = {
-		"server_addr": "%s:%d" % [server_address, int(SERVER_PORT)],
-		"map_path": String(CLIENT_MAP_PATH),
-		"map_version": int(client_map_version),
-		# Avoid embedding raw bytes in JSON.
-		"map_checksum": DriftMap.bytes_to_hex(client_map_checksum) if client_map_checksum.size() > 0 else "",
-	}
-
+	var net_state: Dictionary = _build_bugreport_net_state()
 	var meta: Dictionary = ReplayMeta.build_replay_meta(world, net_state)
+	meta["bugreport_trigger"] = "desync"
 	var mismatch: Dictionary = {
 		"reason": String(reason),
 		"detail": detail if detail != null else {},
 	}
 
-	var folder: String = ReplayDumpWriter.write_bugreport(String(reason), meta, records, mismatch)
-	if folder == "":
-		print("[DESYNC] Failed to save bug report replay")
+	var res: Dictionary = BugReportWriter.save_bug_report(String(reason), meta, records, mismatch, {
+		"root": "res://.ci_artifacts/bugreports",
+		"fallback_root": "user://.ci_artifacts/bugreports",
+		"zip": true,
+	})
+	if not bool(res.get("ok", false)):
+		print("[DESYNC] Failed to save bug report (", String(res.get("error", "unknown")), ")")
 		return
 
-	print("[DESYNC] Saved bug report replay: ", folder)
+	var folder: String = String(res.get("folder", ""))
+	var zip_path: String = String(res.get("zip", ""))
+	print("[DESYNC] Saved bug report: ", folder, (" (zip=" + zip_path + ")" if zip_path != "" else ""))
 	var hud := get_node_or_null("HUD")
 	if hud != null and hud.has_method("show_help_interrupt"):
-		hud.call("show_help_interrupt", "Saved bug report replay: " + folder, 3.0)
+		var msg := "Saved bug report: " + folder
+		if zip_path != "":
+			msg = "Saved bug report: " + zip_path
+		hud.call("show_help_interrupt", msg, 3.0)
 
 
 func _timestamp_for_path() -> String:
@@ -1154,6 +1358,7 @@ func _draw() -> void:
 	_draw_ship_triangle(ship_state)
 	_draw_prizes()
 	_draw_bullets()
+	_draw_local_combat_fx(ship_state)
 	
 	# ⚠️ ALWAYS VISIBLE: Draw username and bounty for local ship (blue sprite font)
 	# This element must never be hidden or removed.
@@ -1188,6 +1393,50 @@ func _draw() -> void:
 
 	# Local ship (predicted)
 	# (Removed duplicate local ship drawing and overlays)
+
+
+func _draw_local_combat_fx(local_ship_state: DriftTypes.DriftShipState) -> void:
+	if latest_snapshot == null:
+		return
+	var cur_tick: int = int(latest_snapshot.tick)
+	# Muzzle flashes.
+	for f_any in _muzzle_flashes:
+		if typeof(f_any) != TYPE_DICTIONARY:
+			continue
+		var f: Dictionary = f_any
+		var exp: int = int(f.get("expire_tick", -1))
+		if exp < cur_tick:
+			continue
+		var pos_any: Variant = f.get("pos", Vector2.ZERO)
+		var pos: Vector2 = pos_any if pos_any is Vector2 else Vector2.ZERO
+		var a: float = clampf(float(exp - cur_tick + 1) / 3.0, 0.0, 1.0)
+		draw_circle(pos, 6.0, Color(1.0, 0.9, 0.3, 0.65 * a))
+		draw_circle(pos, 10.0, Color(1.0, 0.8, 0.2, 0.25 * a), 2.0)
+
+	# Hit confirm ring around local ship.
+	if _hit_confirm_until_tick >= cur_tick:
+		var a2: float = clampf(float(_hit_confirm_until_tick - cur_tick + 1) / 6.0, 0.0, 1.0)
+		draw_circle(local_ship_state.position, 18.0, Color(1.0, 1.0, 1.0, 0.15 * a2), 2.0)
+
+	# Floating damage numbers at hit position.
+	var font: Font = ThemeDB.fallback_font
+	for h_any in _hit_markers:
+		if typeof(h_any) != TYPE_DICTIONARY:
+			continue
+		var h: Dictionary = h_any
+		var exp2: int = int(h.get("expire_tick", -1))
+		if exp2 < cur_tick:
+			continue
+		var start: int = int(h.get("start_tick", cur_tick))
+		var t: float = 0.0
+		var denom: float = maxf(1.0, float(exp2 - start))
+		t = clampf(float(cur_tick - start) / denom, 0.0, 1.0)
+		var pos3_any: Variant = h.get("pos", Vector2.ZERO)
+		var pos3: Vector2 = pos3_any if pos3_any is Vector2 else Vector2.ZERO
+		var dmg: int = maxi(0, int(h.get("damage", 0)))
+		var yoff: float = lerpf(0.0, -24.0, t)
+		var alpha: float = lerpf(0.9, 0.0, t)
+		draw_string(font, pos3 + Vector2(-8.0, yoff), "%d" % dmg, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(1.0, 0.9, 0.9, alpha))
 
 func _draw_ball_at(pos: Vector2) -> void:
 	var color := Color(1.0, 0.6, 0.9, 1.0) # bright white/pink
@@ -2119,14 +2368,15 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				int(ship_state.top_speed_bonus),
 				int(ship_state.thruster_bonus),
 				int(ship_state.recharge_bonus),
-					float(ship_state.energy),
-					int(ship_state.energy_current),
-					int(ship_state.energy_max),
-					int(ship_state.energy_recharge_rate_per_sec),
-					int(ship_state.energy_recharge_delay_ticks),
-					int(ship_state.energy_recharge_wait_ticks),
-					int(ship_state.energy_recharge_fp_accum),
-					int(ship_state.energy_drain_fp_accum)
+						int(ship_state.energy),
+						int(ship_state.next_bullet_tick),
+						int(ship_state.energy_current),
+						int(ship_state.energy_max),
+						int(ship_state.energy_recharge_rate_per_sec),
+						int(ship_state.energy_recharge_delay_ticks),
+						int(ship_state.energy_recharge_wait_ticks),
+						int(ship_state.energy_recharge_fp_accum),
+						int(ship_state.energy_drain_fp_accum)
 			)
 			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets)
 		else:
@@ -2146,7 +2396,8 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				int(ship_state.top_speed_bonus),
 				int(ship_state.thruster_bonus),
 				int(ship_state.recharge_bonus),
-				float(ship_state.energy),
+				int(ship_state.energy),
+				int(ship_state.next_bullet_tick),
 				int(ship_state.energy_current),
 				int(ship_state.energy_max),
 				int(ship_state.energy_recharge_rate_per_sec),
@@ -2197,7 +2448,8 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.top_speed_bonus = int(auth_state.top_speed_bonus)
 	local_state.thruster_bonus = int(auth_state.thruster_bonus)
 	local_state.recharge_bonus = int(auth_state.recharge_bonus)
-	local_state.energy = float(auth_state.energy)
+	local_state.energy = int(auth_state.energy)
+	local_state.next_bullet_tick = int(auth_state.next_bullet_tick)
 	local_state.energy_current = int(auth_state.energy_current)
 	local_state.energy_max = int(auth_state.energy_max)
 	local_state.energy_recharge_rate_per_sec = int(auth_state.energy_recharge_rate_per_sec)

@@ -1271,7 +1271,9 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	if "energy_drain_fp_accum" in auth_state:
 		local_state.energy_drain_fp_accum = int(auth_state.energy_drain_fp_accum)
 	if "energy" in auth_state:
-		local_state.energy = float(auth_state.energy)
+		local_state.energy = int(auth_state.energy)
+	if "next_bullet_tick" in auth_state:
+		local_state.next_bullet_tick = int(auth_state.next_bullet_tick)
 	# Ability state (replicated via snapshot extension).
 	if "stealth_on" in auth_state:
 		local_state.stealth_on = bool(auth_state.stealth_on)

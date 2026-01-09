@@ -6,7 +6,6 @@ This document describes the current on-disk / clipboard JSON map format used by 
 
 For the normative, structured schema documentation:
 
-- `docs/formats/map.schema.md` — full map container schema (`v`, `meta`, `layers`, `entities`) and canonicalization/checksum rules
 - `docs/formats/map.schema.md` — full map container schema (`format`, `schema_version`, `meta`, `layers`, `entities`) and canonicalization/checksum rules
 - `docs/formats/tilemap.schema.md` — the `layers` tilemap portion (`bg|solid|fg` arrays of `[x,y,ax,ay]`)
 - `docs/formats/tiles_def.schema.md` — tileset behavior source-of-truth (`tiles_def.json`: `solid`, `door`, `safe_zone`, render layer)

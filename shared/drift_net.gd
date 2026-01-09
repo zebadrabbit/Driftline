@@ -349,6 +349,10 @@ static func pack_snapshot_packet(
 	#   [optional] repeated ship_freq_v1_count times:
 	#     u32 id
 	#     u16 freq
+	#   [optional] u16 ship_weapon_cooldown_v1_count
+	#   [optional] repeated ship_weapon_cooldown_v1_count times:
+	#     u32 id
+	#     u32 next_bullet_tick
 	var bullet_count: int = bullets.size()
 	if bullet_count < 0:
 		bullet_count = 0
@@ -427,7 +431,8 @@ static func pack_snapshot_packet(
 	for i in range(ship_count):
 		var s2 = ships[i]
 		buffer.put_32(int(s2.id))
-		buffer.put_float(float(s2.energy))
+		# Legacy mirror (ship_extras_v2) kept as float for backwards compatibility.
+		buffer.put_float(float(int(s2.energy)))
 		buffer.put_u8(int(clampi(int(s2.top_speed_bonus), 0, 255)))
 		buffer.put_u8(int(clampi(int(s2.thruster_bonus), 0, 255)))
 		buffer.put_u8(int(clampi(int(s2.recharge_bonus), 0, 255)))
@@ -513,6 +518,13 @@ static func pack_snapshot_packet(
 		var sf = ships[i]
 		buffer.put_32(int(sf.id))
 		buffer.put_u16(int(clampi(int(sf.freq), 0, 65535)))
+
+	# Ship weapon cooldown v1 (optional trailing; append-only).
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sw = ships[i]
+		buffer.put_32(int(sw.id))
+		buffer.put_32(int(maxi(0, int(sw.next_bullet_tick))))
 
 	return buffer.data_array
 
@@ -815,7 +827,8 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			var recharge_bonus: int = int(buffer.get_u8())
 			if ship_by_id2.has(sid2):
 				var ss2: DriftTypes.DriftShipState = ship_by_id2[sid2]
-				ss2.energy = maxf(0.0, energy)
+				# Legacy mirror (ship_extras_v2) is float on the wire.
+				ss2.energy = maxi(0, int(round(energy)))
 				ss2.top_speed_bonus = clampi(top_speed_bonus, 0, 16)
 				ss2.thruster_bonus = clampi(thruster_bonus, 0, 16)
 				ss2.recharge_bonus = clampi(recharge_bonus, 0, 16)
@@ -850,7 +863,7 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 				ss3.energy_recharge_fp_accum = maxi(0, recharge_fp_accum)
 				ss3.energy_drain_fp_accum = maxi(0, drain_fp_accum)
 				# Keep legacy mirror consistent.
-				ss3.energy = float(ss3.energy_current)
+				ss3.energy = int(ss3.energy_current)
 
 	# Optional prize events section.
 	var prize_events: Array = []
@@ -961,6 +974,24 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 			if ship_by_id8.has(sid8):
 				var ss8: DriftTypes.DriftShipState = ship_by_id8[sid8]
 				ss8.freq = maxi(0, freq)
+
+	# Optional ship weapon cooldown v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var ship_cd_count: int = int(buffer.get_u16())
+		# Each entry is 4 + 4 = 8 bytes.
+		if buffer.get_available_bytes() < (ship_cd_count * 8):
+			return {}
+		var ship_by_id9: Dictionary = {}
+		for s9 in ships:
+			if s9 == null:
+				continue
+			ship_by_id9[int(s9.id)] = s9
+		for _p in range(ship_cd_count):
+			var sid9: int = int(buffer.get_32())
+			var next_tick: int = int(buffer.get_32())
+			if ship_by_id9.has(sid9):
+				var ss9: DriftTypes.DriftShipState = ship_by_id9[sid9]
+				ss9.next_bullet_tick = maxi(0, next_tick)
 
 	return {
 		"type": pkt_type,

@@ -730,6 +730,8 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			bullet = _require_dict(weapons.get("bullet"), "ruleset.weapons.bullet", errors)
 			var bullet_allowed := {
 				"speed": true,
+				"damage": true,
+				"knock_impulse": true,
 				"cooldown_ticks": true,
 				"spread_deg": true,
 				"shrapnel_count": true,
@@ -747,6 +749,8 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				if not bullet_allowed.has(bks):
 					errors.append(_err("ruleset.weapons.bullet", "unknown key '%s'" % bks))
 			_validate_optional_number_range(bullet, "speed", "ruleset.weapons.bullet.speed", 0.0, 5000.0, errors)
+			_validate_optional_number_range(bullet, "damage", "ruleset.weapons.bullet.damage", 0.0, 10000.0, errors)
+			_validate_optional_number_range(bullet, "knock_impulse", "ruleset.weapons.bullet.knock_impulse", 0.0, 5000.0, errors)
 			if bullet.has("cooldown_ticks"):
 				var ct := typeof(bullet.get("cooldown_ticks"))
 				if ct not in [TYPE_INT, TYPE_FLOAT]:
@@ -795,6 +799,8 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 						"guns": true,
 						"multi_fire": true,
 						"speed": true,
+						"damage": true,
+						"knock_impulse": true,
 						"cooldown_ticks": true,
 						"spread_deg": true,
 						"shrapnel_count": true,

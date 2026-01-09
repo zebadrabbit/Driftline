@@ -21,6 +21,8 @@
     "ball_steal_padding": 4.0,
     "bullet": {
       "speed": 950.0,
+      "damage": 50,
+      "knock_impulse": 120.0,
       "lifetime_s": 0.4,
       "muzzle_offset": 30.0,
       "bounces": 0,

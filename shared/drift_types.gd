@@ -111,9 +111,13 @@ class DriftShipState:
 	# Safe zone state (deterministic, derived from map data).
 	var in_safe_zone: bool = false
 
-	# Legacy field kept for backward compatibility with older UI/debug.
-	# New code should prefer energy_current/energy_max.
-	var energy: float = 100.0
+	# Energy (integer points). Initialized on spawn/respawn.
+	# NOTE: energy_current/energy_max are the authoritative deterministic energy system.
+	# This field is kept for compatibility with older UI/network payloads.
+	var energy: int = 0
+
+	# Weapon cooldown state (tick-based). Not enforced yet; stored for future logic.
+	var next_bullet_tick: int = 0
 
 	func _init(
 		ship_id: int,
@@ -130,7 +134,8 @@ class DriftShipState:
 		top_speed_bonus_value: int = 0,
 		thruster_bonus_value: int = 0,
 		recharge_bonus_value: int = 0,
-		energy_value: float = 100.0,
+		energy_value: int = 0,
+		next_bullet_tick_value: int = 0,
 		energy_current_value: int = 0,
 		energy_max_value: int = 0,
 		energy_recharge_rate_per_sec_value: int = 0,
@@ -189,7 +194,8 @@ class DriftShipState:
 		last_energy_change_source_id = int(last_energy_change_source_id_value)
 		last_energy_change_tick = maxi(0, int(last_energy_change_tick_value))
 
-		energy = clampf(float(energy_value), 0.0, 1000000.0)
+		energy = maxi(0, int(energy_value))
+		next_bullet_tick = maxi(0, int(next_bullet_tick_value))
 
 
 
@@ -217,6 +223,8 @@ class DriftBulletState:
 	var spawn_tick: int
 	var die_tick: int
 	var bounces_left: int
+	# Minimal deterministic lifetime counter. Not currently serialized on the wire.
+	var life_ticks: int = 0
 
 	func _init(
 		bullet_id: int,
@@ -226,7 +234,8 @@ class DriftBulletState:
 		vel: Vector2,
 		spawn_tick_value: int,
 		die_tick_value: int = -1,
-		bounces_left_value: int = 0
+		bounces_left_value: int = 0,
+		life_ticks_value: int = 0
 	) -> void:
 		id = bullet_id
 		owner_id = owner_id_value
@@ -236,6 +245,7 @@ class DriftBulletState:
 		spawn_tick = spawn_tick_value
 		die_tick = die_tick_value
 		bounces_left = int(bounces_left_value)
+		life_ticks = maxi(0, int(life_ticks_value))
 
 
 enum PrizeKind {

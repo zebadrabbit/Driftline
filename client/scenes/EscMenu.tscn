@@ -51,7 +51,7 @@ bbcode_enabled = false
 scroll_active = false
 
 [node name="SaveReplay" type="Button" parent="Root/MenuPanel/VBox"]
-text = "Save last 30s replay"
+text = "Save Bug Report"
 
 [node name="Resume" type="Button" parent="Root/MenuPanel/VBox"]
 text = "Resume"

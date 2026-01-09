@@ -331,6 +331,20 @@ Bullets fire on **edge-triggered** `fire` input (press-to-fire) when the ship is
 - Type: number
 - Range: `0.0..5000.0`
 
+##### `weapons.bullet.damage` (optional)
+
+- Type: integer
+- Range: `0..10000`
+
+Damage applied to ships on hit. Driftline currently represents damage as **energy loss**.
+
+##### `weapons.bullet.knock_impulse` (optional)
+
+- Type: number
+- Range: `0.0..5000.0`
+
+Impulse applied to the target ship on hit (along bullet velocity direction). `0` disables knock.
+
 ##### `weapons.bullet.lifetime_s` (optional)
 
 - Type: number
@@ -365,7 +379,25 @@ Restitution applied to the normal component of bullet velocity on wall bounce.
 - Keys: level as a **string integer** (`"1"`, `"2"`, `"3"`)
 - Unknown keys are rejected at all levels.
 
-Per-level bullet profiles. Each level object supports the same tuning keys as per-ship bullet overrides (see below), plus `bounces` and `bounce_restitution`.
+Per-level bullet profiles.
+
+Supported keys per level:
+
+- `guns` (optional): integer in range `1..8`
+- `multi_fire` (optional): boolean
+- `speed` (optional): number in range `0.0..5000.0`
+- `damage` (optional): integer in range `0..10000`
+- `knock_impulse` (optional): number in range `0.0..5000.0`
+- `cooldown_ticks` (optional): integer in range `0..120`
+- `spread_deg` (optional): number in range `0.0..45.0`
+- `shrapnel_count` (optional): integer in range `0..16`
+- `shrapnel_speed_mult` (optional): number in range `0.0..2.0`
+- `shrapnel_lifetime_s` (optional): number in range `0.0..5.0`
+- `shrapnel_cone_deg` (optional): number in range `0.0..360.0`
+- `lifetime_s` (optional): number in range `0.0..10.0`
+- `muzzle_offset` (optional): number in range `0.0..64.0`
+- `bounces` (optional): integer in range `0..16`
+- `bounce_restitution` (optional): number in range `0.0..2.0`
 
 ### `ships` (optional)
 
