@@ -20,10 +20,10 @@
     "ball_stick_offset": 18.0,
     "ball_steal_padding": 4.0,
     "bullet": {
-      "speed": 950.0,
+      "speed": 760.0,
       "damage": 50,
       "knock_impulse": 120.0,
-      "lifetime_s": 0.4,
+      "lifetime_s": 0.5,
       "muzzle_offset": 30.0,
       "bounces": 0,
       "bounce_restitution": 1.0,

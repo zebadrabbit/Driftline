@@ -2984,6 +2984,8 @@ func _test_energy_deterministic_recharge_and_costs() -> void:
 
 func _make_world_for_classic_ship_spec(spec: Dictionary) -> DriftWorld:
 	var world := DriftWorld.new()
+	# Classic ship specs are intended to drive bullet cost/cooldown/speed in this test.
+	world.set_ship_spec_overrides_weapons(true)
 	world.set_ship_spec(spec)
 	world.set_solid_tiles([])
 	world.set_door_tiles([])

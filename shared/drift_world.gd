@@ -136,6 +136,20 @@ var next_bullet_id: int = 1
 var _prev_fire_by_ship: Dictionary = {} # Dictionary[int, bool]
 var _prev_ability_buttons_by_ship: Dictionary = {} # Dictionary[int, int]
 
+# Dev-only diagnostics. These must never affect simulation state.
+var debug_combat: bool = false
+var debug_combat_verbose: bool = false
+
+# ship_spec is a non-versioned server.cfg-derived config.
+# IMPORTANT: do not let non-versioned data override versioned ruleset tuning by default,
+# otherwise clients and replays can diverge from the authoritative sim.
+var ship_spec_overrides_weapons: bool = false
+
+var _dbg_bullets_spawned_this_second: int = 0
+var _dbg_bullet_fires_this_second: int = 0
+var _dbg_last_bullet_rate_tick: int = 0
+var _dbg_pending_first_step_log: Dictionary = {} # Dictionary[int, Dictionary]
+
 # Optional ship spec used for spawn/respawn initialization.
 # Expected shape: {"energy": {"InitialEnergy": int, ...}, ...}
 var ship_spec: Dictionary = {}
@@ -149,6 +163,64 @@ func set_ship_spec(ship_spec_value: Dictionary) -> void:
 		var mv: Variant = ship_spec.get("movement")
 		if typeof(mv) == TYPE_DICTIONARY and (mv as Dictionary).has("DamageFactor"):
 			bullet_damage = clampi(maxi(0, int((mv as Dictionary).get("DamageFactor"))), 0, 10000)
+	if debug_combat:
+		_debug_print_bullet_tuning("set_ship_spec")
+
+
+func set_debug_combat(enabled: bool, verbose: bool = false) -> void:
+	debug_combat = bool(enabled)
+	debug_combat_verbose = bool(verbose)
+	if debug_combat:
+		_dbg_bullets_spawned_this_second = 0
+		_dbg_bullet_fires_this_second = 0
+		_dbg_last_bullet_rate_tick = int(tick)
+		_dbg_pending_first_step_log.clear()
+		_debug_print_bullet_tuning("debug_enabled")
+
+
+func set_ship_spec_overrides_weapons(enabled: bool) -> void:
+	ship_spec_overrides_weapons = bool(enabled)
+	if debug_combat:
+		print("[DBG_COMBAT] ship_spec_overrides_weapons=", ship_spec_overrides_weapons)
+		_debug_print_bullet_tuning("ship_spec_override_toggle")
+
+
+func _debug_print_bullet_tuning(context: String) -> void:
+	# Purely informational; must not touch deterministic sim.
+	if not debug_combat:
+		return
+	var lifetime_s: float = float(bullet_lifetime_ticks) * DriftConstants.TICK_DT
+	var range_px: float = float(bullet_speed) * lifetime_s
+	print("[DBG_COMBAT] ", context,
+		" ruleset_speed=", float(bullet_speed),
+		" lifetime_ticks=", int(bullet_lifetime_ticks),
+		" lifetime_s=", lifetime_s,
+		" range_px~=", range_px,
+		" cooldown_ticks=", int(bullet_cooldown_ticks),
+		" spread_deg=", float(bullet_spread_deg),
+		" bounces=", int(bullet_bounces))
+	if typeof(ship_spec) == TYPE_DICTIONARY and not ship_spec.is_empty():
+		var w: Variant = ship_spec.get("weapons")
+		var e: Variant = ship_spec.get("energy")
+		var misc: Variant = ship_spec.get("misc")
+		var bs: Variant = null
+		var bd: Variant = null
+		var bc: Variant = null
+		var mfd: Variant = null
+		if typeof(w) == TYPE_DICTIONARY:
+			bs = (w as Dictionary).get("BulletSpeed", null)
+			bd = (w as Dictionary).get("BulletFireDelay", null)
+		if typeof(e) == TYPE_DICTIONARY:
+			bc = (e as Dictionary).get("BulletFireEnergy", null)
+		if typeof(misc) == TYPE_DICTIONARY:
+			mfd = (misc as Dictionary).get("MultiFireDelay", null)
+		if bs != null or bd != null or bc != null or mfd != null:
+			print("[DBG_COMBAT] ship_spec weapons overrides present:",
+				" BulletSpeed=", bs,
+				" BulletFireDelay=", bd,
+				" BulletFireEnergy=", bc,
+				" MultiFireDelay(ms)=", mfd,
+				" (applied=", ship_spec_overrides_weapons, ")")
 
 
 func _ship_spec_initial_energy_points() -> int:
@@ -488,6 +560,9 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	bullet_damage = clampi(int(bullet_damage), 0, 10000)
 	bullet_knock_impulse = clampf(float(bullet_knock_impulse), 0.0, 5000.0)
 
+	if debug_combat:
+		_debug_print_bullet_tuning("apply_ruleset")
+
 	# Default combat tuning remains deterministic if omitted.
 	# (No schema bump needed: optional fields with defaults.)
 
@@ -718,8 +793,9 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 				if cfg.has("lifetime_s"):
 					lifetime = int(round(float(cfg.get("lifetime_s")) / DriftConstants.TICK_DT))
 
-	# ship_spec (classic) overrides for cost/delay/speed (and optionally damage).
-	if typeof(ship_spec) == TYPE_DICTIONARY and not ship_spec.is_empty():
+	# ship_spec (classic) overrides for cost/delay/speed.
+	# IMPORTANT: only apply when explicitly enabled; ship_spec is not a versioned contract.
+	if ship_spec_overrides_weapons and typeof(ship_spec) == TYPE_DICTIONARY and not ship_spec.is_empty():
 		var e: Variant = ship_spec.get("energy")
 		if typeof(e) == TYPE_DICTIONARY:
 			cost = maxi(0, int((e as Dictionary).get("BulletFireEnergy", cost)))
@@ -781,6 +857,17 @@ func _step_bullets(ship_ids_sorted: Array) -> void:
 
 		var old_pos: Vector2 = b.position
 		var new_pos: Vector2 = old_pos + b.velocity * DriftConstants.TICK_DT
+
+		if debug_combat and _dbg_pending_first_step_log.has(int(bid)):
+			var info: Dictionary = _dbg_pending_first_step_log.get(int(bid), {})
+			# Only log on the first step after spawn.
+			if int(info.get("spawn_tick", -999999)) == int(tick) - 1:
+				var dist: float = new_pos.distance_to(old_pos)
+				print("[DBG_COMBAT] step1 bid=", int(bid),
+					" spawn_tick=", int(info.get("spawn_tick", -1)),
+					" speed_px_s=", int(info.get("speed_px_s", 0)),
+					" moved_px=", dist)
+			_dbg_pending_first_step_log.erase(int(bid))
 
 		# Wall collision/bounce (continuous/swept).
 		var sweep := {"hit": false}
@@ -2929,6 +3016,18 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			"level": int(bullet_level),
 			"guns": int(guns),
 		})
+		# Dev-only instrumentation: show effective profile and cadence.
+		if debug_combat:
+			_dbg_bullet_fires_this_second += 1
+			if debug_combat_verbose:
+				var per_tick_dist: float = float(bullet_speed_px_s) * DriftConstants.TICK_DT
+				print("[DBG_COMBAT] fire tick=", int(t),
+					" ship=", int(ship_id),
+					" guns=", int(guns),
+					" speed_px_s=", int(bullet_speed_px_s),
+					" per_tick_px~=", per_tick_dist,
+					" lifetime_ticks=", int(lifetime_ticks),
+					" delay_ticks=", int(bullet_delay_ticks))
 		for gi in range(guns):
 			var tgun: float = 0.0
 			if guns > 1:
@@ -2944,6 +3043,14 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			var bounce_left: int = clampi(int(bounces) + maxi(0, int(ship_state.bullet_bounce_bonus)), 0, 255)
 			var bstate := DriftTypes.DriftBulletState.new(next_bullet_id, int(ship_id), bullet_level, pos, vel, int(t), die_tick, bounce_left, 0)
 			bullets[next_bullet_id] = bstate
+			if debug_combat:
+				_dbg_bullets_spawned_this_second += 1
+				# Log the *next* step for this bullet once, to confirm per-tick displacement.
+				_dbg_pending_first_step_log[int(next_bullet_id)] = {
+					"spawn_tick": int(t),
+					"spawn_pos": pos,
+					"speed_px_s": int(bullet_speed_px_s),
+				}
 			next_bullet_id += 1
 
 	# Step bullets (deterministic collision + damage).
@@ -2963,6 +3070,17 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 
 	# Advance tick at the end of the step.
 	tick = t_next
+
+	# Dev-only per-second rate summary.
+	if debug_combat and DriftConstants.TICK_RATE > 0:
+		var now_tick: int = int(tick)
+		if now_tick - _dbg_last_bullet_rate_tick >= DriftConstants.TICK_RATE:
+			print("[DBG_COMBAT] rate last_1s fires=", int(_dbg_bullet_fires_this_second),
+				" bullets_spawned=", int(_dbg_bullets_spawned_this_second),
+				" bullets_alive=", int(bullets.size()))
+			_dbg_bullets_spawned_this_second = 0
+			_dbg_bullet_fires_this_second = 0
+			_dbg_last_bullet_rate_tick = now_tick
 
 	# Return a snapshot (deep copy of ship states and ball)
 	var snapshot_ships: Dictionary = {}

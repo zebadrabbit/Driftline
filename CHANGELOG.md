@@ -80,6 +80,7 @@ This project didn’t previously have a formal changelog. The entries below were
 ### Added
 
 - Client settings/options UI.
+- Server CLI flags `--debug_combat` / `--debug_combat_verbose` for dev-only combat diagnostics.
 - Deterministic replay support (client) and world-hash/determinism guardrails.
 - Authoritative server + client architecture with deterministic shared simulation in `shared/`.
 - Tileset packages under `assets/tilesets/<tileset_name>/` (`tiles.png`, `tileset.json`, `tiles_def.json`).
@@ -120,6 +121,7 @@ This project didn’t previously have a formal changelog. The entries below were
 - Collision handling in the shared world simulation iterated to address wall-phasing and bounce feel.
 - UI polish: connection/menu screen centered and map visuals hidden underneath while the overlay is visible.
 - HUD energy readout now reports `energy_current/energy_max` and recharge wait ticks.
+- Bullet tuning (Option A): default bullet speed is 760 px/s with 0.5s lifetime (30 ticks) to preserve ~380px range and improve readability.
 
 ### Fixed
 
@@ -131,3 +133,4 @@ This project didn’t previously have a formal changelog. The entries below were
 - Client-side map load logging and collision-layer parsing (aligning with LevelIO return values).
 - Wall bounce sound triggering again when collisions are resolved by the shared simulation.
 - Projectile tunneling: bullets now use swept/continuous collision against solid tiles (segment cast per tick), with a smoke test to prevent regressions.
+- Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).

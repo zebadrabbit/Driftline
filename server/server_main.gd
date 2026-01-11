@@ -28,6 +28,8 @@ const MAX_CLIENTS: int = 8
 
 var debug_net: bool = false
 var debug_sim: bool = false
+var debug_combat: bool = false
+var debug_combat_verbose: bool = false
 
 var alive_timer := 0.0
 var last_printed_tick := -1
@@ -225,6 +227,8 @@ func _parse_user_args() -> void:
 	#   --replay_notes=optional
 	#   --debug_net=0|1 (enables net debug prints)
 	#   --debug_sim=0|1 (enables high-frequency sim tick prints)
+	#   --debug_combat=0|1 (logs effective combat tuning and bullet rates)
+	#   --debug_combat_verbose=0|1 (logs per-fire and first-step bullet movement)
 	var args: PackedStringArray = OS.get_cmdline_user_args()
 	var truthy := {"1": true, "true": true, "yes": true, "y": true, "on": true}
 	var falsy := {"0": true, "false": true, "no": true, "n": true, "off": true}
@@ -258,6 +262,16 @@ func _parse_user_args() -> void:
 				debug_sim = true
 			elif falsy.has(v_norm):
 				debug_sim = false
+		elif key == "debug_combat":
+			if truthy.has(v_norm):
+				debug_combat = true
+			elif falsy.has(v_norm):
+				debug_combat = false
+		elif key == "debug_combat_verbose":
+			if truthy.has(v_norm):
+				debug_combat_verbose = true
+			elif falsy.has(v_norm):
+				debug_combat_verbose = false
 
 
 func _load_map(path: String) -> void:
@@ -288,6 +302,10 @@ func _load_selected_map_from_config() -> bool:
 		print("[RULESET] warning: ", String(w))
 	var canonical_ruleset: Dictionary = rules_res.get("ruleset", {})
 	self.canonical_ruleset = canonical_ruleset
+	# Dev-only diagnostics; must not affect sim.
+	world.set_debug_combat(debug_combat, debug_combat_verbose)
+	# ruleset is the authoritative versioned contract for tuning.
+	world.set_ship_spec_overrides_weapons(false)
 	world.apply_ruleset(canonical_ruleset)
 	wall_restitution = world.wall_restitution
 
@@ -308,6 +326,8 @@ func _load_selected_map_from_config() -> bool:
 			world.set_ship_spec(warbird_spec)
 		else:
 			world.set_ship_spec({})
+		if debug_combat:
+			print("[DBG_COMBAT] server.cfg loaded paths=", ship_res.get("paths", []))
 
 		var ships_hash: int = int(ship_res.get("ships_hash", 0))
 		var joined: String = "ruleset_json=" + ruleset_json_for_hash + "\nships_hash=" + str(ships_hash)
