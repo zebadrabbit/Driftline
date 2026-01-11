@@ -3,7 +3,10 @@ param(
 	[string]$ProjectRoot = "",
 	[string]$QuitFlag = "user://server.quit",
 	[string]$ReplayRecordPath = "",
-	[string]$ReplayNotes = ""
+	[string]$ReplayNotes = "",
+	[switch]$DebugCombat,
+	[switch]$DebugCombatVerbose,
+	[switch]$ShipSpecWeapons
 )
 
 $ErrorActionPreference = "Stop"
@@ -173,6 +176,16 @@ try {
 		"--",
 		"--quit_flag=$QuitFlag"
 	)
+
+	if ($DebugCombat) {
+		$args += "--debug_combat=1"
+	}
+	if ($DebugCombatVerbose) {
+		$args += "--debug_combat_verbose=1"
+	}
+	if ($ShipSpecWeapons) {
+		$args += "--ship_spec_weapons=1"
+	}
 
 	if ($ReplayRecordPath -and $ReplayRecordPath.Trim() -ne "") {
 		$args += "--replay_record_path=$ReplayRecordPath"
