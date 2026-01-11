@@ -353,8 +353,8 @@ func compute_world_hash() -> int:
 	return "|".join(parts).hash()
 
 # Effective bullet tuning values used by the deterministic sim.
-var bullet_speed: float = 950.0
-var bullet_lifetime_ticks: int = 24
+var bullet_speed: float = 760.0
+var bullet_lifetime_ticks: int = 30
 var bullet_muzzle_offset: float = float(DriftConstants.SHIP_RADIUS) + 10.0
 var bullet_radius: float = 2.0
 var bullet_gun_spacing: float = 8.0
