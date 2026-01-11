@@ -30,6 +30,7 @@ var debug_net: bool = false
 var debug_sim: bool = false
 var debug_combat: bool = false
 var debug_combat_verbose: bool = false
+var ship_spec_weapons: bool = false
 
 var alive_timer := 0.0
 var last_printed_tick := -1
@@ -229,6 +230,7 @@ func _parse_user_args() -> void:
 	#   --debug_sim=0|1 (enables high-frequency sim tick prints)
 	#   --debug_combat=0|1 (logs effective combat tuning and bullet rates)
 	#   --debug_combat_verbose=0|1 (logs per-fire and first-step bullet movement)
+	#   --ship_spec_weapons=0|1 (allows server.cfg ship weapons to override ruleset tuning)
 	var args: PackedStringArray = OS.get_cmdline_user_args()
 	var truthy := {"1": true, "true": true, "yes": true, "y": true, "on": true}
 	var falsy := {"0": true, "false": true, "no": true, "n": true, "off": true}
@@ -272,6 +274,11 @@ func _parse_user_args() -> void:
 				debug_combat_verbose = true
 			elif falsy.has(v_norm):
 				debug_combat_verbose = false
+		elif key == "ship_spec_weapons":
+			if truthy.has(v_norm):
+				ship_spec_weapons = true
+			elif falsy.has(v_norm):
+				ship_spec_weapons = false
 
 
 func _load_map(path: String) -> void:
@@ -305,7 +312,7 @@ func _load_selected_map_from_config() -> bool:
 	# Dev-only diagnostics; must not affect sim.
 	world.set_debug_combat(debug_combat, debug_combat_verbose)
 	# ruleset is the authoritative versioned contract for tuning.
-	world.set_ship_spec_overrides_weapons(false)
+	world.set_ship_spec_overrides_weapons(ship_spec_weapons)
 	world.apply_ruleset(canonical_ruleset)
 	wall_restitution = world.wall_restitution
 
