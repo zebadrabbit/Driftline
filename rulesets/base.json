@@ -31,7 +31,7 @@
         "1": {
           "guns": 1,
           "spread_deg": 0.0,
-          "cooldown_ticks": 0,
+          "cooldown_ticks": 6,
           "shrapnel_count": 0
         },
         "2": {

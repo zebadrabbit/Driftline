@@ -134,3 +134,4 @@ This project didn’t previously have a formal changelog. The entries below were
 - Wall bounce sound triggering again when collisions are resolved by the shared simulation.
 - Projectile tunneling: bullets now use swept/continuous collision against solid tiles (segment cast per tick), with a smoke test to prevent regressions.
 - Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).
+- Baseline bullet firing cadence no longer defaults to every tick (cooldown now enforced via ruleset `cooldown_ticks`).

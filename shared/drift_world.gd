@@ -149,6 +149,7 @@ var _dbg_bullets_spawned_this_second: int = 0
 var _dbg_bullet_fires_this_second: int = 0
 var _dbg_last_bullet_rate_tick: int = 0
 var _dbg_pending_first_step_log: Dictionary = {} # Dictionary[int, Dictionary]
+var _dbg_last_cadence_print_second_by_ship: Dictionary = {} # Dictionary[int, int]
 
 # Optional ship spec used for spawn/respawn initialization.
 # Expected shape: {"energy": {"InitialEnergy": int, ...}, ...}
@@ -175,6 +176,7 @@ func set_debug_combat(enabled: bool, verbose: bool = false) -> void:
 		_dbg_bullet_fires_this_second = 0
 		_dbg_last_bullet_rate_tick = int(tick)
 		_dbg_pending_first_step_log.clear()
+		_dbg_last_cadence_print_second_by_ship.clear()
 		_debug_print_bullet_tuning("debug_enabled")
 
 
@@ -767,7 +769,9 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 	var lifetime: int = int(bullet_lifetime_ticks)
 	var speed_px_s: int = int(round(float(bullet_speed)))
 	var delay: int = int(bullet_cooldown_ticks)
+	var delay_src: String = "ruleset.weapons.bullet.cooldown_ticks"
 	var cost: int = int(bullet_energy_cost)
+	var cost_src: String = "ruleset.energy.bullet_energy_cost"
 
 	# Ruleset level profiles.
 	var rs_weapons: Dictionary = ruleset.get("weapons", {})
@@ -784,6 +788,7 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 					spread = float(cfg.get("spread_deg"))
 				if cfg.has("cooldown_ticks"):
 					delay = int(cfg.get("cooldown_ticks"))
+					delay_src = "ruleset.weapons.bullet.levels.%s.cooldown_ticks" % key
 				if cfg.has("speed"):
 					speed_px_s = int(round(float(cfg.get("speed"))))
 				if cfg.has("muzzle_offset"):
@@ -799,11 +804,14 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 		var e: Variant = ship_spec.get("energy")
 		if typeof(e) == TYPE_DICTIONARY:
 			cost = maxi(0, int((e as Dictionary).get("BulletFireEnergy", cost)))
+			cost_src = "ship_spec.energy.BulletFireEnergy"
 			if bool(ship_state.multi_fire_enabled):
 				cost = maxi(0, int((e as Dictionary).get("MultiFireEnergy", cost)))
+				cost_src = "ship_spec.energy.MultiFireEnergy"
 		var w: Variant = ship_spec.get("weapons")
 		if typeof(w) == TYPE_DICTIONARY:
 			delay = maxi(0, int((w as Dictionary).get("BulletFireDelay", delay)))
+			delay_src = "ship_spec.weapons.BulletFireDelay (ticks)"
 			speed_px_s = maxi(0, int((w as Dictionary).get("BulletSpeed", speed_px_s)))
 			if bool(ship_state.multi_fire_enabled):
 				# Classic MultiFireDelay is in ms; convert to ticks (ceil).
@@ -811,6 +819,7 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 				if typeof(misc) == TYPE_DICTIONARY and (misc as Dictionary).has("MultiFireDelay"):
 					var ms_i: int = maxi(0, int((misc as Dictionary).get("MultiFireDelay")))
 					delay = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
+					delay_src = "ship_spec.misc.MultiFireDelay (ms->ticks)"
 	# Clamp.
 	guns = clampi(guns, 1, 8)
 	spread = clampf(spread, 0.0, 45.0)
@@ -823,6 +832,8 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 	return {
 		"cost": cost,
 		"delay_ticks": delay,
+		"delay_src": delay_src,
+		"cost_src": cost_src,
 		"speed_px_s": speed_px_s,
 		"level": level,
 		"guns": guns,
@@ -2984,6 +2995,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var prof := _resolve_bullet_fire_profile_for_ship(ship_state)
 		var bullet_cost: int = int(prof.get("cost", int(bullet_energy_cost)))
 		var bullet_delay_ticks: int = int(prof.get("delay_ticks", int(bullet_cooldown_ticks)))
+		var bullet_delay_src: String = String(prof.get("delay_src", ""))
+		var bullet_cost_src: String = String(prof.get("cost_src", ""))
 		var bullet_speed_px_s: int = int(prof.get("speed_px_s", int(round(float(bullet_speed)))))
 		var bullet_level: int = int(prof.get("level", clampi(int(ship_state.gun_level), 1, 3)))
 		var guns: int = int(prof.get("guns", 1))
@@ -2991,6 +3004,26 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var muzzle_offset: float = float(prof.get("muzzle_offset", float(bullet_muzzle_offset)))
 		var bounces: int = int(prof.get("bounces", int(bullet_bounces)))
 		var lifetime_ticks: int = int(prof.get("lifetime_ticks", int(bullet_lifetime_ticks)))
+
+		# Dev-only cadence report (per-ship, at most once per second while holding fire).
+		if debug_combat:
+			var sec: int = int(floor(float(t) / float(DriftConstants.TICK_RATE)))
+			var last_sec: int = int(_dbg_last_cadence_print_second_by_ship.get(int(ship_id), -999999))
+			if sec != last_sec:
+				_dbg_last_cadence_print_second_by_ship[int(ship_id)] = sec
+				var delay_ticks_i: int = maxi(0, int(bullet_delay_ticks))
+				var fire_events_per_sec: float = float(DriftConstants.TICK_RATE) / float(maxi(1, delay_ticks_i))
+				var bullets_per_sec: float = fire_events_per_sec * float(maxi(1, int(guns)))
+				var drain_per_sec: float = fire_events_per_sec * float(maxi(0, int(bullet_cost)))
+				print("[DBG_COMBAT] cadence tick=", int(t),
+					" ship=", int(ship_id),
+					" level=", int(bullet_level),
+					" delay=", delay_ticks_i, " ticks (src=", bullet_delay_src, ")",
+					" shots/s~=", fire_events_per_sec,
+					" bullets/s~=", bullets_per_sec,
+					" cost=", int(bullet_cost), " (src=", bullet_cost_src, ")",
+					" drain/s~=", drain_per_sec,
+					" energy=", int(ship_state.energy_current), "/", int(ship_state.energy_max))
 
 		if t < int(ship_state.next_bullet_tick):
 			continue
@@ -3027,7 +3060,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 					" speed_px_s=", int(bullet_speed_px_s),
 					" per_tick_px~=", per_tick_dist,
 					" lifetime_ticks=", int(lifetime_ticks),
-					" delay_ticks=", int(bullet_delay_ticks))
+					" delay_ticks=", int(bullet_delay_ticks), " (src=", bullet_delay_src, ")",
+					" cost=", int(bullet_cost), " (src=", bullet_cost_src, ")")
 		for gi in range(guns):
 			var tgun: float = 0.0
 			if guns > 1:
