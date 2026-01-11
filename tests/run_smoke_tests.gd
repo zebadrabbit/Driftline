@@ -23,6 +23,9 @@ const ReplayMeta = preload("res://client/replay/replay_meta.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
 const SettingsManager = preload("res://client/settings/settings_manager.gd")
+const DriftUiIconAtlas = preload("res://client/ui/ui_icon_atlas.gd")
+const DriftPrizeTypes = preload("res://client/ui/prize_types.gd")
+const PrizeFeedbackPipeline = preload("res://client/ui/prize_feedback_pipeline.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -53,6 +56,7 @@ func _initialize() -> void:
 	_test_safe_zone_time_limit_forces_non_safe_respawn()
 	_test_spawn_protection_blocks_damage()
 	_test_bullet_bounce_restitution_is_level_based_per_projectile()
+	_test_bullet_swept_collision_prevents_tunneling()
 	_test_team_auto_balance_assigns_even_teams()
 	_test_set_freq_rejects_when_force_even_violated()
 	_test_team_color_mapping_flips_with_freq()
@@ -79,8 +83,272 @@ func _initialize() -> void:
 	_test_bugreport_cleanup_after_zip()
 	_test_prizes_spawn_walkable()
 	_test_ship_sprite_atlas_mapping()
+	_test_ui_icon_atlas_contract_mapping()
+	_test_prize_types_mapping_contract()
+	_test_prize_feedback_pipeline_transient_non_stacking()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
+
+
+func _test_bullet_swept_collision_prevents_tunneling() -> void:
+	_ran += 1
+	# Regression: bullets must not tunnel through walls at any speed.
+	# This test deliberately sets an absurdly high velocity so the bullet would cross
+	# many tiles in a single tick if using discrete end-position checks.
+	var world := DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	# No tactical fragmentation; focus purely on wall collision correctness.
+	world.bullet_shrapnel_count = 0
+	world.bullet_bounces = 0
+	world.bullet_radius = 2.0
+
+	# Build a solid vertical wall at tile x=20.
+	var wall_x: int = 20
+	var solids: Array = []
+	for y in range(0, 60):
+		solids.append([wall_x, y, 0, 0])
+	world.set_solid_tiles(solids)
+
+	# Fire many bullets from the left toward the wall at different y positions.
+	# Each bullet should be consumed by the wall within the first tick.
+	var speed_px_s: float = 250000.0
+	var dt: float = float(DriftWorld.DriftConstants.TICK_DT)
+	var tile_size: int = int(DriftWorld.TILE_SIZE)
+
+	for i in range(40):
+		world.bullets.clear()
+		world.next_bullet_id = 1
+		var y_tile: int = 2 + i
+		var start_pos := Vector2(float((wall_x - 8) * tile_size), float(y_tile * tile_size + int(tile_size / 2)))
+		var vel := Vector2(speed_px_s, 0.0)
+		# Ensure the discrete end position would land far beyond the wall (tunneling case).
+		var end_pos := start_pos + vel * dt
+		if end_pos.x <= float((wall_x + 1) * tile_size):
+			_fail("bullet_swept_collision_prevents_tunneling (test misconfigured: end_pos not beyond wall)")
+			return
+		var b := DriftTypes.DriftBulletState.new(1, 123, 1, start_pos, vel, 0, -1, 0, 0)
+		world.bullets[1] = b
+		# Step one tick with no inputs and no ships.
+		world.step_tick({}, false, 0)
+		if world.bullets.size() != 0:
+			_fail("bullet_swept_collision_prevents_tunneling (bullet tunneled; y_tile=%d pos=%s)" % [y_tile, str((world.bullets.get(1) as DriftTypes.DriftBulletState).position)])
+			return
+
+	_pass("bullet_swept_collision_prevents_tunneling")
+
+
+func _test_prize_types_mapping_contract() -> void:
+	_ran += 1
+	# Ensure the logical PrizeType mapping exists for the explicitly supported kinds,
+	# and that any mapped icons are renderable in the contracted atlas.
+	var kinds := [
+		DriftTypes.PrizeKind.Gun,
+		DriftTypes.PrizeKind.Bomb,
+		DriftTypes.PrizeKind.MultiFire,
+		DriftTypes.PrizeKind.BouncingBullets,
+		DriftTypes.PrizeKind.Proximity,
+		DriftTypes.PrizeKind.Shrapnel,
+		DriftTypes.PrizeKind.Burst,
+		DriftTypes.PrizeKind.Repel,
+		DriftTypes.PrizeKind.Decoy,
+		DriftTypes.PrizeKind.Thor,
+		DriftTypes.PrizeKind.Brick,
+		DriftTypes.PrizeKind.Rocket,
+		DriftTypes.PrizeKind.Portal,
+		DriftTypes.PrizeKind.Energy,
+		DriftTypes.PrizeKind.QuickCharge,
+		DriftTypes.PrizeKind.Stealth,
+		DriftTypes.PrizeKind.XRadar,
+		DriftTypes.PrizeKind.AntiWarp,
+	]
+	for k in kinds:
+		var t: int = DriftPrizeTypes.prize_type_from_prize_kind(int(k))
+		if t < 0:
+			_fail("prize_types_mapping_contract (missing PrizeType for kind=%s)" % str(k))
+			return
+		var label: String = DriftPrizeTypes.label_for_prize_kind(int(k))
+		if label == "":
+			_fail("prize_types_mapping_contract (empty label for kind=%s)" % str(k))
+			return
+		var sid: String = DriftPrizeTypes.sound_id_for_prize_kind(int(k))
+		if sid == "":
+			_fail("prize_types_mapping_contract (empty sound_id for kind=%s)" % str(k))
+			return
+		var atlas: Vector2i = DriftPrizeTypes.icon_atlas_coords_for_prize_kind(int(k))
+		if atlas.x >= 0:
+			if not DriftUiIconAtlas.coords_is_renderable(atlas):
+				_fail("prize_types_mapping_contract (non-renderable icon for kind=%s atlas=%s)" % [str(k), str(atlas)])
+				return
+	_pass("prize_types_mapping_contract")
+
+
+func _test_prize_feedback_pipeline_transient_non_stacking() -> void:
+	_ran += 1
+	# Pipeline must be tick-based (replay safe), transient, and non-stacking.
+	var p = PrizeFeedbackPipeline.new()
+	# Seed cache with a few prize states.
+	var st1 := DriftTypes.DriftPrizeState.new(100, Vector2.ZERO, 0, 999, DriftTypes.PrizeKind.Gun, false, false)
+	var st2 := DriftTypes.DriftPrizeState.new(101, Vector2.ZERO, 0, 999, DriftTypes.PrizeKind.Burst, false, false)
+	p.cache_prize_states([st1, st2])
+
+	# Two local pickups in same event batch: last one wins.
+	var events := [
+		{"type": "pickup", "ship_id": 7, "prize_id": 100},
+		{"type": "pickup", "ship_id": 7, "prize_id": 101},
+	]
+	p.consume_prize_events(500, events, 7)
+	if not p.take_pickup_sfx_trigger():
+		_fail("prize_feedback_pipeline (expected one-shot sfx trigger)")
+		return
+	if p.take_pickup_sfx_trigger():
+		_fail("prize_feedback_pipeline (sfx trigger must not repeat)")
+		return
+	var txt := p.get_feedback_text_for_tick(500)
+	if txt.find("Burst") < 0:
+		_fail("prize_feedback_pipeline (expected last pickup label to win; got '%s')" % txt)
+		return
+	var icon := p.get_feedback_icon_for_tick(500)
+	# Burst icon is contract row3 col3 => atlas (col=3,row=3).
+	if icon != DriftUiIconAtlas.rc(3, 3):
+		_fail("prize_feedback_pipeline (expected burst icon atlas (3,3); got %s)" % str(icon))
+		return
+	var pt := p.get_feedback_prize_type_for_tick(500)
+	if pt != int(DriftPrizeTypes.PrizeType.BURST):
+		_fail("prize_feedback_pipeline (expected prize_type BURST; got %s)" % str(pt))
+		return
+	var toast_lbl := p.get_feedback_toast_label_for_tick(500)
+	if toast_lbl.find("Burst") < 0:
+		_fail("prize_feedback_pipeline (expected toast label to contain Burst; got '%s')" % toast_lbl)
+		return
+	# Should still be visible before expiry.
+	if p.get_feedback_text_for_tick(p.get_feedback_until_tick() - 1) == "":
+		_fail("prize_feedback_pipeline (expected visible before expiry)")
+		return
+	# Must expire at until_tick.
+	if p.get_feedback_text_for_tick(p.get_feedback_until_tick()) != "":
+		_fail("prize_feedback_pipeline (expected expired at until_tick)")
+		return
+	_pass("prize_feedback_pipeline_transient_non_stacking")
+
+
+func _test_ui_icon_atlas_contract_mapping() -> void:
+	_ran += 1
+	# Strictly validate the fixed icon atlas mapping contract.
+	# This does not render; it asserts that our selection code returns exactly the
+	# contracted (row,col) cells and never marks reserved blanks as renderable.
+
+	# Guns row 0 (no bounce) and row 1 (bounce).
+	if DriftUiIconAtlas.gun_icon_coords(1, false, false, false) != DriftUiIconAtlas.rc(0, 0):
+		_fail("ui_icon_atlas (gun L1 single expected (0,0))")
+		return
+	if DriftUiIconAtlas.gun_icon_coords(2, false, true, true) != DriftUiIconAtlas.rc(0, 4):
+		_fail("ui_icon_atlas (gun L2 multishot enabled expected (0,4))")
+		return
+	if DriftUiIconAtlas.gun_icon_coords(3, true, true, false) != DriftUiIconAtlas.rc(1, 8):
+		_fail("ui_icon_atlas (gun L3 multishot owned single-fire+bounce expected (1,8))")
+		return
+
+	# Bombs row 2 base variants; row 3 prox+shrap.
+	if DriftUiIconAtlas.bomb_icon_coords(2, false, false) != DriftUiIconAtlas.rc(2, 1):
+		_fail("ui_icon_atlas (bomb L2 no prox no shrap expected (2,1))")
+		return
+	if DriftUiIconAtlas.bomb_icon_coords(3, true, false) != DriftUiIconAtlas.rc(2, 5):
+		_fail("ui_icon_atlas (bomb L3 prox no shrap expected (2,5))")
+		return
+	if DriftUiIconAtlas.bomb_icon_coords(1, false, true) != DriftUiIconAtlas.rc(2, 6):
+		_fail("ui_icon_atlas (bomb L1 no prox shrap expected (2,6))")
+		return
+	if DriftUiIconAtlas.bomb_icon_coords(2, true, true) != DriftUiIconAtlas.rc(3, 1):
+		_fail("ui_icon_atlas (bomb L2 prox+shrap expected (3,1))")
+		return
+
+	# Misc (row 3/4 toggles).
+	if DriftUiIconAtlas.inventory_icon_coords(&"burst") != DriftUiIconAtlas.rc(3, 3):
+		_fail("ui_icon_atlas (burst expected (3,3))")
+		return
+	if DriftUiIconAtlas.inventory_icon_coords(&"repel") != DriftUiIconAtlas.rc(3, 4):
+		_fail("ui_icon_atlas (repel expected (3,4))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"radar", true) != DriftUiIconAtlas.rc(3, 5):
+		_fail("ui_icon_atlas (radar ON expected (3,5))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"radar", false) != DriftUiIconAtlas.rc(3, 6):
+		_fail("ui_icon_atlas (radar OFF expected (3,6))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"stealth", true) != DriftUiIconAtlas.rc(3, 7):
+		_fail("ui_icon_atlas (stealth ON expected (3,7))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"stealth", false) != DriftUiIconAtlas.rc(3, 8):
+		_fail("ui_icon_atlas (stealth OFF expected (3,8))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"xradar", true) != DriftUiIconAtlas.rc(4, 0):
+		_fail("ui_icon_atlas (xradar ON expected (4,0))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"xradar", false) != DriftUiIconAtlas.rc(4, 1):
+		_fail("ui_icon_atlas (xradar OFF expected (4,1))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"antiwarp", true) != DriftUiIconAtlas.rc(4, 2):
+		_fail("ui_icon_atlas (antiwarp ON expected (4,2))")
+		return
+	if DriftUiIconAtlas.toggle_icon_coords(&"antiwarp", false) != DriftUiIconAtlas.rc(4, 3):
+		_fail("ui_icon_atlas (antiwarp OFF expected (4,3))")
+		return
+
+	# Inventory row 4.
+	if DriftUiIconAtlas.inventory_icon_coords(&"decoy") != DriftUiIconAtlas.rc(4, 4):
+		_fail("ui_icon_atlas (decoy expected (4,4))")
+		return
+	if DriftUiIconAtlas.inventory_icon_coords(&"thor") != DriftUiIconAtlas.rc(4, 5):
+		_fail("ui_icon_atlas (thor expected (4,5))")
+		return
+	if DriftUiIconAtlas.inventory_icon_coords(&"brick") != DriftUiIconAtlas.rc(4, 6):
+		_fail("ui_icon_atlas (brick expected (4,6))")
+		return
+	if DriftUiIconAtlas.inventory_icon_coords(&"thruster") != DriftUiIconAtlas.rc(4, 7):
+		_fail("ui_icon_atlas (thruster expected (4,7))")
+		return
+	if DriftUiIconAtlas.inventory_icon_coords(&"rocket") != DriftUiIconAtlas.rc(4, 8):
+		_fail("ui_icon_atlas (rocket expected (4,8))")
+		return
+
+	# Keys / teleport / placeholders.
+	if DriftUiIconAtlas.key_icon_coords() != DriftUiIconAtlas.rc(5, 0):
+		_fail("ui_icon_atlas (key expected (5,0))")
+		return
+	if DriftUiIconAtlas.teleport_icon_coords() != DriftUiIconAtlas.rc(5, 1):
+		_fail("ui_icon_atlas (teleport expected (5,1))")
+		return
+	if DriftUiIconAtlas.empty_placeholder_coords(DriftUiIconAtlas.Side.RIGHT) != DriftUiIconAtlas.rc(5, 3):
+		_fail("ui_icon_atlas (right placeholder expected (5,3))")
+		return
+	if DriftUiIconAtlas.empty_placeholder_coords(DriftUiIconAtlas.Side.LEFT) != DriftUiIconAtlas.rc(5, 5):
+		_fail("ui_icon_atlas (left placeholder expected (5,5))")
+		return
+
+	# Reserved blanks must never be renderable.
+	var blanks: Array[Vector2i] = [
+		DriftUiIconAtlas.rc(5, 2),
+		DriftUiIconAtlas.rc(5, 4),
+		DriftUiIconAtlas.rc(5, 6),
+		DriftUiIconAtlas.rc(5, 7),
+		DriftUiIconAtlas.rc(5, 8),
+	]
+	for b in blanks:
+		if not DriftUiIconAtlas.coords_is_blank(b):
+			_fail("ui_icon_atlas (expected blank at %s)" % str(b))
+			return
+		if DriftUiIconAtlas.coords_is_renderable(b):
+			_fail("ui_icon_atlas (blank must not be renderable at %s)" % str(b))
+			return
+
+	# Placeholders are renderable.
+	var ph_r := DriftUiIconAtlas.empty_placeholder_coords(DriftUiIconAtlas.Side.RIGHT)
+	var ph_l := DriftUiIconAtlas.empty_placeholder_coords(DriftUiIconAtlas.Side.LEFT)
+	if not DriftUiIconAtlas.coords_is_renderable(ph_r) or not DriftUiIconAtlas.coords_is_renderable(ph_l):
+		_fail("ui_icon_atlas (placeholders should be renderable)")
+		return
+
+	_pass("ui_icon_atlas_contract_mapping")
 
 
 func _test_bugreport_cleanup_after_zip() -> void:

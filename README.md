@@ -179,6 +179,7 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Client-side color mapping is centralized in `client/team_colors.gd` (includes a reserved priority color for objective carrier and radar/minimap helper mapping APIs).
 - Server spawn locations can come from map `entities` with `type="spawn"`.
 - Wall-bounce sound is triggered from shared collision events (client-side audio).
+- Bullet vs wall collision is swept/continuous per tick (segment cast) to prevent tunneling at high speeds.
 
 ## Bots (Headless Clients)
 

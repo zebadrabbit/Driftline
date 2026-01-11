@@ -782,9 +782,13 @@ func _step_bullets(ship_ids_sorted: Array) -> void:
 		var old_pos: Vector2 = b.position
 		var new_pos: Vector2 = old_pos + b.velocity * DriftConstants.TICK_DT
 
-		# Wall collision/bounce.
-		if br > 0.0 and is_position_blocked(new_pos, br):
-			var n: Vector2 = get_collision_normal(old_pos, new_pos, br)
+		# Wall collision/bounce (continuous/swept).
+		var sweep := {"hit": false}
+		if br > 0.0:
+			sweep = _sweep_circle_against_static_solids(old_pos, new_pos, br)
+		if bool(sweep.get("hit", false)):
+			var hit_pos: Vector2 = sweep.get("pos", old_pos)
+			var n: Vector2 = sweep.get("normal", Vector2.ZERO)
 			if n.length_squared() <= 0.0001:
 				# Deterministic fallback: use velocity direction.
 				var vv: Vector2 = b.velocity
@@ -803,8 +807,10 @@ func _step_bullets(ship_ids_sorted: Array) -> void:
 				# Consume one bounce.
 				b.bounces_left = maxi(0, int(b.bounces_left) - 1)
 				# Keep position on the safe side to avoid re-colliding.
-				b.position = old_pos + n * (br + 0.5)
+				b.position = hit_pos + n * (br + 0.5)
 			else:
+				# Ensure shrapnel spawns at the impact point.
+				b.position = hit_pos
 				_maybe_spawn_bullet_shrapnel(b)
 				to_erase.append(bid)
 				continue
@@ -2323,6 +2329,200 @@ func get_collision_normal(old_pos: Vector2, new_pos: Vector2, radius: float) -> 
 					return normal
 	
 	return Vector2.ZERO
+
+
+func _segment_intersects_aabb(p0: Vector2, p1: Vector2, aabb_min: Vector2, aabb_max: Vector2) -> Dictionary:
+	# Deterministic segment vs AABB intersection using slab method.
+	# Returns {hit: bool, t: float, normal: Vector2}
+	var d: Vector2 = p1 - p0
+	var t_min: float = 0.0
+	var t_max: float = 1.0
+	var hit_normal: Vector2 = Vector2.ZERO
+
+	# X slab.
+	if absf(d.x) < 0.0000001:
+		if p0.x < aabb_min.x or p0.x > aabb_max.x:
+			return {"hit": false}
+	else:
+		var inv_dx: float = 1.0 / d.x
+		var tx1: float = (aabb_min.x - p0.x) * inv_dx
+		var tx2: float = (aabb_max.x - p0.x) * inv_dx
+		var nx1: Vector2 = Vector2(-1.0, 0.0)
+		var nx2: Vector2 = Vector2(1.0, 0.0)
+		if tx1 > tx2:
+			var tmp: float = tx1
+			tx1 = tx2
+			tx2 = tmp
+			var tmpn: Vector2 = nx1
+			nx1 = nx2
+			nx2 = tmpn
+		if tx1 > t_min:
+			t_min = tx1
+			hit_normal = nx1
+		t_max = minf(t_max, tx2)
+		if t_min > t_max:
+			return {"hit": false}
+
+	# Y slab.
+	if absf(d.y) < 0.0000001:
+		if p0.y < aabb_min.y or p0.y > aabb_max.y:
+			return {"hit": false}
+	else:
+		var inv_dy: float = 1.0 / d.y
+		var ty1: float = (aabb_min.y - p0.y) * inv_dy
+		var ty2: float = (aabb_max.y - p0.y) * inv_dy
+		var ny1: Vector2 = Vector2(0.0, -1.0)
+		var ny2: Vector2 = Vector2(0.0, 1.0)
+		if ty1 > ty2:
+			var tmpy: float = ty1
+			ty1 = ty2
+			ty2 = tmpy
+			var tmpny: Vector2 = ny1
+			ny1 = ny2
+			ny2 = tmpny
+		if ty1 > t_min:
+			t_min = ty1
+			hit_normal = ny1
+		t_max = minf(t_max, ty2)
+		if t_min > t_max:
+			return {"hit": false}
+
+	if t_max < 0.0 or t_min > 1.0:
+		return {"hit": false}
+	var t_hit: float = clampf(t_min, 0.0, 1.0)
+	return {"hit": true, "t": t_hit, "normal": hit_normal}
+
+
+func _sweep_hit_for_solid_tile(p0: Vector2, p1: Vector2, radius: float, tile_coord: Vector2i) -> Dictionary:
+	# Helper for swept collision: test segment vs a single solid tile inflated by radius.
+	# Returns {hit: bool, t: float, normal: Vector2}
+	if not solid_tiles.has(tile_coord):
+		return {"hit": false}
+	var r: float = maxf(0.0, float(radius))
+	var tile_min: Vector2 = Vector2(float(tile_coord.x * TILE_SIZE), float(tile_coord.y * TILE_SIZE))
+	var tile_max: Vector2 = tile_min + Vector2(float(TILE_SIZE), float(TILE_SIZE))
+	var aabb_min: Vector2 = tile_min - Vector2(r, r)
+	var aabb_max: Vector2 = tile_max + Vector2(r, r)
+	return _segment_intersects_aabb(p0, p1, aabb_min, aabb_max)
+
+
+func _sweep_circle_against_static_solids(old_pos: Vector2, new_pos: Vector2, radius: float) -> Dictionary:
+	# Continuous/swept collision for a circle moving along a segment against solid tiles.
+	# Returns {hit: bool, t: float, pos: Vector2, normal: Vector2, tile: Vector2i}
+	# Notes:
+	# - Uses deterministic grid traversal (DDA) over the segment.
+	# - Checks candidate solid tiles near visited cells to account for radius.
+	var r: float = maxf(0.0, float(radius))
+	var p0: Vector2 = old_pos
+	var p1: Vector2 = new_pos
+	var d: Vector2 = p1 - p0
+	if d.length_squared() <= 0.0000001:
+		if r > 0.0 and is_position_blocked(p1, r):
+			var n0: Vector2 = get_collision_normal(p0, p1, r)
+			if n0.length_squared() <= 0.0001:
+				n0 = Vector2(1.0, 0.0)
+			return {"hit": true, "t": 0.0, "pos": p0, "normal": n0, "tile": Vector2i.ZERO}
+		return {"hit": false}
+
+	var start_tx: int = int(floor(p0.x / float(TILE_SIZE)))
+	var start_ty: int = int(floor(p0.y / float(TILE_SIZE)))
+	var end_tx: int = int(floor(p1.x / float(TILE_SIZE)))
+	var end_ty: int = int(floor(p1.y / float(TILE_SIZE)))
+
+	var step_x: int = 0
+	var step_y: int = 0
+	if d.x > 0.0:
+		step_x = 1
+	elif d.x < 0.0:
+		step_x = -1
+	if d.y > 0.0:
+		step_y = 1
+	elif d.y < 0.0:
+		step_y = -1
+
+	var t_max_x: float = INF
+	var t_max_y: float = INF
+	var t_delta_x: float = INF
+	var t_delta_y: float = INF
+
+	if step_x != 0:
+		var next_x_boundary: float = float(start_tx + (1 if step_x > 0 else 0)) * float(TILE_SIZE)
+		t_max_x = (next_x_boundary - p0.x) / d.x
+		t_delta_x = float(TILE_SIZE) / absf(d.x)
+	if step_y != 0:
+		var next_y_boundary: float = float(start_ty + (1 if step_y > 0 else 0)) * float(TILE_SIZE)
+		t_max_y = (next_y_boundary - p0.y) / d.y
+		t_delta_y = float(TILE_SIZE) / absf(d.y)
+
+	var neigh: int = int(ceil(r / float(TILE_SIZE))) + 1
+	neigh = clampi(neigh, 0, 8)
+
+	var best_t: float = 2.0
+	var best_normal: Vector2 = Vector2.ZERO
+	var best_tile: Vector2i = Vector2i.ZERO
+	var checked: Dictionary = {} # Dictionary[Vector2i, bool]
+
+	var tx: int = start_tx
+	var ty: int = start_ty
+	var max_steps: int = 1 + abs(end_tx - start_tx) + abs(end_ty - start_ty) + 4096
+	for _i in range(max_steps):
+		# Consider solids near this traversed cell.
+		for cx in range(tx - neigh, tx + neigh + 1):
+			for cy in range(ty - neigh, ty + neigh + 1):
+				var tile_coord := Vector2i(cx, cy)
+				if checked.has(tile_coord):
+					continue
+				checked[tile_coord] = true
+				var hit := _sweep_hit_for_solid_tile(p0, p1, r, tile_coord)
+				if not bool(hit.get("hit", false)):
+					continue
+				var t_hit: float = float(hit.get("t", 0.0))
+				if t_hit < 0.0 or t_hit > 1.0:
+					continue
+				if t_hit + 0.0000001 < best_t:
+					best_t = t_hit
+					best_normal = hit.get("normal", Vector2.ZERO)
+					best_tile = tile_coord
+				elif absf(t_hit - best_t) <= 0.0000001:
+					# Deterministic tie-break: lower y, then lower x.
+					if tile_coord.y < best_tile.y or (tile_coord.y == best_tile.y and tile_coord.x < best_tile.x):
+						best_t = t_hit
+						best_normal = hit.get("normal", Vector2.ZERO)
+						best_tile = tile_coord
+		# Early out if we already found a hit before the next cell boundary.
+		var next_boundary_t: float = minf(t_max_x, t_max_y)
+		if best_t <= next_boundary_t:
+			break
+		# Advance to next cell.
+		if t_max_x < t_max_y:
+			tx += step_x
+			t_max_x += t_delta_x
+		else:
+			ty += step_y
+			t_max_y += t_delta_y
+		# Stop once segment end cell reached and we've crossed beyond t=1.
+		if (tx == end_tx and ty == end_ty) and minf(t_max_x, t_max_y) > 1.0:
+			break
+
+	if best_t <= 1.0:
+		var hit_pos: Vector2 = p0 + d * best_t
+		# Derive a collision normal consistent with existing wall logic.
+		var speed: float = maxf(0.0001, d.length())
+		var eps_t: float = SEPARATION_EPSILON / speed
+		var inside_t: float = clampf(best_t + eps_t, 0.0, 1.0)
+		var inside_pos: Vector2 = p0 + d * inside_t
+		var n: Vector2 = get_collision_normal(p0, inside_pos, r)
+		if n.length_squared() <= 0.0001:
+			n = best_normal
+		if n.length_squared() <= 0.0001:
+			var vv: Vector2 = d
+			if vv.length_squared() > 0.0001:
+				n = (-vv).normalized()
+			else:
+				n = Vector2(1.0, 0.0)
+		return {"hit": true, "t": best_t, "pos": hit_pos, "normal": n, "tile": best_tile}
+
+	return {"hit": false}
 
 
 

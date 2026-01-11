@@ -130,3 +130,4 @@ This project didn’t previously have a formal changelog. The entries below were
 - Tile palette tileset scanning compatibility by using `TileSet.get_source_count()` + `get_source_id(i)` (instead of `get_source_ids()`).
 - Client-side map load logging and collision-layer parsing (aligning with LevelIO return values).
 - Wall bounce sound triggering again when collisions are resolved by the shared simulation.
+- Projectile tunneling: bullets now use swept/continuous collision against solid tiles (segment cast per tick), with a smoke test to prevent regressions.

@@ -26,7 +26,8 @@ const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.g
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
 
-const DEBUG_NET: bool = false
+var debug_net: bool = false
+var debug_sim: bool = false
 
 var alive_timer := 0.0
 var last_printed_tick := -1
@@ -222,7 +223,11 @@ func _parse_user_args() -> void:
 	#   --quit_flag=user://server.quit
 	#   --replay_record_path=user://replays/session.jsonl
 	#   --replay_notes=optional
+	#   --debug_net=0|1 (enables net debug prints)
+	#   --debug_sim=0|1 (enables high-frequency sim tick prints)
 	var args: PackedStringArray = OS.get_cmdline_user_args()
+	var truthy := {"1": true, "true": true, "yes": true, "y": true, "on": true}
+	var falsy := {"0": true, "false": true, "no": true, "n": true, "off": true}
 	for raw in args:
 		var s: String = String(raw)
 		if s.begins_with("--"):
@@ -234,6 +239,7 @@ func _parse_user_args() -> void:
 			continue
 		var key: String = parts[0]
 		var value: String = parts[1]
+		var v_norm: String = value.strip_edges().to_lower()
 		if key == "quit_after":
 			quit_after_seconds = float(value)
 		elif key == "quit_flag":
@@ -242,6 +248,16 @@ func _parse_user_args() -> void:
 			replay_record_path = value
 		elif key == "replay_notes":
 			replay_notes = value
+		elif key == "debug_net":
+			if truthy.has(v_norm):
+				debug_net = true
+			elif falsy.has(v_norm):
+				debug_net = false
+		elif key == "debug_sim":
+			if truthy.has(v_norm):
+				debug_sim = true
+			elif falsy.has(v_norm):
+				debug_sim = false
 
 
 func _load_map(path: String) -> void:
@@ -610,11 +626,12 @@ func _step_authoritative_tick() -> void:
 
 	if world.tick % DriftConstants.TICK_RATE == 0 and world.tick != last_printed_tick:
 		last_printed_tick = world.tick
-		print("[SERVER] SIM TICK:", world.tick, " ships=", world.ships.size())
+		if debug_sim:
+			print("[SERVER] SIM TICK:", world.tick, " ships=", world.ships.size())
 
 
 	# After stepping, world.tick must now equal the intended tick.
-	if DEBUG_NET and world.tick != intended_tick:
+	if debug_net and world.tick != intended_tick:
 		print("[NET] tick mismatch after step: intended=", intended_tick, " actual=", world.tick)
 
 	if (latest_snapshot.tick % SNAPSHOT_INTERVAL_TICKS) == 0:
@@ -623,7 +640,7 @@ func _step_authoritative_tick() -> void:
 	if (latest_snapshot.tick % DriftConstants.TICK_RATE) == 0:
 		var snapshot_ship_ids: Array = latest_snapshot.ships.keys()
 		snapshot_ship_ids.sort()
-		if snapshot_ship_ids.size() > 0:
+		if debug_sim and snapshot_ship_ids.size() > 0:
 			var ship_id: int = int(snapshot_ship_ids[0])
 			var ship_state: DriftTypes.DriftShipState = latest_snapshot.ships[ship_id]
 			print("tick=", latest_snapshot.tick,

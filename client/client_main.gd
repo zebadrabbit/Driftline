@@ -36,6 +36,8 @@ const MapEditorScene: PackedScene = preload("res://client/scenes/editor/MapEdito
 const TilemapEditorScene: PackedScene = preload("res://tools/tilemap_editor/TilemapEditor.tscn")
 const EscMenuScene: PackedScene = preload("res://client/scenes/EscMenu.tscn")
 const OptionsMenuScene: PackedScene = preload("res://client/ui/options_menu.tscn")
+const PrizeFeedbackPipeline = preload("res://client/ui/prize_feedback_pipeline.gd")
+const DriftPrizeTypes = preload("res://client/ui/prize_types.gd")
 
 const PRIZE_TEX: Texture2D = preload("res://client/graphics/entities/prizes.png")
 const PRIZE_FRAME_PX: int = 16
@@ -159,6 +161,29 @@ var _help_interrupt_prev_in_safe_zone: bool = false
 var _help_interrupt_prev_dead: bool = false
 var _help_interrupt_prev_energy_frac: float = 1.0
 
+# Prize pickup UI feedback (client-only; driven by authoritative snapshots).
+var _prize_feedback_pipeline = PrizeFeedbackPipeline.new()
+
+# Client-only inventory counts for HUD left-stack.
+# NOTE: The authoritative sim does not currently replicate inventory counts,
+# so we derive these from authoritative prize_events (and later can decrement
+# on authoritative use events when those exist).
+var _ui_inventory_counts: Dictionary = {
+	&"burst": 0,
+	&"repel": 0,
+	&"decoy": 0,
+	&"thor": 0,
+	&"brick": 0,
+	&"rocket": 0,
+	&"teleport": 0,
+}
+
+
+# Toast duration (~1s) in deterministic ticks.
+const PRIZE_TOAST_DURATION_MS: int = 1000
+const PRIZE_TOAST_DURATION_TICKS: int = int((PRIZE_TOAST_DURATION_MS * DriftConstants.TICK_RATE + 999) / 1000)
+
+
 # Interpolation state for remote ships and ball
 var snap_a_tick := -1
 var snap_b_tick := -1
@@ -207,6 +232,11 @@ var _last_door_anim_key: int = -999999
 
 
 func _ready() -> void:
+	# Ensure this node receives global input events.
+	# Some platforms/scenes can end up with input processing disabled, which would
+	# leave the client stuck on the connection UI (HUD hidden).
+	set_process_input(true)
+
 	_ships_tex = DriftShipAtlas.get_ships_texture()
 	if _ships_tex == null:
 		_ships_tex = SHIPS_TEX_FALLBACK
@@ -699,6 +729,7 @@ func _process(delta: float) -> void:
 				var gun_lvl: int = int(ss.gun_level) if ("gun_level" in ss) else 1
 				var bomb_lvl: int = int(ss.bomb_level) if ("bomb_level" in ss) else 1
 				var mf: bool = bool(ss.multi_fire_enabled) if ("multi_fire_enabled" in ss) else false
+				var bb: int = int(ss.bullet_bounce_bonus) if ("bullet_bounce_bonus" in ss) else 0
 				# Proximity bombs are not implemented yet; keep false.
 				var prox: bool = false
 				hud.call(
@@ -722,7 +753,8 @@ func _process(delta: float) -> void:
 					gun_lvl,
 					bomb_lvl,
 					mf,
-					prox
+					prox,
+					bb
 				)
 				# Minimap dynamic state (client-only UI; uses authoritative snapshot)
 				if hud.has_method("set_minimap_dynamic"):
@@ -730,6 +762,11 @@ func _process(delta: float) -> void:
 					var xr_on2: bool = bool(ss.xradar_on) if ("xradar_on" in ss) else false
 					var pos2: Vector2 = ss.position if ("position" in ss) else Vector2.ZERO
 					hud.call("set_minimap_dynamic", latest_snapshot, local_ship_id, my_freq, pos2, xr_on2)
+				# New HUD UX: edge icon stacks.
+				if hud.has_method("set_ball_possession") and latest_snapshot != null and ("ball_owner_id" in latest_snapshot):
+					hud.call("set_ball_possession", int(latest_snapshot.ball_owner_id) == int(local_ship_id))
+				if hud.has_method("set_inventory_counts"):
+					hud.call("set_inventory_counts", _ui_inventory_counts)
 				# Help ticker interrupt events are driven from authoritative snapshot state,
 				# and are edge-triggered (fire once per event type per session).
 				if hud.has_method("show_help_interrupt"):
@@ -1284,6 +1321,8 @@ func _draw() -> void:
 	if ship_state == null:
 		return
 
+	# Pickup feed is now screen-space HUD-only (not drawn in world space).
+
 	# Friend/enemy colors are derived from replicated team frequency.
 	var my_freq: int = int(ship_state.freq)
 
@@ -1774,7 +1813,9 @@ func _input(event: InputEvent) -> void:
 	# The new EscMenu overlay owns ESC behavior via ui_escape_menu.
 
 	if show_connect_ui:
-		if event.is_action_pressed("drift_menu_connect"):
+		# Accept the project-specific action and the engine default accept action.
+		# This makes the connection screen resilient to keybinding differences.
+		if event.is_action_pressed("drift_menu_connect") or event.is_action_pressed("ui_accept"):
 			_attempt_server_connection()
 		elif event.is_action_pressed("drift_menu_offline"):
 			_start_offline_mode()
@@ -2281,6 +2322,31 @@ func _update_connection_state() -> void:
 	last_connection_status = status
 
 
+func notify_prize_awarded(prize_type: int) -> void:
+	# Single entry point for prize feedback.
+	# Called after gameplay state is updated.
+	# - Resolves UI metadata from PrizeType.
+	# - Triggers PrizeToast.
+	# - No-ops when UI is disabled or running headless.
+	if OS.has_feature("headless"):
+		return
+	var hud := get_node_or_null("HUD")
+	if hud == null:
+		return
+	# If toast is disabled, do nothing.
+	if ("prize_toast_enabled" in hud) and (not bool(hud.get("prize_toast_enabled"))):
+		return
+	if not hud.has_method("set_prize_toast"):
+		return
+	var pt: int = int(prize_type)
+	var label: String = DriftPrizeTypes.label_for_type(pt)
+	var icon: Vector2i = DriftPrizeTypes.icon_atlas_coords_for_type(pt)
+	# Deterministic expiry in sim ticks.
+	var now_tick: int = int(world.tick)
+	var until_tick: int = now_tick + int(PRIZE_TOAST_DURATION_TICKS)
+	hud.call("set_prize_toast", pt, icon, label, until_tick)
+
+
 func _handle_packet(bytes: PackedByteArray) -> void:
 	var pkt_type: int = DriftNet.get_packet_type(bytes)
 	if pkt_type == DriftNet.PKT_SNAPSHOT:
@@ -2299,6 +2365,12 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	if local_ship_id < 0:
 		return
 
+	# Cache last-known prize metadata by id so we can label pickup events.
+	# Pickup events only carry prize_id, and the prize itself may already be removed
+	# from the current snapshot list.
+	if not authoritative_prizes.is_empty() and _prize_feedback_pipeline != null:
+		_prize_feedback_pipeline.cache_prize_states(authoritative_prizes)
+
 	# --- Interpolation snapshot shift ---
 	# Shift A <- B, then B <- new snapshot
 	snap_a_tick = snap_b_tick
@@ -2311,17 +2383,66 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	snap_b_ships = {}
 
 	var ships: Array = snap_dict["ships"]
-	# Prize pickup SFX: driven by authoritative prize_events when present.
-	if _prize_audio != null and snap_dict.has("prize_events") and (snap_dict.get("prize_events") is Array):
-		for ev in (snap_dict.get("prize_events") as Array):
-			if ev == null or typeof(ev) != TYPE_DICTIONARY:
-				continue
-			var d: Dictionary = ev
-			if String(d.get("type", "")) != "pickup":
-				continue
-			if int(d.get("ship_id", -1)) == local_ship_id:
+	# Prize pickup feedback: driven by authoritative prize_events when present.
+	# Pipeline is UI-only; it emits a one-shot SFX trigger and a stable label we reuse for the
+	# pickup feed and client-only inventory counts.
+	if snap_dict.has("prize_events") and (snap_dict.get("prize_events") is Array) and _prize_feedback_pipeline != null:
+		_prize_feedback_pipeline.consume_prize_events(snap_tick, (snap_dict.get("prize_events") as Array), local_ship_id)
+
+		# NEW UX:
+		# - No prize icons/messages in chat/help ticker.
+		# - Append text-only pickup line into the screen-space HUD pickup feed.
+		# - Update left inventory counts (client-only; derived from pickups).
+		var toast_label2: String = _prize_feedback_pipeline.take_toast_label_trigger()
+		var pt2: int = _prize_feedback_pipeline.take_awarded_prize_type_trigger()
+		if toast_label2 != "":
+			# Optional transient UI toast (only if HUD has it enabled).
+			if not OS.has_feature("headless"):
+				var hud_toast := get_node_or_null("HUD")
+				if hud_toast != null and hud_toast.has_method("set_prize_toast"):
+					var icon2: Vector2i = DriftPrizeTypes.icon_atlas_coords_for_type(pt2)
+					var until2: int = int(world.tick) + int(PRIZE_TOAST_DURATION_TICKS)
+					hud_toast.call("set_prize_toast", pt2, icon2, toast_label2, until2)
+
+			if not OS.has_feature("headless"):
+				var hud_feed := get_node_or_null("HUD")
+				if hud_feed != null and hud_feed.has_method("add_pickup_feed_line_until_tick"):
+					var feed_until2: int = int(snap_tick) + int(PrizeFeedbackPipeline.PRIZE_FEEDBACK_DURATION_TICKS)
+					hud_feed.call("add_pickup_feed_line_until_tick", toast_label2, feed_until2)
+				elif hud_feed != null and hud_feed.has_method("add_pickup_feed_line"):
+					hud_feed.call("add_pickup_feed_line", toast_label2)
+
+			# Only update inventory counts when we can classify the pickup.
+			if pt2 >= 0:
+				var delta: int = -1 if toast_label2.begins_with("-") else 1
+				var key: StringName = &""
+				match int(pt2):
+					int(DriftPrizeTypes.PrizeType.BURST):
+						key = &"burst"
+					int(DriftPrizeTypes.PrizeType.REPEL):
+						key = &"repel"
+					int(DriftPrizeTypes.PrizeType.DECOY):
+						key = &"decoy"
+					int(DriftPrizeTypes.PrizeType.THOR):
+						key = &"thor"
+					int(DriftPrizeTypes.PrizeType.BRICK):
+						key = &"brick"
+					int(DriftPrizeTypes.PrizeType.ROCKET):
+						key = &"rocket"
+					int(DriftPrizeTypes.PrizeType.TELEPORT):
+						key = &"teleport"
+					_:
+						key = &""
+				if key != &"":
+					var prev: int = int(_ui_inventory_counts.get(key, 0))
+					_ui_inventory_counts[key] = maxi(0, prev + delta)
+					if not OS.has_feature("headless"):
+						var hud_inv := get_node_or_null("HUD")
+						if hud_inv != null and hud_inv.has_method("set_inventory_counts"):
+							hud_inv.call("set_inventory_counts", _ui_inventory_counts)
+		if _prize_feedback_pipeline.take_pickup_sfx_trigger():
+			if _prize_audio != null and _prize_audio.stream != null:
 				_prize_audio.play()
-				break
 	# Authoritative bullets (render remote bullets; local bullets are predicted).
 	authoritative_bullets.clear()
 	if snap_dict.has("bullets") and (snap_dict.get("bullets") is Array):
@@ -2337,7 +2458,10 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		for p in ps:
 			if p == null:
 				continue
-			authoritative_prizes.append(DriftTypes.DriftPrizeState.new(int(p.id), p.pos, snap_tick, int(p.despawn_tick), int(p.kind), bool(p.is_negative), bool(p.is_death_drop)))
+			var st := DriftTypes.DriftPrizeState.new(int(p.id), p.pos, snap_tick, int(p.despawn_tick), int(p.kind), bool(p.is_negative), bool(p.is_death_drop))
+			authoritative_prizes.append(st)
+		if _prize_feedback_pipeline != null and not authoritative_prizes.is_empty():
+			_prize_feedback_pipeline.cache_prize_states(authoritative_prizes)
 	# Also attach authoritative prize list to the rendered snapshot so the minimap/radar UI
 	# (which consumes latest_snapshot) can draw prize dots.
 	if latest_snapshot != null:

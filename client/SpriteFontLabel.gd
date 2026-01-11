@@ -95,7 +95,24 @@ static func _static_load_png_texture(path: String) -> Texture2D:
 	if err != OK:
 		push_error("SpriteFontLabel: failed to decode PNG: %s (err=%d)" % [path, err])
 		return null
+	_apply_black_transparency_key(img)
 	return ImageTexture.create_from_image(img)
+
+
+static func _apply_black_transparency_key(img: Image) -> void:
+	# The SubSpace-style font sheets use solid black as the background.
+	# Convert that background to transparent so UI text has no black box behind it.
+	if img == null:
+		return
+	img.convert(Image.FORMAT_RGBA8)
+	var w := img.get_width()
+	var h := img.get_height()
+	for y in range(h):
+		for x in range(w):
+			var c: Color = img.get_pixel(x, y)
+			if c.r <= 0.001 and c.g <= 0.001 and c.b <= 0.001:
+				c.a = 0.0
+				img.set_pixel(x, y, c)
 
 # --- Small font spec ---
 const SMALL_CELL_W := 8
@@ -136,6 +153,9 @@ var _text_pixel_width: int = 0
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# These bitmap fonts are authored for 1:1 pixel rendering.
+	# Nearest filtering avoids blur/halos, especially with transparency.
+	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	# If no textures were set in the Inspector, load sensible defaults from your repo.
 	# These defaults match the 8-color order in the task description.
 	_ensure_default_textures()
@@ -188,6 +208,12 @@ func get_text_width_px() -> int:
 
 func get_cell_size_px() -> Vector2i:
 	return Vector2i(_cell_w(), _cell_h())
+
+
+func _get_minimum_size() -> Vector2:
+	# Allow containers/layout to size the label to its content.
+	# Height is one cell; width is the cached pixel width (includes letter spacing).
+	return Vector2(float(_text_pixel_width), float(_cell_h()))
 
 
 func _draw() -> void:
@@ -257,14 +283,19 @@ func _rows_per_color() -> int:
 
 
 func _rebuild_cache() -> void:
+	var prev_w: int = int(_text_pixel_width)
 	_glyph_src_rects.clear()
 	_text_pixel_width = 0
 
 	if _text == "":
+		if int(_text_pixel_width) != prev_w:
+			update_minimum_size()
 		return
 
 	var atlas := _get_active_texture()
 	if atlas == null:
+		if int(_text_pixel_width) != prev_w:
+			update_minimum_size()
 		return
 
 	var cell_w := _cell_w()
@@ -295,6 +326,8 @@ func _rebuild_cache() -> void:
 		_glyph_src_rects.append(src)
 
 	_text_pixel_width = (_glyph_src_rects.size() * cell_w) + max(0, _glyph_src_rects.size() - 1) * letter_spacing_px
+	if int(_text_pixel_width) != prev_w:
+		update_minimum_size()
 
 
 func _ensure_default_textures() -> void:
@@ -323,5 +356,6 @@ func _load_png_texture(path: String) -> Texture2D:
 	if err != OK:
 		push_error("SpriteFontLabel: failed to decode PNG: %s (err=%d)" % [path, err])
 		return null
+	_apply_black_transparency_key(img)
 
 	return ImageTexture.create_from_image(img)

@@ -30,6 +30,8 @@ extends CanvasLayer
 # Proximity bombs are not yet implemented in the sim; this is UI-forward-compatible.
 @export var ship_bomb_proximity_enabled: bool = false
 
+@export var ship_bullet_bounce_bonus: int = 0
+
 @export var ship_tick: int = 0
 @export var ship_damage_protect_until_tick: int = 0
 @export var ship_dead_until_tick: int = 0
@@ -48,6 +50,9 @@ extends CanvasLayer
 const SpriteFontLabelScript := preload("res://client/SpriteFontLabel.gd")
 const DriftConstants := preload("res://shared/drift_constants.gd")
 const MinimapScene := preload("res://client/scenes/Minimap.tscn")
+const DriftUiIconAtlas := preload("res://client/ui/ui_icon_atlas.gd")
+const ICONS_TEX: Texture2D = preload("res://client/graphics/ui/Icons.png")
+const PrizeToastScript := preload("res://client/ui/prize_toast.gd")
 
 @onready var name_bounty = $Root/SpriteFontLabel
 @onready var rest_label = $Root/RestLabel
@@ -78,7 +83,56 @@ var _help_interrupt_text: String = ""
 var _help_interrupt_remaining_s: float = 0.0
 var _help_interrupt_was_active: bool = false
 
+# Prize feedback (client-only UI; tick-based, deterministic).
+var _prize_feedback_text: String = ""
+var _prize_feedback_until_tick: int = -1
+var _prize_feedback_was_active: bool = false
+var _prize_feedback_icon_atlas: Vector2i = Vector2i(-1, -1)
+var _prize_feedback_icon_rect: TextureRect = null
+
+@export var prize_toast_enabled: bool = false
+var _prize_toast = null
+
 var _minimap = null
+
+
+# --- Pickup feed (screen-space, SubSpace-style) ---
+const PICKUP_FEED_MAX_LINES: int = 5
+# Deterministic expiry window for pickup feed lines.
+const PICKUP_FEED_DURATION_MS: int = 2500
+const PICKUP_FEED_DURATION_TICKS: int = int((PICKUP_FEED_DURATION_MS * DriftConstants.TICK_RATE + 999) / 1000)
+# Match `res://client/fonts/shrtfont_green.png.import` (image_margin.y=16).
+# Small font uses 2 rows per color @ 8px cell height => band height = 16px => 16/16 = 1.
+const PICKUP_FEED_COLOR_INDEX_GREEN: int = 1
+
+var _pickup_feed_root: VBoxContainer = null
+var _pickup_feed_labels: Array = [] # Array[SpriteFontLabel]
+var _pickup_feed_lines: Array = [] # Array[Dictionary] {text:String, until_tick:int}
+
+
+# --- SubSpace-style edge icon stacks (client-only UI) ---
+const EDGE_PEEK_PX: float = 4.0
+const EDGE_SLIDE_PX_PER_FRAME: float = 8.0
+const EDGE_SLOT_SPACING_PX: float = 3.0
+
+var _edge_root: Control = null
+var _left_stack: VBoxContainer = null
+var _right_stack: VBoxContainer = null
+
+var _left_counts: Dictionary = {
+	&"burst": 0,
+	&"repel": 0,
+	&"decoy": 0,
+	&"thor": 0,
+	&"brick": 0,
+	&"rocket": 0,
+	&"teleport": 0,
+}
+
+var _left_slots: Array = [] # Array[Dictionary]
+var _right_slots: Array = [] # Array[Dictionary]
+
+var _ui_radar_on: bool = true
 
 
 func _ready() -> void:
@@ -116,6 +170,37 @@ func _ready() -> void:
 		help_ticker_label.set_color_index(0) # white
 		help_ticker_label.set_alignment(SpriteFontLabelScript.Align.LEFT)
 		help_ticker_label.letter_spacing_px = 0
+
+	# Transient prize feedback icon (hidden by default). This must not modify
+	# persistent HUD layout or left/right stacks.
+	_prize_feedback_icon_rect = TextureRect.new()
+	_prize_feedback_icon_rect.name = "PrizeFeedbackIcon"
+	_prize_feedback_icon_rect.visible = false
+	_prize_feedback_icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_prize_feedback_icon_rect.texture = null
+	_prize_feedback_icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_prize_feedback_icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_prize_feedback_icon_rect.custom_minimum_size = Vector2(DriftUiIconAtlas.TILE_W, DriftUiIconAtlas.TILE_H)
+	# Place above the help ticker line to avoid shifting any text.
+	if help_ticker_label != null:
+		_prize_feedback_icon_rect.position = Vector2(help_ticker_label.position.x, help_ticker_label.position.y - float(DriftUiIconAtlas.TILE_H))
+	$Root.add_child(_prize_feedback_icon_rect)
+
+	# PrizeToast (transient, non-stacking). Created at runtime so disabling it is a no-op.
+	if prize_toast_enabled:
+		_prize_toast = PrizeToastScript.new()
+		_prize_toast.name = "PrizeToast"
+		_prize_toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Default position: center HUD area (top-center-ish), independent of left/right stacks.
+		_prize_toast.anchor_left = 0.5
+		_prize_toast.anchor_right = 0.5
+		_prize_toast.anchor_top = 0.0
+		_prize_toast.anchor_bottom = 0.0
+		_prize_toast.offset_left = -110
+		_prize_toast.offset_top = 52
+		_prize_toast.offset_right = 110
+		_prize_toast.offset_bottom = 74
+		$Root.add_child(_prize_toast)
 	if right_gun_label != null:
 		right_gun_label.set_font_size(SpriteFontLabelScript.FontSize.SMALL)
 		right_gun_label.set_color_index(0)
@@ -136,6 +221,19 @@ func _ready() -> void:
 		right_status_label.set_color_index(0)
 		right_status_label.set_alignment(SpriteFontLabelScript.Align.LEFT)
 		right_status_label.letter_spacing_px = 0
+
+	# New UX uses icon stacks; hide the old right-side text islands.
+	if right_gun_label != null:
+		right_gun_label.visible = false
+	if right_bomb_label != null:
+		right_bomb_label.visible = false
+	if right_weapon_flags_label != null:
+		right_weapon_flags_label.visible = false
+	if right_status_label != null:
+		right_status_label.visible = false
+
+	_build_edge_icon_stacks()
+	_build_pickup_feed()
 
 	_load_help_pages()
 	_refresh_help_ticker(true)
@@ -177,7 +275,9 @@ func _apply_ui_settings_from_settings_manager() -> void:
 func _set_minimap_enabled(enabled: bool) -> void:
 	if _minimap == null:
 		return
+	_ui_radar_on = bool(enabled)
 	_minimap.visible = bool(enabled)
+	_update_right_stack_visuals()
 
 
 func set_values(p_name: String, p_bounty: int, p_stars: int, p_ship_id: int) -> void:
@@ -214,7 +314,8 @@ func set_ship_stats(
 	p_gun_level: int = 1,
 	p_bomb_level: int = 1,
 	p_multi_fire_enabled: bool = false,
-	p_bomb_proximity_enabled: bool = false
+	p_bomb_proximity_enabled: bool = false,
+	p_bullet_bounce_bonus: int = 0
 ) -> void:
 	ship_speed = p_speed
 	ship_heading_degrees = p_heading_degrees
@@ -236,8 +337,37 @@ func set_ship_stats(
 	ship_bomb_level = clampi(int(p_bomb_level), 1, 3)
 	ship_multi_fire_enabled = bool(p_multi_fire_enabled)
 	ship_bomb_proximity_enabled = bool(p_bomb_proximity_enabled)
+	ship_bullet_bounce_bonus = clampi(int(p_bullet_bounce_bonus), 0, 16)
 
 	_update_right_islands()
+
+
+func set_prize_feedback(text: String, until_tick: int, icon_atlas_coords: Vector2i = Vector2i(-1, -1)) -> void:
+	# Tick-based transient message shown in the help ticker channel.
+	# Client-only: callers must derive this from authoritative state/events.
+	var t := String(text).strip_edges()
+	var ut := int(until_tick)
+	var icon := icon_atlas_coords
+	if t == "" or ut <= 0:
+		_prize_feedback_text = ""
+		_prize_feedback_until_tick = -1
+		_prize_feedback_icon_atlas = Vector2i(-1, -1)
+		return
+	_prize_feedback_text = t
+	_prize_feedback_until_tick = ut
+	_prize_feedback_icon_atlas = icon
+
+
+func set_prize_toast(prize_type: int, icon_atlas_coords: Vector2i, label: String, until_tick: int) -> void:
+	# UI-only; does not mutate sim. Safe to disable by not instantiating PrizeToast.
+	if _prize_toast == null:
+		return
+	var payload := {
+		"prize_type": int(prize_type),
+		"icon": icon_atlas_coords,
+		"label": String(label),
+	}
+	_prize_toast.call("set_toast", payload, int(ship_tick), int(until_tick))
 
 
 func set_minimap_static(meta: Dictionary, solid_cells: Array, safe_cells: Array) -> void:
@@ -332,7 +462,18 @@ func _process(delta: float) -> void:
 		stats_energy_label.position.x = float(stats_label.get_text_width_px() + spacing_px)
 		stats_suffix_label.position.x = float(stats_label.get_text_width_px() + stats_energy_label.get_text_width_px() + spacing_px)
 
+	# Keep legacy right islands updated (even though hidden) for now.
 	_update_right_islands()
+	_update_edge_icon_stacks()
+	_update_pickup_feed()
+
+	# PrizeToast tick: UI-only; driven by ship_tick provided by owner.
+	if _prize_toast != null:
+		_prize_toast.call("tick", int(ship_tick))
+
+	# NOTE: Prize pickup UI is no longer routed through the help ticker/messages.
+	# (New UX uses near-ship text toast + edge stacks.)
+	_prize_feedback_was_active = false
 
 	# Help ticker (client-only UI) with priority interrupt channel.
 	var interrupt_active: bool = _help_interrupt_remaining_s > 0.0 and _help_interrupt_text != ""
@@ -391,6 +532,342 @@ func show_help_interrupt(text: String, duration_s: float) -> void:
 	if help_ticker_label != null:
 		_last_help_text = _help_interrupt_text
 		help_ticker_label.set_text(_help_interrupt_text)
+
+
+func set_inventory_counts(counts: Dictionary) -> void:
+	# Client-only. Expected keys: burst, repel, decoy, thor, brick, rocket, teleport.
+	if typeof(counts) != TYPE_DICTIONARY:
+		return
+	for k in counts.keys():
+		if typeof(k) == TYPE_STRING_NAME:
+			_left_counts[k] = maxi(0, int(counts.get(k, 0)))
+		elif typeof(k) == TYPE_STRING:
+			_left_counts[StringName(String(k))] = maxi(0, int(counts.get(k, 0)))
+	_update_left_stack_visuals()
+
+
+func add_pickup_feed_line(text: String) -> void:
+	# Backwards-compatible: add with default duration.
+	add_pickup_feed_line_until_tick(text, int(ship_tick) + int(PICKUP_FEED_DURATION_TICKS))
+
+
+func add_pickup_feed_line_until_tick(text: String, until_tick: int) -> void:
+	# Client-only. Screen-space pickup feed (not chat).
+	# Tick-based expiry so it is deterministic and replay-safe.
+	var t := String(text).strip_edges()
+	var ut := int(until_tick)
+	if t == "" or ut <= 0:
+		return
+	_pickup_feed_lines.append({
+		"text": t,
+		"until_tick": ut,
+	})
+	# Keep only the most recent N entries.
+	while _pickup_feed_lines.size() > PICKUP_FEED_MAX_LINES:
+		_pickup_feed_lines.pop_front()
+	_update_pickup_feed_labels()
+
+
+func set_ball_possession(has_ball: bool) -> void:
+	# Ball possession icon is not part of the contracted right stack.
+	# Keep API for future use without changing the HUD contract.
+	pass
+
+
+func _build_edge_icon_stacks() -> void:
+	# Screen-space root that spans the viewport.
+	_edge_root = Control.new()
+	_edge_root.name = "EdgeStacks"
+	_edge_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_edge_root.anchor_left = 0.0
+	_edge_root.anchor_top = 0.0
+	_edge_root.anchor_right = 1.0
+	_edge_root.anchor_bottom = 1.0
+	_edge_root.offset_left = 0.0
+	_edge_root.offset_top = 0.0
+	_edge_root.offset_right = 0.0
+	_edge_root.offset_bottom = 0.0
+	add_child(_edge_root)
+
+	_left_stack = VBoxContainer.new()
+	_left_stack.name = "LeftStack"
+	_left_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_left_stack.alignment = BoxContainer.ALIGNMENT_CENTER
+	_left_stack.add_theme_constant_override("separation", int(EDGE_SLOT_SPACING_PX))
+	_edge_root.add_child(_left_stack)
+
+	_right_stack = VBoxContainer.new()
+	_right_stack.name = "RightStack"
+	_right_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_right_stack.alignment = BoxContainer.ALIGNMENT_CENTER
+	_right_stack.add_theme_constant_override("separation", int(EDGE_SLOT_SPACING_PX))
+	_edge_root.add_child(_right_stack)
+
+	_left_slots.clear()
+	_right_slots.clear()
+
+	# Left inventory stack (fixed order; always visible; per-slot slide when inactive).
+	var left_order: Array = [&"burst", &"repel", &"decoy", &"thor", &"brick", &"rocket", &"teleport"]
+	for item in left_order:
+		var slot := _make_icon_slot(true)
+		slot["item"] = item
+		slot["side"] = int(DriftUiIconAtlas.Side.LEFT)
+		_left_stack.add_child(slot["root"])
+		_left_slots.append(slot)
+
+	# Right stack order (fixed) per contract.
+	var right_order: Array = [&"gun", &"bomb", &"radar", &"stealth", &"xradar", &"antiwarp"]
+	for rid in right_order:
+		var rslot := _make_icon_slot(false)
+		rslot["id"] = rid
+		rslot["side"] = int(DriftUiIconAtlas.Side.RIGHT)
+		_right_stack.add_child(rslot["root"])
+		_right_slots.append(rslot)
+
+	_update_edge_stack_layout()
+	_update_left_stack_visuals()
+	_update_right_stack_visuals()
+
+
+func _build_pickup_feed() -> void:
+	if _edge_root == null:
+		return
+	_pickup_feed_root = VBoxContainer.new()
+	_pickup_feed_root.name = "PickupFeed"
+	_pickup_feed_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pickup_feed_root.add_theme_constant_override("separation", 1)
+	_edge_root.add_child(_pickup_feed_root)
+
+	_pickup_feed_labels.clear()
+	for i in range(PICKUP_FEED_MAX_LINES):
+		var lbl := SpriteFontLabelScript.new()
+		lbl.name = "Line%d" % i
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lbl.set_font_size(SpriteFontLabelScript.FontSize.SMALL)
+		lbl.set_color_index(PICKUP_FEED_COLOR_INDEX_GREEN)
+		lbl.set_alignment(SpriteFontLabelScript.Align.LEFT)
+		lbl.letter_spacing_px = 0
+		_pickup_feed_root.add_child(lbl)
+		_pickup_feed_labels.append(lbl)
+
+	_update_pickup_feed_layout()
+	_update_pickup_feed_labels()
+
+
+func _update_pickup_feed_layout() -> void:
+	if _pickup_feed_root == null:
+		return
+	var vp: Rect2 = get_viewport().get_visible_rect()
+	# Anchor left-third, below mid-screen.
+	_pickup_feed_root.position = Vector2(vp.size.x * 0.33, vp.size.y * 0.60)
+
+
+func _update_pickup_feed() -> void:
+	if _pickup_feed_root == null:
+		return
+	_update_pickup_feed_layout()
+	# Prune expired entries deterministically by tick.
+	var now_tick: int = int(ship_tick)
+	var did_prune: bool = false
+	for i in range(_pickup_feed_lines.size() - 1, -1, -1):
+		var e = _pickup_feed_lines[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			_pickup_feed_lines.remove_at(i)
+			did_prune = true
+			continue
+		var ut: int = int((e as Dictionary).get("until_tick", -1))
+		if ut > 0 and now_tick >= ut:
+			_pickup_feed_lines.remove_at(i)
+			did_prune = true
+	if did_prune:
+		_update_pickup_feed_labels()
+
+
+func _update_pickup_feed_labels() -> void:
+	# Oldest at top, newest at bottom.
+	for i in range(PICKUP_FEED_MAX_LINES):
+		var lbl = _pickup_feed_labels[i] if i < _pickup_feed_labels.size() else null
+		if lbl == null:
+			continue
+		if i < _pickup_feed_lines.size():
+			var e = _pickup_feed_lines[i]
+			if typeof(e) == TYPE_DICTIONARY:
+				lbl.set_text(String((e as Dictionary).get("text", "")))
+			else:
+				lbl.set_text(String(e))
+		else:
+			lbl.set_text("")
+
+
+func _make_icon_slot(with_count: bool) -> Dictionary:
+	var root := Control.new()
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.custom_minimum_size = Vector2(DriftUiIconAtlas.TILE_W, DriftUiIconAtlas.TILE_H)
+
+	var icon := TextureRect.new()
+	icon.name = "Icon"
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.custom_minimum_size = Vector2(DriftUiIconAtlas.TILE_W, DriftUiIconAtlas.TILE_H)
+	var at := AtlasTexture.new()
+	at.atlas = ICONS_TEX
+	at.region = Rect2i(0, 0, DriftUiIconAtlas.TILE_W, DriftUiIconAtlas.TILE_H)
+	icon.texture = at
+	root.add_child(icon)
+
+	var count_lbl = null
+	if with_count:
+		count_lbl = SpriteFontLabelScript.new()
+		count_lbl.name = "Count"
+		count_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		count_lbl.set_font_size(SpriteFontLabelScript.FontSize.SMALL)
+		count_lbl.set_color_index(0) # white
+		count_lbl.set_alignment(SpriteFontLabelScript.Align.LEFT)
+		count_lbl.letter_spacing_px = 0
+		# Overlay near top-left of the icon.
+		count_lbl.position = Vector2(2.0, 1.0)
+		root.add_child(count_lbl)
+
+	return {
+		"root": root,
+		"icon": icon,
+		"count": count_lbl,
+		"slide_x": 0.0,
+		"side": int(DriftUiIconAtlas.Side.LEFT),
+	}
+
+
+func _set_slot_icon(icon_rect: TextureRect, atlas_coords: Vector2i) -> void:
+	if icon_rect == null:
+		return
+	var at: AtlasTexture = icon_rect.texture as AtlasTexture
+	if at == null:
+		at = AtlasTexture.new()
+		at.atlas = ICONS_TEX
+		icon_rect.texture = at
+	if DriftUiIconAtlas.coords_is_renderable(atlas_coords):
+		at.region = DriftUiIconAtlas.coords_to_region_rect_px(atlas_coords)
+		icon_rect.visible = true
+	else:
+		icon_rect.visible = false
+
+
+func _update_edge_stacks_anchor_y(stack: Control, total_h: float) -> void:
+	# Center vertically on screen.
+	if stack == null:
+		return
+	var vp: Rect2 = get_viewport().get_visible_rect()
+	stack.position.y = (vp.size.y * 0.5) - (total_h * 0.5)
+
+
+func _update_edge_stack_layout() -> void:
+	if _edge_root == null:
+		return
+	var vp: Rect2 = get_viewport().get_visible_rect()
+
+	# Compute stack heights.
+	var left_h: float = float(_left_slots.size()) * float(DriftUiIconAtlas.TILE_H) + maxf(0.0, float(_left_slots.size() - 1)) * float(EDGE_SLOT_SPACING_PX)
+	var right_h: float = float(_right_slots.size()) * float(DriftUiIconAtlas.TILE_H) + maxf(0.0, float(_right_slots.size() - 1)) * float(EDGE_SLOT_SPACING_PX)
+
+	_update_edge_stacks_anchor_y(_left_stack, left_h)
+	_update_edge_stacks_anchor_y(_right_stack, right_h)
+
+	# Set baseline x positions: anchored to exact edges.
+	if _left_stack != null:
+		_left_stack.position.x = 0.0
+	if _right_stack != null:
+		# Right-aligned.
+		_right_stack.position.x = vp.size.x - float(DriftUiIconAtlas.TILE_W)
+
+
+func _update_edge_icon_stacks() -> void:
+	if _edge_root == null:
+		return
+	_update_edge_stack_layout()
+	_update_left_stack_visuals()
+	_update_right_stack_visuals()
+
+
+func _step_towards(cur: float, target: float, step: float) -> float:
+	if cur < target:
+		return minf(target, cur + step)
+	if cur > target:
+		return maxf(target, cur - step)
+	return cur
+
+
+func _update_left_stack_visuals() -> void:
+	if _left_stack == null:
+		return
+	var off_px: float = -(float(DriftUiIconAtlas.TILE_W) - EDGE_PEEK_PX)
+	for s_any in _left_slots:
+		if typeof(s_any) != TYPE_DICTIONARY:
+			continue
+		var s: Dictionary = s_any
+		var item: StringName = s.get("item", &"")
+		var n: int = int(_left_counts.get(item, 0))
+		var atlas: Vector2i = DriftUiIconAtlas.inventory_icon_coords(item)
+		_set_slot_icon(s.get("icon"), atlas)
+		# Per-slot slide: inactive when count==0.
+		var icon_rect: TextureRect = s.get("icon")
+		var cur_x: float = float(s.get("slide_x", 0.0))
+		var target_x: float = 0.0 if n > 0 else off_px
+		cur_x = _step_towards(cur_x, target_x, EDGE_SLIDE_PX_PER_FRAME)
+		s["slide_x"] = cur_x
+		if icon_rect != null:
+			icon_rect.position.x = cur_x
+		var c = s.get("count")
+		if c != null:
+			if n > 0:
+				# Single digit display per spec; clamp 0..9.
+				var d := clampi(n, 0, 9)
+				c.set_text("%d" % d)
+			else:
+				c.set_text("")
+
+
+func _update_right_stack_visuals() -> void:
+	if _right_stack == null:
+		return
+	var off_px: float = float(DriftUiIconAtlas.TILE_W) - EDGE_PEEK_PX
+	for s_any in _right_slots:
+		if typeof(s_any) != TYPE_DICTIONARY:
+			continue
+		var s: Dictionary = s_any
+		var rid: StringName = s.get("id", &"")
+		var icon_rect: TextureRect = s.get("icon")
+		var show: bool = false
+		var atlas: Vector2i = Vector2i(-1, -1)
+		match String(rid):
+			"gun":
+				show = true
+				atlas = DriftUiIconAtlas.gun_icon_coords(ship_gun_level, ship_bullet_bounce_bonus > 0, ship_multi_fire_enabled, ship_multi_fire_enabled)
+			"bomb":
+				show = true
+				atlas = DriftUiIconAtlas.bomb_icon_coords(ship_bomb_level, ship_bomb_proximity_enabled, false)
+			"radar":
+				show = bool(_ui_radar_on)
+				atlas = DriftUiIconAtlas.toggle_icon_coords(&"radar", bool(_ui_radar_on))
+			"stealth":
+				show = bool(ship_stealth_on)
+				atlas = DriftUiIconAtlas.toggle_icon_coords(&"stealth", bool(ship_stealth_on))
+			"xradar":
+				show = bool(ship_xradar_on)
+				atlas = DriftUiIconAtlas.toggle_icon_coords(&"xradar", bool(ship_xradar_on))
+			"antiwarp":
+				show = bool(ship_antiwarp_on)
+				atlas = DriftUiIconAtlas.toggle_icon_coords(&"antiwarp", bool(ship_antiwarp_on))
+			_:
+				show = false
+		# Right stack slots are always present; off-state slides mostly off-screen.
+		_set_slot_icon(icon_rect, atlas)
+		var cur_x: float = float(s.get("slide_x", 0.0))
+		var target_x: float = 0.0 if show else off_px
+		cur_x = _step_towards(cur_x, target_x, EDGE_SLIDE_PX_PER_FRAME)
+		s["slide_x"] = cur_x
+		if icon_rect != null:
+			icon_rect.position.x = cur_x
 
 
 func help_ticker_toggle() -> void:
@@ -509,7 +986,14 @@ func _try_hook_player_ship() -> void:
 
 
 func _on_ship_stats_changed(speed: float, heading_deg: float, energy_value: float) -> void:
-	set_ship_stats(speed, heading_deg, energy_value)
+	# This signal only provides a subset of ship stats and does not include
+	# authoritative tick-based fields (e.g. ship_tick) used for deterministic UI.
+	# ClientMain is responsible for calling set_ship_stats(...) with the full
+	# snapshot-derived payload each frame.
+	ship_speed = float(speed)
+	ship_heading_degrees = float(heading_deg)
+	ship_energy_current = maxi(0, int(round(float(energy_value))))
+	_update_right_islands()
 
 
 func _poll_player_ship_stats() -> void:
