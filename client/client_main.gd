@@ -20,6 +20,8 @@ const DriftNet = preload("res://shared/drift_net.gd")
 const DriftMap = preload("res://shared/drift_map.gd")
 const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
+const DriftRuleset = preload("res://shared/drift_ruleset.gd")
+const DriftServerConfig = preload("res://server/server_config.gd")
 const DriftActions = preload("res://client/input/actions.gd")
 const ReplayRingBuffer = preload("res://client/replay/replay_ring_buffer.gd")
 const ReplayDumpWriter = preload("res://client/replay/replay_dump_writer.gd")
@@ -251,9 +253,30 @@ func _ready() -> void:
 
 	# Don't auto-connect - wait for user to click connect
 	world = DriftWorld.new()
+	_apply_local_default_ruleset_if_available()
 	
 	# Load map for client-side rendering and collision
 	_load_client_map()
+
+
+func _apply_local_default_ruleset_if_available() -> void:
+	# Client-side prediction and offline mode should use the same validated ruleset
+	# as the server, otherwise tuning defaults (like bullet cooldown) can diverge.
+	var cfg_res: Dictionary = DriftServerConfig.load_config()
+	if not bool(cfg_res.get("ok", false)):
+		push_error("[CLIENT] Failed to load server_config.json for local ruleset: " + String(cfg_res.get("error", "")))
+		return
+	var cfg: Dictionary = cfg_res.get("config", {})
+	var ruleset_path: String = String(cfg.get("ruleset", "")).strip_edges()
+	if ruleset_path == "":
+		push_error("[CLIENT] server_config.json ruleset is empty (local)")
+		return
+	var rules_res: Dictionary = DriftRuleset.load_ruleset(ruleset_path)
+	if not bool(rules_res.get("ok", false)):
+		push_error("[CLIENT] Failed to load local ruleset: " + String(rules_res.get("error", "ruleset load failed")))
+		return
+	var canon: Dictionary = rules_res.get("ruleset", {})
+	world.apply_ruleset(canon)
 
 	_build_pause_menu_ui()
 	_set_pause_menu_visible(false)
