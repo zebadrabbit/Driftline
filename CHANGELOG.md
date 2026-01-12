@@ -135,3 +135,17 @@ This project didn’t previously have a formal changelog. The entries below were
 - Projectile tunneling: bullets now use swept/continuous collision against solid tiles (segment cast per tick), with a smoke test to prevent regressions.
 - Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).
 - Baseline bullet firing cadence no longer defaults to every tick (cooldown now enforced via ruleset `cooldown_ticks`).
+
+## 0.5.8 - 2026-01-11
+
+### Added
+
+- Ruleset tuning knobs for high-speed handling penalties: `physics.high_speed_*`.
+- Ruleset tuning knobs for speed-scaled afterburner strain: `abilities.afterburner.strain_*`.
+- Smoke test: `projectile_velocity_inheritance_sanity` (logs ship/bullet velocities for forward/backward/stationary scenarios).
+
+### Changed
+
+- Bullets now inherit firing ship velocity once at spawn (SubSpace-style), preventing ships from outrunning their own projectiles without inflating bullet base speed.
+- Afterburner drain now scales with speed near max speed to discourage indefinite cruising.
+- Turning and reverse thrust are reduced near max speed to make sustained max-speed travel less controllable.

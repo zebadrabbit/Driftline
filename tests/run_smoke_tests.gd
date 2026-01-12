@@ -57,6 +57,7 @@ func _initialize() -> void:
 	_test_spawn_protection_blocks_damage()
 	_test_bullet_bounce_restitution_is_level_based_per_projectile()
 	_test_bullet_swept_collision_prevents_tunneling()
+	_test_projectile_velocity_inheritance_sanity()
 	_test_team_auto_balance_assigns_even_teams()
 	_test_set_freq_rejects_when_force_even_violated()
 	_test_team_color_mapping_flips_with_freq()
@@ -135,6 +136,143 @@ func _test_bullet_swept_collision_prevents_tunneling() -> void:
 			return
 
 	_pass("bullet_swept_collision_prevents_tunneling")
+
+
+func _test_projectile_velocity_inheritance_sanity() -> void:
+	_ran += 1
+	# Physics sanity check (not a damage test): verify projectile velocity inheritance.
+	# Logs ship vs bullet velocities for manual verification.
+	#
+	# Scenarios:
+	# 1) High-speed ship firing "forward" (along bullet direction) cannot outrun its own bullet.
+	# 2) High-speed ship firing opposite its velocity produces a slower *world-space* bullet
+	#    relative to its movement (i.e., "backward relative bullets").
+	# 3) Stationary ship behaves like legacy (bullet vel == dir * base_speed).
+
+	var base_text := FileAccess.get_file_as_string("res://rulesets/base.json")
+	var base_parsed_v: Variant = JSON.parse_string(base_text)
+	if typeof(base_parsed_v) != TYPE_DICTIONARY:
+		_fail("projectile_velocity_inheritance (failed to parse res://rulesets/base.json)")
+		return
+
+	var ruleset: Dictionary = (base_parsed_v as Dictionary).duplicate(true)
+	# Keep velocity stable for this test to make expectations exact.
+	ruleset["physics"]["ship_thrust_accel"] = 0.0
+	ruleset["physics"]["ship_reverse_accel"] = 0.0
+	ruleset["physics"]["ship_max_speed"] = 1000.0
+	ruleset["physics"]["ship_base_drag"] = 0.0
+	ruleset["physics"]["ship_overspeed_drag"] = 0.0
+	ruleset["weapons"]["bullet"]["speed"] = 900.0
+	ruleset["weapons"]["bullet"]["lifetime_s"] = 1.0
+	ruleset["weapons"]["bullet"]["muzzle_offset"] = 0.0
+	ruleset["weapons"]["bullet"]["bounces"] = 0
+	ruleset["energy"]["max"] = 9999
+	ruleset["energy"]["recharge_rate_per_sec"] = 0
+	ruleset["energy"]["recharge_delay_ms"] = 0
+	ruleset["energy"]["bullet_energy_cost"] = 0
+	ruleset["energy"]["multifire_energy_cost"] = 0
+	ruleset["energy"]["bomb_energy_cost"] = 0
+
+	var valid := DriftValidate.validate_ruleset_dict(ruleset)
+	if not bool(valid.get("ok", false)):
+		_fail("projectile_velocity_inheritance (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", ruleset)
+	var bullet_speed: float = float(canonical_ruleset["weapons"]["bullet"]["speed"])
+
+	# Helper: step once and fetch the spawned bullet.
+	var _spawn_and_get := func(world: DriftWorld, ship_id: int, cmd: DriftTypes.DriftInputCmd) -> Dictionary:
+		world.step_tick({ship_id: cmd}, false, 0)
+		var ids: Array = world.bullets.keys()
+		ids.sort()
+		if ids.is_empty():
+			return {"ok": false, "error": "no_bullet"}
+		var bid: int = int(ids[0])
+		return {"ok": true, "bid": bid, "b": world.bullets.get(bid), "s": world.ships.get(ship_id)}
+
+	# --- 1) Forward: ship cannot outrun its own bullet ---
+	var w1 := DriftWorld.new()
+	w1.apply_ruleset(canonical_ruleset)
+	w1.set_solid_tiles([])
+	w1.set_door_tiles([])
+	w1.add_boundary_tiles(64, 64)
+	w1.set_map_dimensions(64, 64)
+	w1.add_ship(1, Vector2(512, 512))
+	var s1: DriftTypes.DriftShipState = w1.ships.get(1)
+	s1.rotation = 0.0
+	s1.velocity = Vector2(650.0, 0.0)
+	var r1: Dictionary = _spawn_and_get.call(w1, 1, DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false))
+	if not bool(r1.get("ok", false)):
+		_fail("projectile_velocity_inheritance (forward: no bullet spawned)")
+		return
+	var b1: DriftTypes.DriftBulletState = r1.get("b")
+	var ship_v1: Vector2 = (r1.get("s") as DriftTypes.DriftShipState).velocity
+	var dir1 := Vector2(1.0, 0.0)
+	var rel1: float = (b1.velocity - ship_v1).dot(dir1)
+	print("[PHYS_SANITY] forward ship_v=", ship_v1, " bullet_v=", b1.velocity, " rel_fwd=", rel1)
+	if not (b1.velocity.dot(dir1) > ship_v1.dot(dir1) + 0.1):
+		_fail("projectile_velocity_inheritance (forward: bullet not faster than ship)")
+		return
+	if absf(rel1 - bullet_speed) > 0.01:
+		_fail("projectile_velocity_inheritance (forward: expected inherited rel speed %f, got %f)" % [bullet_speed, rel1])
+		return
+
+	# --- 2) "Backward relative": ship moving +X but firing toward -X ---
+	var w2 := DriftWorld.new()
+	w2.apply_ruleset(canonical_ruleset)
+	w2.set_solid_tiles([])
+	w2.set_door_tiles([])
+	w2.add_boundary_tiles(64, 64)
+	w2.set_map_dimensions(64, 64)
+	w2.add_ship(1, Vector2(512, 512))
+	var s2: DriftTypes.DriftShipState = w2.ships.get(1)
+	s2.rotation = PI # face -X
+	s2.velocity = Vector2(650.0, 0.0) # still moving +X
+	var r2: Dictionary = _spawn_and_get.call(w2, 1, DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false))
+	if not bool(r2.get("ok", false)):
+		_fail("projectile_velocity_inheritance (backward: no bullet spawned)")
+		return
+	var b2: DriftTypes.DriftBulletState = r2.get("b")
+	var ship_v2: Vector2 = (r2.get("s") as DriftTypes.DriftShipState).velocity
+	var dir2 := Vector2(-1.0, 0.0)
+	var rel2: float = (b2.velocity - ship_v2).dot(dir2)
+	print("[PHYS_SANITY] backward ship_v=", ship_v2, " bullet_v=", b2.velocity, " rel_back=", rel2)
+	# Bullet should be slower along +X than the ship (since it was fired toward -X).
+	if not (b2.velocity.x < ship_v2.x - 0.1):
+		_fail("projectile_velocity_inheritance (backward: expected bullet.x < ship.x)")
+		return
+	if absf(rel2 - bullet_speed) > 0.01:
+		_fail("projectile_velocity_inheritance (backward: expected rel speed %f along dir, got %f)" % [bullet_speed, rel2])
+		return
+
+	# --- 3) Stationary: legacy behavior preserved ---
+	var w3 := DriftWorld.new()
+	w3.apply_ruleset(canonical_ruleset)
+	w3.set_solid_tiles([])
+	w3.set_door_tiles([])
+	w3.add_boundary_tiles(64, 64)
+	w3.set_map_dimensions(64, 64)
+	w3.add_ship(1, Vector2(512, 512))
+	var s3: DriftTypes.DriftShipState = w3.ships.get(1)
+	s3.rotation = 0.0
+	s3.velocity = Vector2.ZERO
+	var r3: Dictionary = _spawn_and_get.call(w3, 1, DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false))
+	if not bool(r3.get("ok", false)):
+		_fail("projectile_velocity_inheritance (stationary: no bullet spawned)")
+		return
+	var b3: DriftTypes.DriftBulletState = r3.get("b")
+	var ship_v3: Vector2 = (r3.get("s") as DriftTypes.DriftShipState).velocity
+	var dir3 := Vector2(1.0, 0.0)
+	var rel3: float = (b3.velocity - ship_v3).dot(dir3)
+	print("[PHYS_SANITY] stationary ship_v=", ship_v3, " bullet_v=", b3.velocity, " rel_fwd=", rel3)
+	if ship_v3.length() > 0.001:
+		_fail("projectile_velocity_inheritance (stationary: ship unexpectedly moved)")
+		return
+	if absf(rel3 - bullet_speed) > 0.01:
+		_fail("projectile_velocity_inheritance (stationary: expected base speed %f, got %f)" % [bullet_speed, rel3])
+		return
+
+	_pass("projectile_velocity_inheritance_sanity")
 
 
 func _test_prize_types_mapping_contract() -> void:

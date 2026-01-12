@@ -180,6 +180,8 @@ Map sizes in the editor UI are in pixels (multiples of 16). Internally the map i
 - Server spawn locations can come from map `entities` with `type="spawn"`.
 - Wall-bounce sound is triggered from shared collision events (client-side audio).
 - Bullet vs wall collision is swept/continuous per tick (segment cast) to prevent tunneling at high speeds.
+- Bullet velocity is computed as: `ship_velocity_at_fire_time + (dir * bullet_speed)` (applied once at spawn; deterministic).
+- Sustained high-speed travel is intentionally a tactical commitment (speed-scaled afterburner drain + high-speed handling penalties).
 
 ## Bots (Headless Clients)
 

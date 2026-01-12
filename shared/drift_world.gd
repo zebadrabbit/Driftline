@@ -38,6 +38,24 @@ var ship_base_drag: float = DriftConstants.SHIP_BASE_DRAG
 var ship_overspeed_drag: float = DriftConstants.SHIP_OVERSPEED_DRAG
 var ship_bounce_min_normal_speed: float = 160.0
 
+# High-speed handling tuning.
+# Rationale: ships should feel fast, but sustained near-max speed should be a tactical
+# commitment (higher energy burn + reduced control authority), otherwise players can
+# repeatedly disengage by running in a straight line and invalidate projectile pressure.
+#
+# Note: We deliberately do NOT change ship_max_speed or bullet_speed here.
+var ship_high_speed_turn_start_frac: float = 0.80
+var ship_high_speed_turn_min_mult: float = 0.55
+var ship_high_speed_reverse_start_frac: float = 0.85
+var ship_high_speed_reverse_min_mult: float = 0.70
+
+# Afterburner strain: make cruising at high speed increasingly expensive.
+# Goal: afterburner enables burst mobility, not permanent high-speed travel.
+# We intentionally avoid artificial cooldowns; inertia is preserved because releasing
+# afterburner only removes extra acceleration, it does not clamp velocity.
+var afterburner_strain_start_frac: float = 0.55
+var afterburner_strain_max_mult: float = 3.50
+
 var ball_friction: float = 0.98
 var ball_max_speed: float = 600.0
 var ball_kick_speed: float = DriftConstants.BALL_KICK_SPEED
@@ -275,6 +293,12 @@ func compute_world_hash() -> int:
 	parts.append("ship_base_drag=%d" % _q(ship_base_drag, Q_TUNE))
 	parts.append("ship_overspeed_drag=%d" % _q(ship_overspeed_drag, Q_TUNE))
 	parts.append("ship_bounce_min_normal_speed=%d" % _q(ship_bounce_min_normal_speed, Q_TUNE))
+	parts.append("ship_high_speed_turn_start_frac=%d" % _q(ship_high_speed_turn_start_frac, Q_TUNE))
+	parts.append("ship_high_speed_turn_min_mult=%d" % _q(ship_high_speed_turn_min_mult, Q_TUNE))
+	parts.append("ship_high_speed_reverse_start_frac=%d" % _q(ship_high_speed_reverse_start_frac, Q_TUNE))
+	parts.append("ship_high_speed_reverse_min_mult=%d" % _q(ship_high_speed_reverse_min_mult, Q_TUNE))
+	parts.append("afterburner_strain_start_frac=%d" % _q(afterburner_strain_start_frac, Q_TUNE))
+	parts.append("afterburner_strain_max_mult=%d" % _q(afterburner_strain_max_mult, Q_TUNE))
 
 	parts.append("ball_friction=%d" % _q(ball_friction, Q_TUNE))
 	parts.append("ball_max_speed=%d" % _q(ball_max_speed, Q_TUNE))
@@ -514,6 +538,15 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 		ship_base_drag = float(physics.get("ship_base_drag", ship_base_drag))
 		ship_overspeed_drag = float(physics.get("ship_overspeed_drag", ship_overspeed_drag))
 		ship_bounce_min_normal_speed = float(physics.get("ship_bounce_min_normal_speed", ship_bounce_min_normal_speed))
+		# Optional high-speed handling penalties (defaults keep legacy feel).
+		ship_high_speed_turn_start_frac = float(physics.get("high_speed_turn_start_frac", ship_high_speed_turn_start_frac))
+		ship_high_speed_turn_min_mult = float(physics.get("high_speed_turn_min_mult", ship_high_speed_turn_min_mult))
+		ship_high_speed_reverse_start_frac = float(physics.get("high_speed_reverse_start_frac", ship_high_speed_reverse_start_frac))
+		ship_high_speed_reverse_min_mult = float(physics.get("high_speed_reverse_min_mult", ship_high_speed_reverse_min_mult))
+		ship_high_speed_turn_start_frac = clampf(ship_high_speed_turn_start_frac, 0.0, 0.999)
+		ship_high_speed_turn_min_mult = clampf(ship_high_speed_turn_min_mult, 0.05, 1.0)
+		ship_high_speed_reverse_start_frac = clampf(ship_high_speed_reverse_start_frac, 0.0, 0.999)
+		ship_high_speed_reverse_min_mult = clampf(ship_high_speed_reverse_min_mult, 0.05, 1.0)
 
 	var weapons: Dictionary = canonical_ruleset.get("weapons", {})
 	if typeof(weapons) == TYPE_DICTIONARY and not weapons.is_empty():
@@ -572,6 +605,8 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 	# Note: schema v1 has no abilities block; ability drains and behavior are engine-disabled.
 	energy_afterburner_speed_multiplier = 1.0
 	energy_afterburner_multiplier = 1.6
+	afterburner_strain_start_frac = 0.55
+	afterburner_strain_max_mult = 3.50
 	ability_stealth_drain_per_sec = 0
 	ability_cloak_drain_per_sec = 0
 	ability_xradar_drain_per_sec = 0
@@ -584,6 +619,12 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 				var ab: Dictionary = abilities.get("afterburner")
 				if ab.has("drain_per_sec"):
 					energy_afterburner_drain_per_sec = maxi(0, int(round(float(ab.get("drain_per_sec")))))
+				# Optional: strain scaling makes *cruising* at top speed expensive.
+				# This keeps short afterburner bursts snappy without letting players sustain max speed forever.
+				afterburner_strain_start_frac = float(ab.get("strain_start_frac", afterburner_strain_start_frac))
+				afterburner_strain_max_mult = float(ab.get("strain_max_mult", afterburner_strain_max_mult))
+				afterburner_strain_start_frac = clampf(afterburner_strain_start_frac, 0.0, 0.999)
+				afterburner_strain_max_mult = clampf(afterburner_strain_max_mult, 1.0, 10.0)
 				# Defaults preserve prior behavior (thrust boost only; no speed cap change).
 				var sp_pct: int = int(round(float(ab.get("speed_mult_pct", 100.0))))
 				var th_pct: int = int(round(float(ab.get("thrust_mult_pct", 160.0))))
@@ -1126,7 +1167,24 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 
 	var total_drain_per_sec: int = 0
 	if bool(ship_state.afterburner_on):
+		# Afterburner base drain.
 		total_drain_per_sec += int(energy_afterburner_drain_per_sec)
+		# Afterburner strain: as we approach effective top speed, scale drain up.
+		# This makes sustained max speed a tactical commitment (energy starvation + forced cooldown),
+		# while keeping short bursts and the overall "fast ship" feel intact.
+		var max_sp: float = _ship_effective_max_speed(ship_state)
+		if max_sp > 0.001 and int(energy_afterburner_drain_per_sec) > 0:
+			var sp: float = ship_state.velocity.length()
+			var frac: float = clampf(sp / max_sp, 0.0, 2.0)
+			if frac > afterburner_strain_start_frac:
+				var denom: float = maxf(0.000001, 1.0 - afterburner_strain_start_frac)
+				var t: float = clampf((frac - afterburner_strain_start_frac) / denom, 0.0, 1.0)
+				# Ease-in so only near-top-speed cruising gets punished hard.
+				t = t * t
+				var mult: float = lerpf(1.0, afterburner_strain_max_mult, t)
+				var base_d: int = int(energy_afterburner_drain_per_sec)
+				var strained: int = maxi(0, int(round(float(base_d) * mult)))
+				total_drain_per_sec += maxi(0, strained - base_d)
 	if bool(ship_state.stealth_on):
 		total_drain_per_sec += int(ability_stealth_drain_per_sec)
 	if bool(ship_state.cloak_on):
@@ -1185,6 +1243,33 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 
 	# Keep legacy mirror updated.
 	ship_state.energy = int(ship_state.energy_current)
+
+
+func _high_speed_t(frac: float, start_frac: float) -> float:
+	# Helper for speed-based ramps.
+	var s: float = clampf(float(start_frac), 0.0, 0.999)
+	if frac <= s:
+		return 0.0
+	var denom: float = maxf(0.000001, 1.0 - s)
+	var t: float = clampf((frac - s) / denom, 0.0, 1.0)
+	# Ease-in: keep most handling at medium speeds; penalize near max.
+	return t * t
+
+
+func _ship_high_speed_turn_mult(ship_state: DriftTypes.DriftShipState, eff_max_speed: float) -> float:
+	if eff_max_speed <= 0.001:
+		return 1.0
+	var frac: float = clampf(ship_state.velocity.length() / eff_max_speed, 0.0, 2.0)
+	var t: float = _high_speed_t(frac, ship_high_speed_turn_start_frac)
+	return lerpf(1.0, ship_high_speed_turn_min_mult, t)
+
+
+func _ship_high_speed_reverse_mult(ship_state: DriftTypes.DriftShipState, eff_max_speed: float) -> float:
+	if eff_max_speed <= 0.001:
+		return 1.0
+	var frac: float = clampf(ship_state.velocity.length() / eff_max_speed, 0.0, 2.0)
+	var t: float = _high_speed_t(frac, ship_high_speed_reverse_start_frac)
+	return lerpf(1.0, ship_high_speed_reverse_min_mult, t)
 
 
 func set_prize_rng_seed(seed_value: int) -> void:
@@ -2767,14 +2852,19 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Store position before movement
 		var old_position := ship_state.position
 		
+		var eff_max_speed: float = _ship_effective_max_speed(ship_state)
+		# High speed reduces control authority (turn + reverse) to make full-speed travel
+		# a tactical commitment rather than a free, always-on disengage.
+		var eff_turn_rate: float = ship_turn_rate * _ship_high_speed_turn_mult(ship_state, eff_max_speed)
+		var eff_rev_accel: float = _ship_effective_reverse_accel(ship_state) * _ship_high_speed_reverse_mult(ship_state, eff_max_speed)
 		DriftShip.apply_input(
 			ship_state,
 			move_cmd,
 			DriftConstants.TICK_DT,
-			ship_turn_rate,
+			eff_turn_rate,
 			_ship_effective_thrust_accel(ship_state, move_cmd),
-			_ship_effective_reverse_accel(ship_state),
-			_ship_effective_max_speed(ship_state),
+			eff_rev_accel,
+			eff_max_speed,
 			ship_base_drag,
 			ship_overspeed_drag,
 		)
@@ -3070,7 +3160,25 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			var dir := Vector2(cos(ang), sin(ang))
 			var lateral := right * (tgun * float(bullet_gun_spacing) * 0.5)
 			var pos := base_pos + lateral
-			var vel := dir * float(bullet_speed_px_s)
+			# IMPORTANT (do not "simplify" this): bullets inherit the firing ship's *current* velocity
+			# at spawn time (SubSpace-style), applied once.
+			#
+			# Why inherit ship velocity?
+			# - Without inheritance, a ship traveling near max speed can outrun its own bullets, making
+			#   projectile combat inconsistent (prediction, leading, and relative aim break down).
+			#
+			# Why not just increase bullet speed?
+			# - Raising absolute bullet speed to compensate changes the entire combat envelope:
+			#   less time to react, longer effective hitscan-like ranges, higher accidental hit rate,
+			#   and worse ping/rollback feel. It "fixes" outrunning by warping combat, not by fixing
+			#   the physics contract.
+			#
+			# Why must ships not sustain speeds that exceed projectile control?
+			# - If players can cruise indefinitely at (or above) speeds that collapse projectile-relative
+			#   control, fights degrade into chase kiting where skillful aim matters less.
+			# - We keep max speed/bullet speed stable; sustained high speed is made a tactical commitment
+			#   via energy/handling economics elsewhere, while bullets stay deterministic and fair here.
+			var vel := ship_state.velocity + (dir * float(bullet_speed_px_s))
 			var die_tick: int = -1
 			if lifetime_ticks > 0:
 				die_tick = int(t) + int(lifetime_ticks)

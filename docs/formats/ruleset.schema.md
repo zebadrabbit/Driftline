@@ -261,6 +261,42 @@ Base exponential drag coefficient (1/s).
 
 Additional drag multiplier when above `ship_max_speed`.
 
+#### `physics.high_speed_turn_start_frac` (optional)
+
+- Type: number
+- Range: `0.0..0.999`
+- Default (engine): `0.80`
+
+Speed fraction (of effective max speed) at which high-speed turn penalties begin.
+
+When `ship_speed / ship_max_speed >= high_speed_turn_start_frac`, the simulation scales down the effective turn rate as speed increases.
+
+#### `physics.high_speed_turn_min_mult` (optional)
+
+- Type: number
+- Range: `0.05..1.0`
+- Default (engine): `0.55`
+
+Minimum multiplier applied to turn rate at very high speed. `1.0` disables the penalty.
+
+#### `physics.high_speed_reverse_start_frac` (optional)
+
+- Type: number
+- Range: `0.0..0.999`
+- Default (engine): `0.85`
+
+Speed fraction (of effective max speed) at which high-speed reverse-thrust penalties begin.
+
+When `ship_speed / ship_max_speed >= high_speed_reverse_start_frac`, the simulation scales down effective reverse acceleration as speed increases.
+
+#### `physics.high_speed_reverse_min_mult` (optional)
+
+- Type: number
+- Range: `0.05..1.0`
+- Default (engine): `0.70`
+
+Minimum multiplier applied to reverse acceleration at very high speed. `1.0` disables the penalty.
+
 #### `physics.ship_bounce_min_normal_speed` (optional)
 
 - Type: number
@@ -455,6 +491,18 @@ Optional fields:
 - `abilities.afterburner.thrust_mult_pct` (optional)
   - Type: number
   - Range: `0..500`
+
+- `abilities.afterburner.strain_start_frac` (optional)
+  - Type: number
+  - Range: `0.0..0.999`
+
+Ship speed fraction (of effective max speed) above which afterburner becomes increasingly expensive.
+
+- `abilities.afterburner.strain_max_mult` (optional)
+  - Type: number
+  - Range: `1.0..10.0`
+
+Maximum multiplier for afterburner drain when at/near max speed.
 
 - `abilities.antiwarp.radius_px` (optional)
   - Type: number
