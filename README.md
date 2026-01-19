@@ -1,6 +1,7 @@
 # driftline
-
 A small Godot 4 project with an authoritative server tick, a client with prediction/reconciliation, and a built-in tile map editor.
+
+<img width="901" height="600" alt="Driftline Social_small" src="https://github.com/user-attachments/assets/3c1d122a-41f9-42d8-bc0e-65d9ab3e20ad" />
 
 ## Project Layout
 
