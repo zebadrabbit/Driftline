@@ -19,8 +19,8 @@ const DriftValidate = preload("res://shared/drift_validate.gd")
 const DriftMapLoader = preload("res://server/map_loader.gd")
 const DriftTileDefs = preload("res://shared/drift_tile_defs.gd")
 
-const SERVER_HOST: String = "127.0.0.1"
-const SERVER_PORT: int = 5000
+var SERVER_HOST: String = "127.0.0.1"
+var SERVER_PORT: int = 5000
 
 const NET_CHANNEL: int = 1
 const DEBUG_NET: bool = false
@@ -118,6 +118,10 @@ class BotBrain:
 	# Safe-zone brake-fire gating.
 	var brake_fire_cooldown_ticks_left: int = 0
 	var debug_brake_fire_count: int = 0
+	# Bomb fire cooldown.
+	var bomb_cooldown_ticks: int = 0
+	# Mine lay cooldown.
+	var mine_cooldown_ticks: int = 0
 
 	func _reset_for_spawn() -> void:
 		state = BotState.SPAWN_RECOVER
@@ -328,6 +332,15 @@ class BotPerception:
 			# Ignore dead targets.
 			if int(o.dead_until_tick) > 0 and int(world_local.tick) < int(o.dead_until_tick):
 				continue
+			# Ignore teammates.
+			var self_freq: int = int(self_ship.freq)
+			var other_freq: int = int(o.freq)
+			if self_freq != 0 and other_freq == self_freq:
+				continue
+			# Stealth/cloak hides from enemies (xradar would reveal, but bots don't track that).
+			if bool(o.stealth_on) or bool(o.cloak_on):
+				perceived_targets.erase(other_id)
+				continue
 
 			var delta: Vector2 = o.position - self_ship.position
 			var dist: float = delta.length()
@@ -435,6 +448,11 @@ var quit_after_seconds: float = -1.0
 var runtime_seconds: float = 0.0
 var shutdown_requested: bool = false
 
+# Identity (overridable via command-line args).
+var bot_username: String = ""
+var bot_freq: int = 0
+var bot_ship_type: int = 0
+
 var quit_poll_accumulator_seconds: float = 0.0
 
 var local_ship_id: int = -1
@@ -455,6 +473,16 @@ var brain := BotBrain.new()
 var has_map: bool = false
 var map_path: String = ""
 var map_checksum: PackedByteArray = PackedByteArray()
+
+# CTF state mirrored from authoritative snapshots.
+# Each entry: {team:int, pos:Vector2, at_home:bool, carrier_ship_id:int}
+var _bot_flags: Array = []
+
+# Powerball: last known ball position from snapshot.
+var _ball_pos: Vector2 = Vector2(-1e9, -1e9)
+var _ball_owner_id: int = -1
+# Goal zones loaded from map, each: {pos:Vector2, team:int, radius:float}
+var _bot_goal_zones: Array = []
 
 
 func _initialize() -> void:
@@ -578,6 +606,16 @@ func _parse_user_args() -> void:
 			preferred_range_px = maxf(0.0, float(value))
 		elif key == "evade_chance":
 			evade_chance = clampf(float(value), 0.0, 1.0)
+		elif key == "server_address":
+			SERVER_HOST = value
+		elif key == "server_port":
+			SERVER_PORT = maxi(1, int(value))
+		elif key == "username":
+			bot_username = value
+		elif key == "freq":
+			bot_freq = clampi(int(value), 0, 8)
+		elif key == "ship_type":
+			bot_ship_type = clampi(int(value), 0, 7)
 
 
 func _step_one_tick() -> void:
@@ -598,6 +636,16 @@ func _step_one_tick() -> void:
 	# Ensure personality is initialized after we know our bot_id.
 	if brain.personality == null:
 		brain.personality = _make_personality(local_ship_id)
+
+	# Skip all AI computation while dead — world sim handles the dead state.
+	var is_bot_dead: bool = int(s.dead_until_tick) > 0 and world.tick < int(s.dead_until_tick)
+	if is_bot_dead:
+		var idle_cmd := DriftTypes.DriftInputCmd.new()
+		var next_tick_dead: int = world.tick + 1
+		input_history[next_tick_dead] = idle_cmd
+		_send_input(next_tick_dead, idle_cmd)
+		world.step_tick({ local_ship_id: idle_cmd })
+		return
 
 	# Safe zones: never attack/ability in safe zone.
 	# IMPORTANT: server now spawns players inside safe zones when available, so bots
@@ -692,7 +740,7 @@ func _step_one_tick() -> void:
 	elif brain.wall_bounce_count >= 3 and brain.state != BotState.RESET:
 		brain.state = BotState.RESET
 		brain.state_ticks_left = int(round(rng.randf_range(0.7, 1.1) / DriftConstants.TICK_DT))
-	elif (not in_safe) and brain.target_id != -1 and brain.state in [BotState.ROAM, BotState.REPOSITION]:
+	elif (not in_safe) and brain.target_id != -1 and int(s.carried_flag_team) < 0 and brain.state in [BotState.ROAM, BotState.REPOSITION]:
 		brain.state = BotState.ENGAGE
 		brain.state_ticks_left = int(round(rng.randf_range(1.0, 2.0) / DriftConstants.TICK_DT))
 		brain.approach_offset_rad = rng.randf_range(-0.9, 0.9)
@@ -846,7 +894,79 @@ func _step_one_tick() -> void:
 			else:
 				fire_primary = false
 
-	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(brain.thrust_cmd_smoothed, brain.turn_cmd_smoothed, fire_primary, false, false)
+	# Item usage: use repel when cornered (low energy + enemy nearby).
+	var use_repel: bool = false
+	var use_burst_item: bool = false
+	if int(s.repel_count) > 0 and int(s.energy_current) < int(s.energy_max) / 3:
+		var nearest_enemy_dist: float = 99999.0
+		for sid2 in world.ships.keys():
+			var other = world.ships.get(sid2)
+			if other == null or int(other.id) == int(local_ship_id) or world._ship_is_dead(other, world.tick):
+				continue
+			if int(other.freq) == int(s.freq) and int(s.freq) != 0:
+				continue
+			nearest_enemy_dist = minf(nearest_enemy_dist, s.position.distance_to(other.position))
+		if nearest_enemy_dist < 300.0:
+			use_repel = true
+	# Burst/Thor when surrounded at close range.
+	var use_thor: bool = false
+	var close_count: int = 0
+	for sid3 in world.ships.keys():
+		var other2 = world.ships.get(sid3)
+		if other2 == null or int(other2.id) == int(local_ship_id) or world._ship_is_dead(other2, world.tick):
+			continue
+		if int(other2.freq) == int(s.freq) and int(s.freq) != 0:
+			continue
+		if s.position.distance_to(other2.position) < 200.0:
+			close_count += 1
+	if close_count >= 2:
+		if int(s.burst_count) > 0:
+			use_burst_item = true
+		elif int(s.thor_count) > 0:
+			use_thor = true
+	# Rocket when chasing a distant enemy at high thrust.
+	var use_rocket: bool = false
+	if int(s.rocket_count) > 0 and float(brain.thrust_cmd_smoothed) > 0.8:
+		if close_count == 0:  # not already in melee — use for chase
+			use_rocket = true
+	# Portal as emergency escape when critically low energy and enemies are close.
+	var use_portal: bool = false
+	if int(s.portal_count) > 0 and int(s.energy_current) < int(s.energy_max) / 5 and close_count >= 1:
+		use_portal = true
+
+	# Bomb firing: fire at medium range when lined up, lower cadence than bullets.
+	var fire_secondary: bool = false
+	if brain.bomb_cooldown_ticks > 0:
+		brain.bomb_cooldown_ticks -= 1
+	if brain.target_id >= 0 and brain.bomb_cooldown_ticks <= 0 and brain.state == BotState.ENGAGE:
+		var target_ship = world.ships.get(brain.target_id)
+		if target_ship != null and not world._ship_is_dead(target_ship, world.tick):
+			var dist_bomb: float = s.position.distance_to(target_ship.position)
+			var min_energy_bomb: int = int(world.bomb_energy_cost) + int(round(20.0 * (1.0 - aggression)))
+			if dist_bomb > 80.0 and dist_bomb < 500.0 and int(s.energy_current) >= min_energy_bomb:
+				var bomb_gate := world.can_perform_action(s, DriftWorld.ActionType.FIRE_SECONDARY, {"tick": world.tick, "ship_id": local_ship_id})
+				if bool(bomb_gate.get("ok", true)):
+					fire_secondary = true
+					var cadence_s: float = lerpf(1.2, 0.5, skill)
+					brain.bomb_cooldown_ticks = int(round(cadence_s / DriftConstants.TICK_DT))
+
+	# Mine laying: drop behind when being chased at close range.
+	var use_mine: bool = false
+	if brain.mine_cooldown_ticks > 0:
+		brain.mine_cooldown_ticks -= 1
+	if brain.mine_cooldown_ticks <= 0 and brain.state == BotState.ENGAGE and brain.target_id >= 0:
+		var mt = world.ships.get(brain.target_id)
+		if mt != null and not world._ship_is_dead(mt, world.tick):
+			var to_enemy: Vector2 = (mt.position - s.position)
+			var dist_m: float = to_enemy.length()
+			var behind: bool = dist_m < 200.0 and to_enemy.normalized().dot(Vector2.from_angle(float(s.rotation))) < -0.3
+			var mine_gate := world.can_perform_action(s, DriftWorld.ActionType.MINE, {"tick": world.tick, "ship_id": local_ship_id})
+			if behind and bool(mine_gate.get("ok", true)):
+				use_mine = true
+				brain.mine_cooldown_ticks = int(round(lerpf(20.0, 8.0, skill) / DriftConstants.TICK_DT))
+
+	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(brain.thrust_cmd_smoothed, brain.turn_cmd_smoothed, fire_primary, fire_secondary, false,
+		false, false, false, false, use_mine, use_repel, use_burst_item, false, use_thor, use_rocket, false, false, use_portal)
 	var next_tick: int = world.tick + 1
 
 	input_history[next_tick] = cmd
@@ -904,7 +1024,17 @@ func _select_target(self_ship: DriftTypes.DriftShipState, perception: BotPercept
 			if best_vis and cur_vis and rng.randf() < p_drop:
 				return -1
 		return brain.target_id
-	return perception.best_target_id(self_ship.position)
+	var best: int = perception.best_target_id(self_ship.position)
+	# Prefer flag carriers: if a perceived enemy is carrying our team's flag, target them first.
+	var my_team: int = int(self_ship.freq)
+	if my_team > 0 and not _bot_flags.is_empty():
+		for fl_p in _bot_flags:
+			if int(fl_p.get("team", 0)) == my_team:
+				var carr_id: int = int(fl_p.get("carrier_ship_id", -1))
+				if carr_id >= 0 and perception.perceived_targets.has(carr_id):
+					return carr_id
+				break
+	return best
 
 
 func _compute_decision(self_ship: DriftTypes.DriftShipState) -> Dictionary:
@@ -975,11 +1105,58 @@ func _compute_decision(self_ship: DriftTypes.DriftShipState) -> Dictionary:
 
 	# Default: roam unless we have a target.
 	if brain.target_id == -1 or brain.perception.get_entry(brain.target_id).is_empty():
+		# CTF objective override: navigate toward the enemy flag or own base.
+		var ctf_target: Vector2 = Vector2(-1e9, -1e9)
+		var my_team: int = int(self_ship.freq)
+		if my_team > 0 and not _bot_flags.is_empty():
+			# If carrying a flag, head to own base (find own flag's home position).
+			if int(self_ship.carried_flag_team) >= 0:
+				for fl_h in _bot_flags:
+					if int(fl_h.get("team", 0)) == my_team and bool(fl_h.get("at_home", true)):
+						ctf_target = fl_h.get("pos", ctf_target)
+						break
+			else:
+				# Head toward enemy flag if it is not already being carried by a teammate.
+				var enemy_team: int = 3 - my_team
+				for fl_e in _bot_flags:
+					if int(fl_e.get("team", 0)) == enemy_team:
+						var carr: int = int(fl_e.get("carrier_ship_id", -1))
+						var teammate_carrying: bool = carr >= 0 and world.ships.has(carr) and int(world.ships[carr].freq) == my_team
+						if not teammate_carrying:
+							ctf_target = fl_e.get("pos", ctf_target)
+						break
+
+		# Powerball awareness.
+		if ctf_target.x <= -1e8 and _ball_pos.x > -1e8:
+			if _ball_owner_id == local_ship_id:
+				# Carrying the ball — head to enemy goal.
+				var my_team2: int = int(self_ship.freq)
+				var enemy_team2: int = 3 - my_team2
+				for gz in _bot_goal_zones:
+					if int(gz.get("team", 0)) == enemy_team2:
+						ctf_target = gz.get("pos", ctf_target)
+						break
+			else:
+				# Head toward ball.
+				ctf_target = _ball_pos
+
 		# ROAM: keep speed in a band, gentle turns, avoid walls.
 		var speed2 := self_ship.velocity.length()
 		var want_speed := rng.randf_range(160.0, 360.0)
 		thrust = 1.0 if speed2 < want_speed else 0.0
-		turn = rng.randf_range(-0.5, 0.5)
+		var ctf_valid: bool = ctf_target.x > -1e8
+		if ctf_valid:
+			# Steer toward objective; still respect wall avoidance.
+			var to_obj: Vector2 = ctf_target - self_ship.position
+			if to_obj.length() > 32.0:
+				var obj_angle := atan2(to_obj.y, to_obj.x)
+				var ang_diff2 := _angle_wrap(obj_angle - float(self_ship.rotation))
+				turn = clampf(ang_diff2 / 0.8, -1.0, 1.0) + rng.randf_range(-0.15, 0.15)
+				thrust = 1.0
+			else:
+				turn = rng.randf_range(-0.5, 0.5)
+		else:
+			turn = rng.randf_range(-0.5, 0.5)
 		if avoid_angle != 0.0:
 			var fwd := _forward_dir(float(self_ship.rotation))
 			var away := Vector2(cos(avoid_angle), sin(avoid_angle))
@@ -1128,6 +1305,26 @@ func _poll_network_packets() -> void:
 				if DEBUG_BOT:
 					print("[BOT] seed=", bot_seed, " map_path=", map_path)
 
+				# Send identity to server.
+				if bot_username != "":
+					var hello_pkt: PackedByteArray = DriftNet.pack_hello(bot_username)
+					enet_peer.set_transfer_channel(NET_CHANNEL)
+					enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+					enet_peer.set_target_peer(1)
+					enet_peer.put_packet(hello_pkt)
+				if bot_freq > 0:
+					var freq_pkt: PackedByteArray = DriftNet.pack_set_freq_request(local_ship_id, bot_freq)
+					enet_peer.set_transfer_channel(NET_CHANNEL)
+					enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+					enet_peer.set_target_peer(1)
+					enet_peer.put_packet(freq_pkt)
+				if bot_ship_type > 0:
+					var ship_pkt: PackedByteArray = DriftNet.pack_ship_change_request(local_ship_id, bot_ship_type)
+					enet_peer.set_transfer_channel(NET_CHANNEL)
+					enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+					enet_peer.set_target_peer(1)
+					enet_peer.put_packet(ship_pkt)
+
 				# Reset local state for clean start.
 				world.tick = 0
 				world.ships.clear()
@@ -1169,6 +1366,18 @@ func _poll_network_packets() -> void:
 							world.add_boundary_tiles(w_tiles, h_tiles)
 							world.set_map_dimensions(w_tiles, h_tiles)
 							has_map = true
+							# Read goal zones for Powerball carrier navigation.
+							var t_sz: int = int(DriftConstants.TILE_SIZE)
+							for ent in canonical.get("entities", []):
+								if typeof(ent) != TYPE_DICTIONARY:
+									continue
+								var etype: String = String(ent.get("type", "")).strip_edges()
+								if etype == "goal":
+									var ex: int = int(ent.get("x", 0))
+									var ey: int = int(ent.get("y", 0))
+									var egteam: int = int(ent.get("team", 1))
+									var egrad: float = float(ent.get("radius", 64.0))
+									_bot_goal_zones.append({"pos": Vector2(ex * t_sz + t_sz / 2, ey * t_sz + t_sz / 2), "team": egteam, "radius": egrad})
 				var ruleset_json: String = String(w.get("ruleset_json", "")).strip_edges()
 				if ruleset_json != "":
 					var json := JSON.new()
@@ -1186,6 +1395,26 @@ func _poll_network_packets() -> void:
 				var td: float = float(w.get("tangent_damping", -1.0))
 				if td >= 0.0:
 					world.tangent_damping = td
+				# Optional: ship spec JSON (server.cfg-derived). Used for deterministic prediction.
+				var ship_spec_json: String = String(w.get("ship_spec_json", "")).strip_edges()
+				if ship_spec_json != "":
+					var ship_json := JSON.new()
+					var ship_parse_err := ship_json.parse(ship_spec_json)
+					if ship_parse_err == OK and typeof(ship_json.data) == TYPE_DICTIONARY:
+						world.set_ship_spec(ship_json.data)
+				# Optional: all ship specs JSON array (per-ship-type selection).
+				var all_specs_json: String = String(w.get("all_ship_specs_json", "")).strip_edges()
+				if all_specs_json != "":
+					var all_json := JSON.new()
+					var all_parse_err := all_json.parse(all_specs_json)
+					if all_parse_err == OK and typeof(all_json.data) == TYPE_ARRAY:
+						var specs_arr: Array[Dictionary] = []
+						for item in (all_json.data as Array):
+							if typeof(item) == TYPE_DICTIONARY:
+								specs_arr.append(item)
+							else:
+								specs_arr.append({})
+						world.set_all_ship_specs(specs_arr)
 			continue
 
 		if pkt_type == DriftNet.PKT_SNAPSHOT:
@@ -1223,6 +1452,10 @@ func _update_connection_state() -> void:
 			authoritative_tick = -1
 			authoritative_ship_state = null
 			input_history.clear()
+			_bot_flags.clear()
+			_bot_goal_zones.clear()
+			_ball_pos = Vector2(-1e9, -1e9)
+			_ball_owner_id = -1
 
 	last_connection_status = status
 
@@ -1234,18 +1467,61 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	var auth_bullets: Array = []
 	if snap_dict.has("bullets") and (snap_dict.get("bullets") is Array):
 		auth_bullets = snap_dict.get("bullets")
+	var auth_bombs: Array = []
+	if snap_dict.has("bombs") and (snap_dict.get("bombs") is Array):
+		auth_bombs = snap_dict.get("bombs")
+	var auth_mines: Array = []
+	if snap_dict.has("mines") and (snap_dict.get("mines") is Array):
+		auth_mines = snap_dict.get("mines")
 
 	var ships: Array = snap_dict["ships"]
+	# Track which ship ids are in this snapshot so we can remove departed ships.
+	var seen_ids: Dictionary = {}
 	for ship_state in ships:
-		if ship_state.id == local_ship_id:
+		var sid: int = int(ship_state.id)
+		seen_ids[sid] = true
+		if sid == local_ship_id:
 			authoritative_tick = snap_tick
 			authoritative_ship_state = ship_state
 			has_authoritative = true
-			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, auth_bullets)
-			break
+			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, auth_bullets, auth_bombs, auth_mines)
+		else:
+			# Mirror remote ships into local world so perception can target them.
+			if not world.ships.has(sid):
+				world.ships[sid] = DriftTypes.DriftShipState.new(sid, ship_state.position, ship_state.velocity, ship_state.rotation)
+			var rs: DriftTypes.DriftShipState = world.ships[sid]
+			rs.position = ship_state.position
+			rs.velocity = ship_state.velocity
+			rs.rotation = ship_state.rotation
+			rs.freq = int(ship_state.freq) if ("freq" in ship_state) else 0
+			rs.dead_until_tick = int(ship_state.dead_until_tick) if ("dead_until_tick" in ship_state) else 0
+			rs.stealth_on = bool(ship_state.stealth_on) if ("stealth_on" in ship_state) else false
+			rs.cloak_on = bool(ship_state.cloak_on) if ("cloak_on" in ship_state) else false
+	# Remove ships that left the snapshot (disconnected or out of AOI).
+	for old_sid in world.ships.keys():
+		if int(old_sid) != local_ship_id and not seen_ids.has(int(old_sid)):
+			world.ships.erase(old_sid)
+
+	# Mirror ball position for Powerball awareness.
+	if snap_dict.has("ball_position"):
+		_ball_pos = snap_dict.get("ball_position", Vector2(-1e9, -1e9))
+		_ball_owner_id = int(snap_dict.get("ball_owner_id", -1))
+
+	# Mirror flag positions for CTF awareness.
+	if snap_dict.has("flags") and (snap_dict.get("flags") is Array):
+		_bot_flags.clear()
+		for fl in (snap_dict.get("flags") as Array):
+			if fl == null:
+				continue
+			_bot_flags.append({
+				"team": int(fl.team) if ("team" in fl) else 0,
+				"pos": fl.position if ("position" in fl) else Vector2.ZERO,
+				"at_home": bool(fl.at_home) if ("at_home" in fl) else true,
+				"carrier_ship_id": int(fl.carrier_ship_id) if ("carrier_ship_id" in fl) else -1,
+			})
 
 
-func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array) -> void:
+func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array, auth_bombs_for_tick: Array, auth_mines_for_tick: Array) -> void:
 	var current_tick: int = world.tick
 
 	if not world.ships.has(local_ship_id):
@@ -1274,6 +1550,10 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 		local_state.energy = int(auth_state.energy)
 	if "next_bullet_tick" in auth_state:
 		local_state.next_bullet_tick = int(auth_state.next_bullet_tick)
+	if "next_bomb_tick" in auth_state:
+		local_state.next_bomb_tick = int(auth_state.next_bomb_tick)
+	if "next_mine_tick" in auth_state:
+		local_state.next_mine_tick = int(auth_state.next_mine_tick)
 	# Ability state (replicated via snapshot extension).
 	if "stealth_on" in auth_state:
 		local_state.stealth_on = bool(auth_state.stealth_on)
@@ -1287,6 +1567,17 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 		local_state.in_safe_zone = bool(auth_state.in_safe_zone)
 	if "damage_protect_until_tick" in auth_state:
 		local_state.damage_protect_until_tick = int(auth_state.damage_protect_until_tick)
+	if "carried_flag_team" in auth_state:
+		local_state.carried_flag_team = int(auth_state.carried_flag_team)
+	if "dead_until_tick" in auth_state:
+		var was_dead: bool = int(local_state.dead_until_tick) > 0 and world.tick < int(local_state.dead_until_tick)
+		var now_dead: bool = int(auth_state.dead_until_tick) > 0 and snapshot_tick < int(auth_state.dead_until_tick)
+		if was_dead and not now_dead:
+			# Just respawned — clear stale targeting state.
+			brain.target_id = -1
+			brain.target_lock_ticks_left = 0
+			brain.state = BotState.ROAM
+		local_state.dead_until_tick = int(auth_state.dead_until_tick)
 
 	world.tick = snapshot_tick
 
@@ -1299,6 +1590,20 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 			if int(b.owner_id) != local_ship_id:
 				continue
 			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
+		world.bombs.clear()
+		for bb in auth_bombs_for_tick:
+			if bb == null:
+				continue
+			if int(bb.owner_id) != local_ship_id:
+				continue
+			world.bombs[int(bb.id)] = DriftTypes.DriftBombState.new(int(bb.id), int(bb.owner_id), int(bb.level), bb.position, bb.velocity, int(bb.spawn_tick), int(bb.die_tick), int(bb.bounces_left), bool(bb.is_emp))
+		world.mines.clear()
+		for mm in auth_mines_for_tick:
+			if mm == null:
+				continue
+			if int(mm.owner_id) != local_ship_id:
+				continue
+			world.mines[int(mm.id)] = DriftTypes.DriftMineState.new(int(mm.id), int(mm.owner_id), int(mm.level), mm.position, int(mm.spawn_tick), int(mm.die_tick), bool(mm.triggered), int(mm.triggered_by_ship_id), int(mm.triggered_tick))
 		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
 		var abits: int = 0

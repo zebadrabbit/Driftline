@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="ExplosionVisuals" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://client/graphics/effects/explosion_visuals.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://bt3bynlibblo2" path="res://client/graphics/effects/explode1.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+texture = ExtResource("2")
+frame_size_px = Vector2i(48, 48)
+total_frames = 36
+frames_per_row = 6
+anim_period_ticks = 2

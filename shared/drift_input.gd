@@ -19,6 +19,7 @@ var turn: int = 0
 
 var fire: bool = false
 var bomb: bool = false
+var mine: bool = false
 var afterburner: bool = false
 
 # Placeholder for deterministic ability buttons (future)
@@ -30,6 +31,7 @@ func _init(
 	turn_value: int = 0,
 	fire_value: bool = false,
 	bomb_value: bool = false,
+	mine_value: bool = false,
 	afterburner_value: bool = false,
 	ability1_value: bool = false
 ) -> void:
@@ -37,6 +39,7 @@ func _init(
 	turn = _clamp_trit_int(turn_value)
 	fire = bool(fire_value)
 	bomb = bool(bomb_value)
+	mine = bool(mine_value)
 	afterburner = bool(afterburner_value)
 	ability1 = bool(ability1_value)
 
@@ -48,6 +51,7 @@ func to_dict() -> Dictionary:
 		"turn": int(turn),
 		"fire": bool(fire),
 		"bomb": bool(bomb),
+		"mine": bool(mine),
 		"afterburner": bool(afterburner),
 		"ability1": bool(ability1),
 	}
@@ -66,6 +70,8 @@ static func from_dict(d: Dictionary):
 		out.fire = _require_bool(d["fire"], "fire")
 	if d.has("bomb"):
 		out.bomb = _require_bool(d["bomb"], "bomb")
+	if d.has("mine"):
+		out.mine = _require_bool(d["mine"], "mine")
 	if d.has("afterburner"):
 		out.afterburner = _require_bool(d["afterburner"], "afterburner")
 	if d.has("ability1"):
@@ -81,6 +87,7 @@ func equals(other) -> bool:
 		and int(turn) == int(other.turn)
 		and bool(fire) == bool(other.fire)
 		and bool(bomb) == bool(other.bomb)
+		and bool(mine) == bool(other.mine)
 		and bool(afterburner) == bool(other.afterburner)
 		and bool(ability1) == bool(other.ability1)
 	)
@@ -89,7 +96,7 @@ func equals(other) -> bool:
 func clone():
 	var script = load(_SELF_SCRIPT_PATH)
 	assert(script != null, "DriftInput.clone: failed to load %s" % _SELF_SCRIPT_PATH)
-	return script.new(thrust, turn, fire, bomb, afterburner, ability1)
+	return script.new(thrust, turn, fire, bomb, mine, afterburner, ability1)
 
 
 static func _clamp_trit_int(v: int) -> int:

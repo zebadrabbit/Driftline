@@ -1,7 +1,14 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=4 format=3]
 
 [ext_resource type="Script" path="res://client/ui/options_menu.gd" id="1"]
 [ext_resource type="Script" path="res://client/ui/InputCaptureModal.gd" id="2"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel_bg"]
+bg_color = Color(0.06, 0.06, 0.10, 1.0)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
 
 [node name="OptionsMenu" type="Control"]
 script = ExtResource("1")
@@ -27,6 +34,7 @@ offset_top = -200.0
 offset_right = 260.0
 offset_bottom = 200.0
 mouse_filter = 1
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel_bg")
 
 [node name="KeybindsPanel" type="PanelContainer" parent="Root"]
 visible = false
@@ -110,6 +118,19 @@ size_flags_vertical = 3
 
 [node name="Title" type="Label" parent="Root/Panel/VBox"]
 text = "Options"
+
+[node name="DisplaySection" type="VBoxContainer" parent="Root/Panel/VBox"]
+size_flags_horizontal = 3
+
+[node name="DisplayRow" type="HBoxContainer" parent="Root/Panel/VBox/DisplaySection"]
+size_flags_horizontal = 3
+
+[node name="DisplayLabel" type="Label" parent="Root/Panel/VBox/DisplaySection/DisplayRow"]
+text = "Window Mode"
+size_flags_horizontal = 3
+
+[node name="DisplayModeOption" type="OptionButton" parent="Root/Panel/VBox/DisplaySection/DisplayRow"]
+size_flags_horizontal = 3
 
 [node name="Sliders" type="VBoxContainer" parent="Root/Panel/VBox"]
 size_flags_horizontal = 3

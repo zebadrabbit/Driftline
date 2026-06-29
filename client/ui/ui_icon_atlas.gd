@@ -151,7 +151,9 @@ static func inventory_icon_coords(item: StringName) -> Vector2i:
 			return rc(4, 7)
 		"rocket":
 			return rc(4, 8)
-		"teleport":
+		"portal":
+			return teleport_icon_coords()
+		"teleport", "warp":
 			return teleport_icon_coords()
 		_:
 			push_error("Unknown UI inventory icon: %s" % String(item))

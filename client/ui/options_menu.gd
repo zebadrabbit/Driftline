@@ -7,6 +7,8 @@ signal back_requested
 const DriftActions = preload("res://client/input/actions.gd")
 const InputCaptureModal = preload("res://client/ui/InputCaptureModal.gd")
 
+@onready var _display_mode_option: OptionButton = $Root/Panel/VBox/DisplaySection/DisplayRow/DisplayModeOption
+
 @onready var _master_slider: HSlider = $Root/Panel/VBox/Sliders/MasterRow/MasterSlider
 @onready var _sfx_slider: HSlider = $Root/Panel/VBox/Sliders/SfxRow/SfxSlider
 @onready var _music_slider: HSlider = $Root/Panel/VBox/Sliders/MusicRow/MusicSlider
@@ -42,7 +44,15 @@ var _pending_capture_event: InputEvent = null
 var _pending_conflict_action: String = ""
 
 
+const _DISPLAY_MODES: Array[String] = ["windowed", "fullscreen_exclusive", "fullscreen_borderless"]
+const _DISPLAY_LABELS: Array[String] = ["Windowed", "Fullscreen (Exclusive)", "Fullscreen (Borderless)"]
+
+
 func _ready() -> void:
+	_display_mode_option.clear()
+	for label in _DISPLAY_LABELS:
+		_display_mode_option.add_item(label)
+	_display_mode_option.item_selected.connect(_on_display_mode_selected)
 	_keybinds_btn.disabled = false
 	_keybinds_btn.pressed.connect(_on_keybinds_pressed)
 	_master_slider.value_changed.connect(_on_slider_changed)
@@ -69,6 +79,9 @@ func _refresh_from_settings() -> void:
 	_refreshing = true
 	var settings_ok: bool = (typeof(Settings) != TYPE_NIL and Settings != null)
 	if settings_ok:
+		var mode: String = str(Settings.get_value("display.mode", "windowed"))
+		var mode_idx: int = _DISPLAY_MODES.find(mode)
+		_display_mode_option.selected = max(0, mode_idx)
 		_master_slider.value = float(Settings.get_value("audio.master_db", 0.0))
 		_sfx_slider.value = float(Settings.get_value("audio.sfx_db", 0.0))
 		_music_slider.value = float(Settings.get_value("audio.music_db", 0.0))
@@ -76,6 +89,7 @@ func _refresh_from_settings() -> void:
 		_show_minimap_toggle.button_pressed = bool(Settings.get_value("ui.show_minimap", true))
 		_help_ticker_toggle.button_pressed = bool(Settings.get_value("ui.help_ticker_enabled", true))
 	else:
+		_display_mode_option.selected = 0
 		_master_slider.value = 0.0
 		_sfx_slider.value = 0.0
 		_music_slider.value = 0.0
@@ -83,6 +97,16 @@ func _refresh_from_settings() -> void:
 		_show_minimap_toggle.button_pressed = true
 		_help_ticker_toggle.button_pressed = true
 	_refreshing = false
+
+
+func _on_display_mode_selected(idx: int) -> void:
+	if _refreshing:
+		return
+	if typeof(Settings) == TYPE_NIL or Settings == null:
+		return
+	var mode: String = _DISPLAY_MODES[idx] if idx >= 0 and idx < _DISPLAY_MODES.size() else "windowed"
+	Settings.set_value("display.mode", mode)
+	Settings.apply_display()
 
 
 func _on_slider_changed(_value: float) -> void:

@@ -2,7 +2,7 @@ class_name DriftConstants
 
 # Arena bounds (authoritative, shared)
 static var ARENA_MIN := Vector2(0, 0)
-static var ARENA_MAX := Vector2(2048, 1152)
+static var ARENA_MAX := Vector2(8192, 8192)
 # Arena center helpers
 static var ARENA_CENTER := (ARENA_MIN + ARENA_MAX) * 0.5
 static var HILL_CENTER := ARENA_CENTER

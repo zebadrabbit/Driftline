@@ -226,7 +226,8 @@ func _cmd_from_drift_input(di: DriftInput) -> DriftTypes.DriftInputCmd:
 		bool(di.ability1),
 		false,
 		false,
-		false
+		false,
+		bool(di.mine)
 	)
 
 
@@ -256,6 +257,10 @@ static func _normalize_drift_input_variant(v: Variant, context: String) -> Dicti
 		if typeof(d.get("bomb")) != TYPE_BOOL:
 			return {"ok": false, "error": "bomb must be bool"}
 		out["bomb"] = bool(d.get("bomb"))
+	if d.has("mine"):
+		if typeof(d.get("mine")) != TYPE_BOOL:
+			return {"ok": false, "error": "mine must be bool"}
+		out["mine"] = bool(d.get("mine"))
 	if d.has("afterburner"):
 		if typeof(d.get("afterburner")) != TYPE_BOOL:
 			return {"ok": false, "error": "afterburner must be bool"}

@@ -89,6 +89,7 @@ func record_tick(t: int, inputs_by_id: Dictionary, hash_value: int) -> void:
 		var turn_i: int = 0
 		var fire_b: bool = false
 		var bomb_b: bool = false
+		var mine_b: bool = false
 		var afterburner_b: bool = false
 		var ability1_b: bool = false
 
@@ -97,11 +98,12 @@ func record_tick(t: int, inputs_by_id: Dictionary, hash_value: int) -> void:
 			turn_i = clampi(int(round(float(v.rotation))), -1, 1)
 			fire_b = bool(v.fire_primary)
 			bomb_b = bool(v.fire_secondary)
+			mine_b = bool(v.lay_mine)
 			afterburner_b = bool(v.modifier)
 			# Collapse ability buttons into one bool (minimal schema).
 			ability1_b = bool(v.stealth_btn) or bool(v.cloak_btn) or bool(v.xradar_btn) or bool(v.antiwarp_btn)
 
-		var di = DriftInput.new(thrust_i, turn_i, fire_b, bomb_b, afterburner_b, ability1_b)
+		var di = DriftInput.new(thrust_i, turn_i, fire_b, bomb_b, mine_b, afterburner_b, ability1_b)
 		inputs_out[key] = di.to_dict()
 
 	var tick_obj: Dictionary = {

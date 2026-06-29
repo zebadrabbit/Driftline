@@ -380,7 +380,7 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 		out_layers[layer_name] = cells_out
 
 	# Entities
-	var allowed := {"spawn": true, "flag": true, "base": true}
+	var allowed := {"spawn": true, "flag": true, "base": true, "goal": true}
 	var entities_seen: Dictionary = {}
 	var entities_out: Array = []
 	for i in range(entities.size()):
@@ -391,7 +391,7 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 		var d: Dictionary = e
 		for ek in d.keys():
 			var eks := String(ek)
-			if eks not in ["type", "x", "y", "team"]:
+			if eks not in ["type", "x", "y", "team", "radius"]:
 				errors.append(_err("map.entities[%d]" % i, "unknown key '%s'" % eks))
 		var t := _require_string(d.get("type"), "map.entities[%d].type" % i, errors)
 		if not allowed.has(t):
@@ -413,7 +413,10 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 			errors.append(_err("map.entities", "duplicate '%s' at (%d,%d)" % [t, ex, ey]))
 			continue
 		entities_seen[key2] = true
-		entities_out.append({"type": t, "x": ex, "y": ey, "team": team})
+		var eout := {"type": t, "x": ex, "y": ey, "team": team}
+		if d.has("radius"):
+			eout["radius"] = _require_int(d.get("radius"), "map.entities[%d].radius" % i, errors)
+		entities_out.append(eout)
 
 	entities_out.sort_custom(Callable(DriftValidate, "_entity_less"))
 

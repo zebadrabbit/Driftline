@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="BombVisuals" format=3 uid="uid://ftydl80td8x8"]
+
+[ext_resource type="Script" path="res://client/graphics/effects/bomb_visuals.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://d4e5qcjop27ii" path="res://client/graphics/effects/mines.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+texture = ExtResource("2")
+frame_size_px = Vector2i(16, 16)
+frames_per_row = 10
+anim_period_ticks = 3

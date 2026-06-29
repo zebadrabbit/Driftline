@@ -1,10 +1,9 @@
 # Driftline in-game help ticker
 # Pages are separated by a line with: ---
 
-Controls: W/S thrust, A/D rotate.
-Weapons: Space = primary fire. (Secondary fire is bound in Input Map.)
-Abilities: Hold Shift + Z Stealth, X Cloak, C XRadar, V Antiwarp.
-Help: F1 cycles pages. Hold Esc + press F6 toggles the ticker.
+Controls: W/S thrust, A/D rotate. Space = bullets. Tab = bombs. Shift+Tab = mines.
+Abilities: Z Stealth, X Cloak, C XRadar, V Antiwarp. Afterburner: Shift+W.
+Chat: Enter to open. Esc to close. F1 cycles help pages.
 
 ---
 
@@ -17,3 +16,21 @@ Energy recharges after a short delay. Watch ENG and the recharge timer (R:).
 Safe Zone: immune to damage while inside.
 Safe Zone time can be limited; HUD shows SZ countdown when enabled.
 Map/Radar: learn the arena lanes, doors, and safe-zone geometry.
+
+---
+
+Items: Q Repel, R Burst, B Warp, T Thor, F Rocket, Del Decoy, Ins Brick, Home Portal.
+Pick up green prizes to earn items. Left HUD shows your current stock.
+Prizes also upgrade guns, bombs, speed, thrust, and recharge rate.
+
+---
+
+Gun levels: L1 single shot. L2 double with bounce. L3 triple with shrapnel.
+Bomb levels: L1 basic. L2 heavier. L3 heavy with shrapnel on impact.
+MultiFire: fires bullets in a spread pattern. Picked up via prize.
+
+---
+
+Afterburner: hold Shift while thrusting for a speed burst (drains energy fast).
+Rocket: F key gives a 5-second max-speed boost when you have rockets.
+Portal: Home key teleports you to a random location when you have portals.

@@ -14,11 +14,20 @@ const REBINDABLE_ACTIONS: Array[String] = [
 	"drift_rotate_right",
 	"drift_fire_primary",
 	"drift_fire_secondary",
+	"drift_lay_mine",
 	"drift_modifier_ability",
 	"drift_ability_stealth",
 	"drift_ability_cloak",
 	"drift_ability_xradar",
 	"drift_ability_antiwarp",
+	"drift_item_repel",
+	"drift_item_burst",
+	"drift_item_warp",
+	"drift_item_thor",
+	"drift_item_rocket",
+	"drift_item_decoy",
+	"drift_item_brick",
+	"drift_item_portal",
 	"drift_toggle_pause_menu",
 	"drift_help_toggle",
 	"drift_help_next",
@@ -36,11 +45,20 @@ const ACTION_LABELS: Dictionary = {
 	"drift_rotate_right": "Rotate Right",
 	"drift_fire_primary": "Fire Primary",
 	"drift_fire_secondary": "Fire Secondary",
+	"drift_lay_mine": "Lay Mine",
 	"drift_modifier_ability": "Afterburner / Modifier",
 	"drift_ability_stealth": "Ability: Stealth",
 	"drift_ability_cloak": "Ability: Cloak",
 	"drift_ability_xradar": "Ability: X-Radar",
 	"drift_ability_antiwarp": "Ability: Antiwarp",
+	"drift_item_repel": "Item: Repel",
+	"drift_item_burst": "Item: Burst",
+	"drift_item_warp": "Item: Warp",
+	"drift_item_thor": "Item: Thor",
+	"drift_item_rocket": "Item: Rocket",
+	"drift_item_decoy": "Item: Decoy",
+	"drift_item_brick": "Item: Brick",
+	"drift_item_portal": "Item: Portal",
 	"drift_toggle_pause_menu": "Menu",
 	"drift_help_toggle": "Help Toggle",
 	"drift_help_next": "Help Next",
@@ -57,6 +75,7 @@ const SHIFT_KEYCODE: int = 4194325
 const CTRL_KEYCODE: int = 4194324
 const ESCAPE_KEYCODE: int = 4194305
 const ENTER_KEYCODE: int = 4194309
+const TAB_KEYCODE: int = 4194306
 
 # Keycodes used by the current project defaults (as set in project.godot).
 const DEFAULT_W: int = 87
@@ -68,8 +87,12 @@ const DEFAULT_Z: int = 90
 const DEFAULT_X: int = 88
 const DEFAULT_C: int = 67
 const DEFAULT_V: int = 86
+const DEFAULT_Q: int = 81
+const DEFAULT_B: int = 66
+const DEFAULT_R: int = 82
 const DEFAULT_O: int = 79
 const DEFAULT_T: int = 84
+const DEFAULT_F: int = 70
 
 static var DEFAULT_BINDINGS: Dictionary = _build_default_bindings()
 
@@ -106,12 +129,23 @@ static func _build_default_bindings() -> Dictionary:
 		"drift_rotate_left": [_key_ev(0, DEFAULT_A)],
 		"drift_rotate_right": [_key_ev(0, DEFAULT_D)],
 		"drift_fire_primary": [_key_ev(0, DEFAULT_SPACE)],
-		"drift_fire_secondary": [_key_ev(0, CTRL_KEYCODE)],
+		# Default bombs: Tab.
+		"drift_fire_secondary": [_key_ev(0, TAB_KEYCODE)],
+		# Default mine: Shift+Tab.
+		"drift_lay_mine": [_key_ev(0, TAB_KEYCODE, true)],
 		"drift_modifier_ability": [_key_ev(0, SHIFT_KEYCODE)],
 		"drift_ability_stealth": [_key_ev(0, DEFAULT_Z)],
 		"drift_ability_cloak": [_key_ev(0, DEFAULT_X)],
 		"drift_ability_xradar": [_key_ev(0, DEFAULT_C)],
 		"drift_ability_antiwarp": [_key_ev(0, DEFAULT_V)],
+		"drift_item_repel": [_key_ev(0, DEFAULT_Q)],
+		"drift_item_burst": [_key_ev(0, DEFAULT_R)],
+		"drift_item_warp": [_key_ev(0, DEFAULT_B)],
+		"drift_item_thor": [_key_ev(0, DEFAULT_T)],
+		"drift_item_rocket": [_key_ev(0, DEFAULT_F)],
+		"drift_item_decoy": [_key_ev(0, KEY_DELETE)],
+		"drift_item_brick": [_key_ev(0, KEY_INSERT)],
+			"drift_item_portal": [_key_ev(0, KEY_HOME)],
 		"drift_toggle_pause_menu": [_key_ev(0, ESCAPE_KEYCODE)],
 		"drift_help_next": [_key_ev(0, 4194332)],
 		"drift_help_toggle": [_key_ev(0, 4194337)],

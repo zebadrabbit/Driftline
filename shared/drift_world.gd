@@ -112,11 +112,12 @@ var combat_friendly_fire: bool = false
 func _ship_is_dead(ship_state: DriftTypes.DriftShipState, tick_value: int) -> bool:
 	return int(ship_state.dead_until_tick) > 0 and int(tick_value) < int(ship_state.dead_until_tick)
 
-const TOP_SPEED_BONUS_PCT: float = 0.04
-const THRUSTER_BONUS_PCT: float = 0.06
-const RECHARGE_BONUS_PCT: float = 0.15
+const TOP_SPEED_BONUS_PCT: float = 0.08
+const THRUSTER_BONUS_PCT: float = 0.08
+const ROTATION_BONUS_PCT: float = 0.07
+const RECHARGE_BONUS_PCT: float = 0.20
 
-const RECHARGE_BONUS_PCT_NUM: int = 15
+const RECHARGE_BONUS_PCT_NUM: int = 20
 const RECHARGE_BONUS_PCT_DEN: int = 100
 
 
@@ -153,6 +154,20 @@ var bullets: Dictionary = {} # Dictionary[int, DriftTypes.DriftBulletState]
 var next_bullet_id: int = 1
 var _prev_fire_by_ship: Dictionary = {} # Dictionary[int, bool]
 var _prev_ability_buttons_by_ship: Dictionary = {} # Dictionary[int, int]
+var _prev_item_buttons_by_ship: Dictionary = {} # Dictionary[int, int]
+var _pending_kill_events: Array = [] # Array[Dictionary] — consumed by server after each tick
+var effect_events: Array = [] # Array[{type:StringName, ship_id:int, px:float, py:float}] — cleared each tick
+
+# Bombs (authoritative + predicted)
+var bombs: Dictionary = {} # Dictionary[int, DriftTypes.DriftBombState]
+var next_bomb_id: int = 1
+
+# Mines (authoritative + predicted)
+var mines: Dictionary = {} # Dictionary[int, DriftTypes.DriftMineState]
+var next_mine_id: int = 1
+var decoys: Dictionary = {} # Dictionary[int, DriftTypes.DriftDecoyState]
+var next_decoy_id: int = 1
+var bricks: Array = [] # Array[{tiles: Array[Vector2i], die_tick: int}]
 
 # Dev-only diagnostics. These must never affect simulation state.
 var debug_combat: bool = false
@@ -173,6 +188,10 @@ var _dbg_last_cadence_print_second_by_ship: Dictionary = {} # Dictionary[int, in
 # Expected shape: {"energy": {"InitialEnergy": int, ...}, ...}
 var ship_spec: Dictionary = {}
 
+# Per-ship-type specs (indexed 0-7). When populated, takes precedence over ship_spec.
+# Set via set_all_ship_specs().
+var ship_specs: Array[Dictionary] = []
+
 
 func set_ship_spec(ship_spec_value: Dictionary) -> void:
 	ship_spec = ship_spec_value if typeof(ship_spec_value) == TYPE_DICTIONARY else {}
@@ -184,6 +203,24 @@ func set_ship_spec(ship_spec_value: Dictionary) -> void:
 			bullet_damage = clampi(maxi(0, int((mv as Dictionary).get("DamageFactor"))), 0, 10000)
 	if debug_combat:
 		_debug_print_bullet_tuning("set_ship_spec")
+
+
+func set_all_ship_specs(specs: Array[Dictionary]) -> void:
+	## Set per-ship-type specs (indexed 0-7). Pass empty array to disable.
+	ship_specs = specs
+	# Backward compat: also set ship_spec to slot 0 (Warbird) if available.
+	if ship_specs.size() > 0 and not ship_specs[0].is_empty():
+		set_ship_spec(ship_specs[0])
+
+
+func _get_ship_spec_for(ship_state: DriftTypes.DriftShipState) -> Dictionary:
+	## Returns the ship spec for a given ship's type. Falls back to global ship_spec.
+	var st: int = int(ship_state.ship_type)
+	if ship_specs.size() > st and st >= 0:
+		var spec: Dictionary = ship_specs[st]
+		if not spec.is_empty():
+			return spec
+	return ship_spec
 
 
 func set_debug_combat(enabled: bool, verbose: bool = false) -> void:
@@ -243,10 +280,27 @@ func _debug_print_bullet_tuning(context: String) -> void:
 				" (applied=", ship_spec_overrides_weapons, ")")
 
 
-func _ship_spec_initial_energy_points() -> int:
-	if typeof(ship_spec) != TYPE_DICTIONARY or ship_spec.is_empty():
+func _ship_spec_initial_gun_level(ship_state: DriftTypes.DriftShipState) -> int:
+	var w: Variant = _get_ship_spec_for(ship_state).get("weapons")
+	if typeof(w) == TYPE_DICTIONARY:
+		return clampi(int((w as Dictionary).get("InitialGuns", 1)), 1, 3)
+	return 1
+
+
+func _ship_spec_initial_bomb_level(ship_state: DriftTypes.DriftShipState) -> int:
+	var w: Variant = _get_ship_spec_for(ship_state).get("weapons")
+	if typeof(w) == TYPE_DICTIONARY:
+		return clampi(int((w as Dictionary).get("InitialBombs", 0)), 0, 3)
+	return 0
+
+
+func _ship_spec_initial_energy_points(ship_state: DriftTypes.DriftShipState = null) -> int:
+	var spec: Dictionary = ship_spec
+	if ship_state != null:
+		spec = _get_ship_spec_for(ship_state)
+	if typeof(spec) != TYPE_DICTIONARY or spec.is_empty():
 		return maxi(0, int(energy_max_points))
-	var e: Variant = ship_spec.get("energy")
+	var e: Variant = spec.get("energy")
 	if typeof(e) != TYPE_DICTIONARY:
 		return maxi(0, int(energy_max_points))
 	var ed: Dictionary = e
@@ -336,6 +390,8 @@ func compute_world_hash() -> int:
 	parts.append("next_prize_spawn_tick=%d" % int(next_prize_spawn_tick))
 	parts.append("prize_id_counter=%d" % int(prize_id_counter))
 	parts.append("_next_bullet_id=%d" % int(next_bullet_id))
+	parts.append("_next_bomb_id=%d" % int(next_bomb_id))
+	parts.append("_next_mine_id=%d" % int(next_mine_id))
 
 	# RNG state (authoritative streams).
 	parts.append("prize_rng_seed=%d" % int(_prize_rng.seed))
@@ -379,6 +435,14 @@ func compute_world_hash() -> int:
 		parts.append("v=%d,%d" % [_q(float(s.velocity.x), Q_VEL), _q(float(s.velocity.y), Q_VEL)])
 		parts.append("r=%d" % _q(float(s.rotation), Q_ROT))
 		parts.append("freq=%d" % int(s.freq))
+		parts.append("stype=%d" % int(s.ship_type))
+		parts.append("repel=%d" % int(s.repel_count))
+		parts.append("burst=%d" % int(s.burst_count))
+		parts.append("warp=%d" % int(s.warp_count))
+		parts.append("shields_until=%d" % int(s.shields_until_tick))
+		parts.append("super_s=%d" % (1 if bool(s.super_shields) else 0))
+		parts.append("kills=%d" % int(s.kills))
+		parts.append("deaths=%d" % int(s.deaths))
 		parts.append("bounty=%d" % int(s.bounty))
 		parts.append("sz_used=%d" % int(s.safe_zone_time_used_ticks))
 		parts.append("sz_max=%d" % int(s.safe_zone_time_max_ticks))
@@ -401,6 +465,8 @@ func compute_world_hash() -> int:
 		parts.append("e_racc=%d" % int(s.energy_recharge_fp_accum))
 		parts.append("e_dacc=%d" % int(s.energy_drain_fp_accum))
 		parts.append("nbt=%d" % int(s.next_bullet_tick))
+		parts.append("nbombt=%d" % int(s.next_bomb_tick))
+		parts.append("nminet=%d" % int(s.next_mine_tick))
 		parts.append("ab=%d" % _qb(s.afterburner_on))
 		parts.append("st=%d" % _qb(s.stealth_on))
 		parts.append("ck=%d" % _qb(s.cloak_on))
@@ -427,6 +493,40 @@ func compute_world_hash() -> int:
 		parts.append("bd=%d" % int(b.die_tick))
 		parts.append("bb=%d" % int(b.bounces_left))
 		parts.append("blife=%d" % int(b.life_ticks))
+
+	# Bombs (stable order).
+	var bomb_ids: Array = bombs.keys()
+	bomb_ids.sort()
+	for bid2 in bomb_ids:
+		var bb: DriftTypes.DriftBombState = bombs.get(bid2)
+		if bb == null:
+			continue
+		parts.append("bomb=%d" % int(bb.id))
+		parts.append("bombo=%d" % int(bb.owner_id))
+		parts.append("bombl=%d" % int(bb.level))
+		parts.append("bombp=%d,%d" % [_q(float(bb.position.x), Q_POS), _q(float(bb.position.y), Q_POS)])
+		parts.append("bombv=%d,%d" % [_q(float(bb.velocity.x), Q_VEL), _q(float(bb.velocity.y), Q_VEL)])
+		parts.append("bombs=%d" % int(bb.spawn_tick))
+		parts.append("bombd=%d" % int(bb.die_tick))
+		parts.append("bombb=%d" % int(bb.bounces_left))
+		parts.append("bombemp=%d" % _qb(bb.is_emp))
+
+	# Mines (stable order).
+	var mine_ids: Array = mines.keys()
+	mine_ids.sort()
+	for mid in mine_ids:
+		var mm: DriftTypes.DriftMineState = mines.get(mid)
+		if mm == null:
+			continue
+		parts.append("mine=%d" % int(mm.id))
+		parts.append("mineo=%d" % int(mm.owner_id))
+		parts.append("minel=%d" % int(mm.level))
+		parts.append("minep=%d,%d" % [_q(float(mm.position.x), Q_POS), _q(float(mm.position.y), Q_POS)])
+		parts.append("mines=%d" % int(mm.spawn_tick))
+		parts.append("mined=%d" % int(mm.die_tick))
+		parts.append("minetr=%d" % _qb(mm.triggered))
+		parts.append("minet_by=%d" % int(mm.triggered_by_ship_id))
+		parts.append("minet_t=%d" % int(mm.triggered_tick))
 
 	# Prizes (stable order).
 	var prize_ids: Array = prizes.keys()
@@ -841,26 +941,31 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 
 	# ship_spec (classic) overrides for cost/delay/speed.
 	# IMPORTANT: only apply when explicitly enabled; ship_spec is not a versioned contract.
-	if ship_spec_overrides_weapons and typeof(ship_spec) == TYPE_DICTIONARY and not ship_spec.is_empty():
-		var e: Variant = ship_spec.get("energy")
+	var resolved_spec: Dictionary = _get_ship_spec_for(ship_state)
+	if ship_spec_overrides_weapons and typeof(resolved_spec) == TYPE_DICTIONARY and not resolved_spec.is_empty():
+		var e: Variant = resolved_spec.get("energy")
 		if typeof(e) == TYPE_DICTIONARY:
 			cost = maxi(0, int((e as Dictionary).get("BulletFireEnergy", cost)))
 			cost_src = "ship_spec.energy.BulletFireEnergy"
 			if bool(ship_state.multi_fire_enabled):
 				cost = maxi(0, int((e as Dictionary).get("MultiFireEnergy", cost)))
 				cost_src = "ship_spec.energy.MultiFireEnergy"
-		var w: Variant = ship_spec.get("weapons")
+		var w: Variant = resolved_spec.get("weapons")
 		if typeof(w) == TYPE_DICTIONARY:
 			delay = maxi(0, int((w as Dictionary).get("BulletFireDelay", delay)))
 			delay_src = "ship_spec.weapons.BulletFireDelay (ticks)"
 			speed_px_s = maxi(0, int((w as Dictionary).get("BulletSpeed", speed_px_s)))
 			if bool(ship_state.multi_fire_enabled):
 				# Classic MultiFireDelay is in ms; convert to ticks (ceil).
-				var misc: Variant = ship_spec.get("misc")
+				var misc: Variant = resolved_spec.get("misc")
 				if typeof(misc) == TYPE_DICTIONARY and (misc as Dictionary).has("MultiFireDelay"):
 					var ms_i: int = maxi(0, int((misc as Dictionary).get("MultiFireDelay")))
 					delay = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
 					delay_src = "ship_spec.misc.MultiFireDelay (ms->ticks)"
+	# DoubleBarrel: Terrier fires 2 parallel bullets from offset barrel positions.
+	var _db_spec: Variant = _get_ship_spec_for(ship_state).get("misc")
+	if typeof(_db_spec) == TYPE_DICTIONARY and int((_db_spec as Dictionary).get("DoubleBarrel", 0)) != 0:
+		guns *= 2
 	# Clamp.
 	guns = clampi(guns, 1, 8)
 	spread = clampf(spread, 0.0, 45.0)
@@ -883,6 +988,437 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 		"bounces": bounces,
 		"lifetime_ticks": lifetime,
 	}
+
+
+const BOMB_RADIUS_PX: float = 6.0
+const BOMB_EXPLOSION_RADIUS_PX: float = 96.0
+const BOMB_DEFAULT_SPEED_PX_S: int = 260
+const BOMB_DEFAULT_DELAY_TICKS: int = 90
+const BOMB_DEFAULT_MAX_ACTIVE: int = 2
+const BOMB_DEFAULT_LIFETIME_TICKS: int = 420
+const EMP_DEFAULT_TICKS: int = 90
+
+const MINE_TRIGGER_RADIUS_PX: float = 72.0
+const MINE_EXPLOSION_RADIUS_PX: float = 96.0
+const MINE_DEFAULT_DELAY_TICKS: int = 90
+const MINE_DEFAULT_MAX_ACTIVE: int = 5
+const MINE_DEFAULT_LIFETIME_TICKS: int = -1
+const MINE_FUSE_TICKS: int = 30
+
+
+func _count_active_bombs_for_owner(owner_id: int) -> int:
+	var n: int = 0
+	for k in bombs.keys():
+		var b: DriftTypes.DriftBombState = bombs.get(k)
+		if b == null:
+			continue
+		if int(b.owner_id) == int(owner_id):
+			n += 1
+	return n
+
+
+func _count_active_mines_for_owner(owner_id: int) -> int:
+	var n: int = 0
+	for k in mines.keys():
+		var m: DriftTypes.DriftMineState = mines.get(k)
+		if m == null:
+			continue
+		if int(m.owner_id) == int(owner_id):
+			n += 1
+	return n
+
+
+func _resolve_bomb_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
+	# Output keys:
+	#   cost:int, delay_ticks:int, speed_px_s:int, level:int, bounces:int,
+	#   lifetime_ticks:int, max_active:int, is_emp:bool
+	var level: int = clampi(int(ship_state.bomb_level), 1, 3)
+	var cost: int = int(bomb_energy_cost)
+	var delay: int = int(BOMB_DEFAULT_DELAY_TICKS)
+	var speed_px_s: int = int(BOMB_DEFAULT_SPEED_PX_S)
+	var bounces: int = 0
+	var lifetime_ticks: int = int(BOMB_DEFAULT_LIFETIME_TICKS)
+	var max_active: int = int(BOMB_DEFAULT_MAX_ACTIVE)
+	var is_emp: bool = false
+
+	var resolved_bomb_spec: Dictionary = _get_ship_spec_for(ship_state)
+	if ship_spec_overrides_weapons and typeof(resolved_bomb_spec) == TYPE_DICTIONARY and not resolved_bomb_spec.is_empty():
+		var e: Variant = resolved_bomb_spec.get("energy")
+		if typeof(e) == TYPE_DICTIONARY:
+			var base_cost: int = maxi(0, int((e as Dictionary).get("BombFireEnergy", cost)))
+			var upg: int = maxi(0, int((e as Dictionary).get("BombFireEnergyUpgrade", 0)))
+			cost = base_cost + upg * maxi(0, level - 1)
+		var w: Variant = resolved_bomb_spec.get("weapons")
+		if typeof(w) == TYPE_DICTIONARY:
+			delay = maxi(0, int((w as Dictionary).get("BombFireDelay", delay)))
+			speed_px_s = maxi(0, int((w as Dictionary).get("BombSpeed", speed_px_s)))
+			bounces = maxi(0, int((w as Dictionary).get("BombBounceCount", bounces)))
+			max_active = maxi(0, int((w as Dictionary).get("MaxBombs", max_active)))
+			is_emp = int((w as Dictionary).get("EmpBomb", 0)) != 0
+
+	cost = clampi(cost, 0, 100000)
+	delay = clampi(delay, 0, 120000)
+	speed_px_s = clampi(speed_px_s, 0, 5000)
+	bounces = clampi(bounces, 0, 255)
+	max_active = clampi(max_active, 0, 255)
+	lifetime_ticks = clampi(lifetime_ticks, -1, 6000)
+	return {
+		"cost": cost,
+		"delay_ticks": delay,
+		"speed_px_s": speed_px_s,
+		"level": level,
+		"bounces": bounces,
+		"lifetime_ticks": lifetime_ticks,
+		"max_active": max_active,
+		"is_emp": is_emp,
+	}
+
+
+func _resolve_mine_lay_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
+	# Output keys:
+	#   cost:int, delay_ticks:int, level:int, lifetime_ticks:int, max_active:int
+	var level: int = clampi(int(ship_state.bomb_level), 1, 3)
+	var cost: int = int(bomb_energy_cost)
+	var delay: int = int(MINE_DEFAULT_DELAY_TICKS)
+	var lifetime_ticks: int = int(MINE_DEFAULT_LIFETIME_TICKS)
+	var max_active: int = int(MINE_DEFAULT_MAX_ACTIVE)
+
+	var resolved_mine_spec: Dictionary = _get_ship_spec_for(ship_state)
+	if ship_spec_overrides_weapons and typeof(resolved_mine_spec) == TYPE_DICTIONARY and not resolved_mine_spec.is_empty():
+		var e: Variant = resolved_mine_spec.get("energy")
+		if typeof(e) == TYPE_DICTIONARY:
+			var base_cost: int = maxi(0, int((e as Dictionary).get("LandmineFireEnergy", cost)))
+			var upg: int = maxi(0, int((e as Dictionary).get("LandmineFireEnergyUpgrade", 0)))
+			cost = base_cost + upg * maxi(0, level - 1)
+		var w: Variant = resolved_mine_spec.get("weapons")
+		if typeof(w) == TYPE_DICTIONARY:
+			delay = maxi(0, int((w as Dictionary).get("LandmineFireDelay", delay)))
+			max_active = maxi(0, int((w as Dictionary).get("MaxMines", max_active)))
+
+	cost = clampi(cost, 0, 100000)
+	delay = clampi(delay, 0, 120000)
+	max_active = clampi(max_active, 0, 255)
+	lifetime_ticks = clampi(lifetime_ticks, -1, 6000)
+	return {
+		"cost": cost,
+		"delay_ticks": delay,
+		"level": level,
+		"lifetime_ticks": lifetime_ticks,
+		"max_active": max_active,
+	}
+
+
+func _explosion_damage_for_profile(max_damage: int, dist: float, radius: float) -> int:
+	if radius <= 0.0001:
+		return 0
+	var frac: float = 1.0 - clampf(dist / radius, 0.0, 1.0)
+	return maxi(0, int(round(float(maxi(0, max_damage)) * frac)))
+
+
+func _apply_explosion_effects(owner_id: int, origin: Vector2, radius: float, max_damage: int, knock_impulse: float, is_emp: bool, source_tag: String) -> void:
+	var ship_ids: Array = ships.keys()
+	ship_ids.sort()
+	var r2: float = radius * radius
+	for sid in ship_ids:
+		var s: DriftTypes.DriftShipState = ships.get(sid)
+		if s == null:
+			continue
+		if _ship_is_dead(s, tick):
+			continue
+		var d2: float = s.position.distance_squared_to(origin)
+		if d2 > r2:
+			continue
+		var dist: float = sqrt(maxf(0.0, d2))
+		var dmg: int = _explosion_damage_for_profile(max_damage, dist, radius)
+		if dmg > 0:
+			var attacker: int = int(owner_id)
+			if int(s.id) == int(owner_id):
+				attacker = -1
+			apply_damage(attacker, int(s.id), dmg, source_tag)
+		if knock_impulse > 0.0:
+			var dir: Vector2 = s.position - origin
+			if dir.length_squared() <= 0.0001:
+				dir = Vector2(1.0, 0.0)
+			dir = dir.normalized()
+			var frac: float = 1.0 - clampf(dist / radius, 0.0, 1.0)
+			s.velocity += dir * (knock_impulse * frac)
+		if is_emp:
+			var emp_ticks: int = int(EMP_DEFAULT_TICKS)
+			s.engine_shutdown_until_tick = maxi(int(s.engine_shutdown_until_tick), int(tick) + emp_ticks)
+
+
+func _resolve_bomb_explosion_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
+	var prof := _resolve_bomb_fire_profile_for_ship(ship_state)
+	var dmg: int = int(prof.get("cost", 0))
+	if dmg <= 0:
+		dmg = maxi(0, int(bullet_damage) * 10)
+	var knock: float = 0.0
+	var resolved_bexp_spec: Dictionary = _get_ship_spec_for(ship_state)
+	if ship_spec_overrides_weapons and typeof(resolved_bexp_spec) == TYPE_DICTIONARY and not resolved_bexp_spec.is_empty():
+		var w: Variant = resolved_bexp_spec.get("weapons")
+		if typeof(w) == TYPE_DICTIONARY:
+			knock = maxf(0.0, float((w as Dictionary).get("BombThrust", 0)))
+	return {
+		"radius": float(BOMB_EXPLOSION_RADIUS_PX),
+		"max_damage": int(dmg),
+		"knock": float(knock),
+		"is_emp": bool(prof.get("is_emp", false)),
+	}
+
+
+func _resolve_mine_explosion_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
+	var prof := _resolve_mine_lay_profile_for_ship(ship_state)
+	var dmg: int = int(prof.get("cost", 0))
+	if dmg <= 0:
+		dmg = maxi(0, int(bullet_damage) * 10)
+	var knock: float = 0.0
+	var resolved_mexp_spec: Dictionary = _get_ship_spec_for(ship_state)
+	if ship_spec_overrides_weapons and typeof(resolved_mexp_spec) == TYPE_DICTIONARY and not resolved_mexp_spec.is_empty():
+		var w: Variant = resolved_mexp_spec.get("weapons")
+		if typeof(w) == TYPE_DICTIONARY:
+			knock = maxf(0.0, float((w as Dictionary).get("BombThrust", 0)))
+	return {
+		"radius": float(MINE_EXPLOSION_RADIUS_PX),
+		"max_damage": int(dmg),
+		"knock": float(knock),
+	}
+
+
+func _mine_should_trigger_on(owner_id: int, target_id: int) -> bool:
+	if owner_id == target_id:
+		return false
+	if not ships.has(owner_id) or not ships.has(target_id):
+		return false
+	var owner: DriftTypes.DriftShipState = ships.get(owner_id)
+	var target: DriftTypes.DriftShipState = ships.get(target_id)
+	if owner == null or target == null:
+		return false
+	if _ship_is_dead(owner, tick) or _ship_is_dead(target, tick):
+		return false
+	if bool(owner.in_safe_zone) or bool(target.in_safe_zone):
+		return false
+	if not _is_friendly_fire_enabled() and int(owner.freq) == int(target.freq):
+		return false
+	return true
+
+
+func _explode_bomb(b: DriftTypes.DriftBombState) -> void:
+	if b == null:
+		return
+	var owner: DriftTypes.DriftShipState = ships.get(int(b.owner_id))
+	var profile: Dictionary = {}
+	if owner != null:
+		profile = _resolve_bomb_explosion_profile_for_ship(owner)
+	else:
+		profile = {"radius": float(BOMB_EXPLOSION_RADIUS_PX), "max_damage": int(bullet_damage) * 10, "knock": 0.0, "is_emp": bool(b.is_emp)}
+	_apply_explosion_effects(int(b.owner_id), b.position, float(profile.get("radius", BOMB_EXPLOSION_RADIUS_PX)), int(profile.get("max_damage", 0)), float(profile.get("knock", 0.0)), bool(profile.get("is_emp", false)), "bomb")
+	collision_events.append({
+		"type": "bomb_explode",
+		"tick": int(tick),
+		"pos": b.position,
+		"level": int(b.level),
+		"owner_id": int(b.owner_id),
+		"emp": bool(b.is_emp),
+	})
+
+
+func _explode_mine(m: DriftTypes.DriftMineState) -> void:
+	if m == null:
+		return
+	var owner: DriftTypes.DriftShipState = ships.get(int(m.owner_id))
+	var profile: Dictionary = {}
+	if owner != null:
+		profile = _resolve_mine_explosion_profile_for_ship(owner)
+	else:
+		profile = {"radius": float(MINE_EXPLOSION_RADIUS_PX), "max_damage": int(bullet_damage) * 10, "knock": 0.0}
+	_apply_explosion_effects(int(m.owner_id), m.position, float(profile.get("radius", MINE_EXPLOSION_RADIUS_PX)), int(profile.get("max_damage", 0)), float(profile.get("knock", 0.0)), false, "mine")
+	collision_events.append({
+		"type": "mine_explode",
+		"tick": int(tick),
+		"pos": m.position,
+		"level": int(m.level),
+		"owner_id": int(m.owner_id),
+	})
+
+
+func _step_bombs(ship_ids_sorted: Array) -> void:
+	var bomb_ids: Array[int] = []
+	for k in bombs.keys():
+		bomb_ids.append(int(k))
+	bomb_ids.sort()
+	var to_erase: Array[int] = []
+	var br: float = float(BOMB_RADIUS_PX)
+	var hit_r2: float = pow(float(DriftConstants.SHIP_RADIUS) + br, 2.0)
+	for bid in bomb_ids:
+		var b: DriftTypes.DriftBombState = bombs.get(bid)
+		if b == null:
+			continue
+		# Lifetime.
+		if int(b.die_tick) >= 0 and int(tick) >= int(b.die_tick):
+			_explode_bomb(b)
+			to_erase.append(bid)
+			continue
+
+		var old_pos: Vector2 = b.position
+		var new_pos: Vector2 = old_pos + b.velocity * DriftConstants.TICK_DT
+		# Wall collision/bounce.
+		var sweep := {"hit": false}
+		if br > 0.0:
+			sweep = _sweep_circle_against_static_solids(old_pos, new_pos, br)
+		if bool(sweep.get("hit", false)):
+			var hit_pos: Vector2 = sweep.get("pos", old_pos)
+			var n: Vector2 = sweep.get("normal", Vector2.ZERO)
+			if n.length_squared() <= 0.0001:
+				var vv: Vector2 = b.velocity
+				if vv.length_squared() > 0.0001:
+					n = (-vv).normalized()
+				else:
+					n = Vector2(1.0, 0.0)
+			if int(b.bounces_left) > 0:
+				b.bounces_left = maxi(0, int(b.bounces_left) - 1)
+				b.velocity = b.velocity.bounce(n) * float(wall_restitution)
+				b.position = hit_pos + n * 0.5
+			else:
+				b.position = hit_pos
+				_explode_bomb(b)
+				to_erase.append(bid)
+				continue
+		else:
+			b.position = new_pos
+
+		# Proximity detonation: bombs from ships with bomb_proximity_enabled trigger near enemies.
+		const PROXIMITY_RADIUS_PX: float = 64.0
+		var prox_r2: float = PROXIMITY_RADIUS_PX * PROXIMITY_RADIUS_PX
+		var owner_has_prox: bool = false
+		var owner_freq: int = -1
+		if ships.has(int(b.owner_id)):
+			var _owner: DriftTypes.DriftShipState = ships[int(b.owner_id)]
+			owner_has_prox = bool(_owner.bomb_proximity_enabled)
+			owner_freq = int(_owner.freq)
+		if owner_has_prox:
+			for sid in ship_ids_sorted:
+				var s: DriftTypes.DriftShipState = ships.get(sid)
+				if s == null or _ship_is_dead(s, tick):
+					continue
+				if int(s.id) == int(b.owner_id):
+					continue
+				var is_enemy: bool = (owner_freq <= 0 or int(s.freq) <= 0 or int(s.freq) != owner_freq)
+				if not is_enemy:
+					continue
+				if s.position.distance_squared_to(b.position) <= prox_r2:
+					_explode_bomb(b)
+					to_erase.append(bid)
+					break
+
+		# Ship contact detonation (deterministic: lowest ship id wins).
+		var hit_ship_id: int = -1
+		for sid in ship_ids_sorted:
+			var s: DriftTypes.DriftShipState = ships.get(sid)
+			if s == null:
+				continue
+			if _ship_is_dead(s, tick):
+				continue
+			if s.position.distance_squared_to(b.position) <= hit_r2:
+				hit_ship_id = int(s.id)
+				break
+		if hit_ship_id >= 0:
+			_explode_bomb(b)
+			to_erase.append(bid)
+
+	for bid2 in to_erase:
+		bombs.erase(int(bid2))
+
+
+func _step_mines(ship_ids_sorted: Array) -> void:
+	var mine_ids: Array[int] = []
+	for k in mines.keys():
+		mine_ids.append(int(k))
+	mine_ids.sort()
+	var to_erase: Array[int] = []
+	var trig_r2: float = float(MINE_TRIGGER_RADIUS_PX) * float(MINE_TRIGGER_RADIUS_PX)
+	for mid in mine_ids:
+		var m: DriftTypes.DriftMineState = mines.get(mid)
+		if m == null:
+			continue
+		# Lifetime.
+		if int(m.die_tick) >= 0 and int(tick) >= int(m.die_tick):
+			_explode_mine(m)
+			to_erase.append(mid)
+			continue
+
+		if not bool(m.triggered):
+			# Trigger detection (deterministic: lowest ship id wins).
+			var trigger_ship_id: int = -1
+			for sid in ship_ids_sorted:
+				if not _mine_should_trigger_on(int(m.owner_id), int(sid)):
+					continue
+				var s: DriftTypes.DriftShipState = ships.get(int(sid))
+				if s == null:
+					continue
+				if s.position.distance_squared_to(m.position) <= trig_r2:
+					trigger_ship_id = int(s.id)
+					break
+			if trigger_ship_id >= 0:
+				m.triggered = true
+				m.triggered_by_ship_id = int(trigger_ship_id)
+				m.triggered_tick = int(tick)
+				collision_events.append({
+					"type": "mine_trigger",
+					"tick": int(tick),
+					"mine_id": int(m.id),
+					"owner_id": int(m.owner_id),
+					"ship_id": int(trigger_ship_id),
+				})
+			continue
+
+		# Triggered mines: explode after fuse, or immediately if the triggering enemy leaves range.
+		var tid: int = int(m.triggered_by_ship_id)
+		if tid < 0 or (not ships.has(tid)):
+			_explode_mine(m)
+			to_erase.append(mid)
+			continue
+		var ts: DriftTypes.DriftShipState = ships.get(tid)
+		if ts == null or _ship_is_dead(ts, tick):
+			_explode_mine(m)
+			to_erase.append(mid)
+			continue
+		var d2: float = ts.position.distance_squared_to(m.position)
+		if d2 > trig_r2:
+			# Triggered then enemy leaves -> explode immediately.
+			_explode_mine(m)
+			to_erase.append(mid)
+			continue
+		if int(tick) - int(m.triggered_tick) >= int(MINE_FUSE_TICKS):
+			_explode_mine(m)
+			to_erase.append(mid)
+			continue
+
+	for mid2 in to_erase:
+		mines.erase(int(mid2))
+
+
+func _step_decoys() -> void:
+	var to_erase: Array = []
+	for did in decoys.keys():
+		var d: DriftTypes.DriftDecoyState = decoys[did]
+		if int(tick) >= int(d.die_tick):
+			to_erase.append(did)
+			continue
+		d.position += d.velocity * DriftConstants.TICK_DT
+	for did2 in to_erase:
+		decoys.erase(int(did2))
+
+
+func _step_bricks() -> void:
+	var alive: Array = []
+	for br in bricks:
+		if int(tick) >= int(br.die_tick):
+			for tile in br.tiles:
+				if not _static_solid_tiles.has(tile):
+					solid_tiles.erase(tile)
+		else:
+			alive.append(br)
+	bricks = alive
 
 
 func _step_bullets(ship_ids_sorted: Array) -> void:
@@ -1011,6 +1547,9 @@ func _maybe_spawn_bullet_shrapnel(b: DriftTypes.DriftBulletState) -> void:
 	# To avoid recursion/infinite fragmentation, fragments are spawned as level 1 bullets.
 	var cfg := _resolve_bullet_shrapnel_cfg_for_level(int(b.level))
 	var count: int = int(cfg.get("count", 0))
+	var owner_ship = ships.get(int(b.owner_id))
+	if owner_ship != null and int(owner_ship.shrapnel_bonus) > 0:
+		count += int(owner_ship.shrapnel_bonus)
 	if count <= 0:
 		return
 	var lifetime_ticks: int = int(cfg.get("lifetime_ticks", 0))
@@ -1047,6 +1586,12 @@ func _maybe_spawn_bullet_shrapnel(b: DriftTypes.DriftBulletState) -> void:
 func set_map_dimensions(w_tiles: int, h_tiles: int) -> void:
 	map_w_tiles = maxi(0, int(w_tiles))
 	map_h_tiles = maxi(0, int(h_tiles))
+	# Keep arena bounds in sync with map so clamping/spawning are correct.
+	if map_w_tiles > 0 and map_h_tiles > 0:
+		DriftConstants.ARENA_MAX = Vector2(float(map_w_tiles) * float(TILE_SIZE), float(map_h_tiles) * float(TILE_SIZE))
+		DriftConstants.ARENA_MIN = Vector2.ZERO
+		DriftConstants.ARENA_CENTER = DriftConstants.ARENA_MAX * 0.5
+		DriftConstants.HILL_CENTER = DriftConstants.ARENA_CENTER
 	_recompute_main_walkable_component()
 	# Reset spawn schedule when map changes.
 	next_prize_spawn_tick = maxi(0, tick + prize_delay_ticks)
@@ -1123,8 +1668,10 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 	# Tick down recharge wait.
 	# Important: if the ship was waiting at the start of the tick, we do NOT allow recharge
 	# to begin on the same tick the counter reaches 0 (avoids an off-by-one early recharge).
-	var was_waiting: bool = int(ship_state.energy_recharge_wait_ticks) > 0
-	if was_waiting:
+	# Engine shutdown (EMP) also suppresses recharge without consuming the delay counter.
+	var engine_down: bool = int(ship_state.engine_shutdown_until_tick) > 0 and int(tick) < int(ship_state.engine_shutdown_until_tick)
+	var was_waiting: bool = int(ship_state.energy_recharge_wait_ticks) > 0 or engine_down
+	if not engine_down and int(ship_state.energy_recharge_wait_ticks) > 0:
 		ship_state.energy_recharge_wait_ticks = int(ship_state.energy_recharge_wait_ticks) - 1
 		if int(ship_state.energy_recharge_wait_ticks) < 0:
 			ship_state.energy_recharge_wait_ticks = 0
@@ -1150,6 +1697,57 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		ship_state.xradar_on = not bool(ship_state.xradar_on)
 	if (pressed_bits & 8) != 0:
 		ship_state.antiwarp_on = not bool(ship_state.antiwarp_on)
+
+	# Per-ship ability gate from server.cfg: Status=0 disallowed, Status=2 free (no drain).
+	var _spec_raw: Variant = _get_ship_spec_for(ship_state).get("abilities")
+	var _spec_ab: Dictionary = _spec_raw as Dictionary if typeof(_spec_raw) == TYPE_DICTIONARY else {}
+	if int(_spec_ab.get("StealthStatus", 1)) == 0:
+		ship_state.stealth_on = false
+	if int(_spec_ab.get("CloakStatus", 1)) == 0:
+		ship_state.cloak_on = false
+	if int(_spec_ab.get("XRadarStatus", 1)) == 0:
+		ship_state.xradar_on = false
+	if int(_spec_ab.get("AntiWarpStatus", 1)) == 0:
+		ship_state.antiwarp_on = false
+
+	# Item-use buttons (edge-detected; consume inventory and fire effect).
+	var prev_item_bits: int = int(_prev_item_buttons_by_ship.get(int(ship_state.id), 0))
+	var cur_item_bits: int = 0
+	if bool(input_cmd.repel_btn):
+		cur_item_bits |= 1
+	if bool(input_cmd.burst_btn):
+		cur_item_bits |= 2
+	if bool(input_cmd.warp_btn):
+		cur_item_bits |= 4
+	if bool(input_cmd.thor_btn):
+		cur_item_bits |= 8
+	if bool(input_cmd.rocket_btn):
+		cur_item_bits |= 16
+	if bool(input_cmd.decoy_btn):
+		cur_item_bits |= 32
+	if bool(input_cmd.brick_btn):
+		cur_item_bits |= 64
+	if bool(input_cmd.portal_btn):
+		cur_item_bits |= 128
+	var pressed_item_bits: int = cur_item_bits & (~prev_item_bits)
+	_prev_item_buttons_by_ship[int(ship_state.id)] = cur_item_bits
+
+	if (pressed_item_bits & 1) != 0 and int(ship_state.repel_count) > 0:
+		_use_repel(ship_state)
+	if (pressed_item_bits & 2) != 0 and int(ship_state.burst_count) > 0:
+		_use_burst(ship_state)
+	if (pressed_item_bits & 4) != 0 and int(ship_state.warp_count) > 0:
+		_use_warp(ship_state)
+	if (pressed_item_bits & 8) != 0 and int(ship_state.thor_count) > 0:
+		_use_thor(ship_state)
+	if (pressed_item_bits & 16) != 0 and int(ship_state.rocket_count) > 0:
+		_use_rocket(ship_state)
+	if (pressed_item_bits & 32) != 0 and int(ship_state.decoy_count) > 0:
+		_use_decoy(ship_state)
+	if (pressed_item_bits & 64) != 0 and int(ship_state.brick_count) > 0:
+		_use_brick(ship_state)
+	if (pressed_item_bits & 128) != 0 and int(ship_state.portal_count) > 0:
+		_use_portal(ship_state)
 
 	# Optional continuous drains: afterburner (hold) + toggled abilities.
 	# Note: while any sustained drain is active, recharge must be blocked deterministically.
@@ -1185,13 +1783,13 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 				var base_d: int = int(energy_afterburner_drain_per_sec)
 				var strained: int = maxi(0, int(round(float(base_d) * mult)))
 				total_drain_per_sec += maxi(0, strained - base_d)
-	if bool(ship_state.stealth_on):
+	if bool(ship_state.stealth_on) and int(_spec_ab.get("StealthStatus", 1)) != 2:
 		total_drain_per_sec += int(ability_stealth_drain_per_sec)
-	if bool(ship_state.cloak_on):
+	if bool(ship_state.cloak_on) and int(_spec_ab.get("CloakStatus", 1)) != 2:
 		total_drain_per_sec += int(ability_cloak_drain_per_sec)
-	if bool(ship_state.xradar_on):
+	if bool(ship_state.xradar_on) and int(_spec_ab.get("XRadarStatus", 1)) != 2:
 		total_drain_per_sec += int(ability_xradar_drain_per_sec)
-	if bool(ship_state.antiwarp_on):
+	if bool(ship_state.antiwarp_on) and int(_spec_ab.get("AntiWarpStatus", 1)) != 2:
 		total_drain_per_sec += int(ability_antiwarp_drain_per_sec)
 
 	if total_drain_per_sec > 0 and int(ship_state.energy_current) <= 0:
@@ -1493,6 +2091,12 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 
 	# Minimal viable set with safe stubs.
 	match kind:
+		DriftTypes.PrizeKind.QuickCharge:
+			applied_effect = true
+			if is_negative:
+				adjust_energy(int(ship_state.id), -int(ship_state.energy_max) / 2, EnergyReason.PRIZE_NEGATIVE, -1)
+			else:
+				adjust_energy(int(ship_state.id), int(ship_state.energy_max), EnergyReason.PRIZE_POSITIVE, -1)
 		DriftTypes.PrizeKind.Energy:
 			applied_effect = true
 			var amt: int = 25
@@ -1507,6 +2111,24 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				ship_state.recharge_bonus = maxi(0, int(ship_state.recharge_bonus) - 1)
 			else:
 				ship_state.recharge_bonus = mini(16, int(ship_state.recharge_bonus) + 1)
+		DriftTypes.PrizeKind.Rotation:
+			applied_effect = true
+			if is_negative:
+				ship_state.rotation_bonus = maxi(0, int(ship_state.rotation_bonus) - 1)
+			else:
+				ship_state.rotation_bonus = mini(16, int(ship_state.rotation_bonus) + 1)
+		DriftTypes.PrizeKind.Stealth:
+			applied_effect = true
+			ship_state.stealth_on = not is_negative
+		DriftTypes.PrizeKind.Cloak:
+			applied_effect = true
+			ship_state.cloak_on = not is_negative
+		DriftTypes.PrizeKind.AntiWarp:
+			applied_effect = true
+			ship_state.antiwarp_on = not is_negative
+		DriftTypes.PrizeKind.XRadar:
+			applied_effect = true
+			ship_state.xradar_on = not is_negative
 		DriftTypes.PrizeKind.TopSpeed:
 			applied_effect = true
 			if is_negative:
@@ -1521,16 +2143,24 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				ship_state.thruster_bonus = mini(16, int(ship_state.thruster_bonus) + 1)
 		DriftTypes.PrizeKind.Gun:
 			applied_effect = true
+			var _gspec: Variant = _get_ship_spec_for(ship_state).get("weapons")
+			var _max_guns: int = 3
+			if typeof(_gspec) == TYPE_DICTIONARY:
+				_max_guns = clampi(int((_gspec as Dictionary).get("MaxGuns", 3)), 0, 3)
 			if is_negative:
 				ship_state.gun_level = maxi(1, int(ship_state.gun_level) - 1)
 			else:
-				ship_state.gun_level = mini(3, int(ship_state.gun_level) + 1)
+				ship_state.gun_level = mini(_max_guns, int(ship_state.gun_level) + 1)
 		DriftTypes.PrizeKind.Bomb:
 			applied_effect = true
+			var _bspec: Variant = _get_ship_spec_for(ship_state).get("weapons")
+			var _max_bombs: int = 3
+			if typeof(_bspec) == TYPE_DICTIONARY:
+				_max_bombs = clampi(int((_bspec as Dictionary).get("MaxBombs", 3)), 0, 3)
 			if is_negative:
 				ship_state.bomb_level = maxi(1, int(ship_state.bomb_level) - 1)
 			else:
-				ship_state.bomb_level = mini(3, int(ship_state.bomb_level) + 1)
+				ship_state.bomb_level = mini(_max_bombs, int(ship_state.bomb_level) + 1)
 		DriftTypes.PrizeKind.MultiFire:
 			applied_effect = true
 			if is_negative:
@@ -1543,6 +2173,25 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				ship_state.bullet_bounce_bonus = maxi(0, int(ship_state.bullet_bounce_bonus) - 1)
 			else:
 				ship_state.bullet_bounce_bonus = mini(16, int(ship_state.bullet_bounce_bonus) + 1)
+		DriftTypes.PrizeKind.Shrapnel:
+			applied_effect = true
+			if is_negative:
+				ship_state.shrapnel_bonus = maxi(0, int(ship_state.shrapnel_bonus) - 1)
+			else:
+				ship_state.shrapnel_bonus = mini(16, int(ship_state.shrapnel_bonus) + 1)
+		DriftTypes.PrizeKind.Proximity:
+			applied_effect = true
+			ship_state.bomb_proximity_enabled = not is_negative
+		DriftTypes.PrizeKind.AllWeapons:
+			applied_effect = true
+			if not is_negative:
+				# Grant max gun, max bomb, multifire, and one bouncing bullet upgrade.
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.Gun, false, now_tick)
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.Gun, false, now_tick)
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.Bomb, false, now_tick)
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.Bomb, false, now_tick)
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.MultiFire, false, now_tick)
+				_apply_prize_effect(ship_state, DriftTypes.PrizeKind.BouncingBullets, false, now_tick)
 		DriftTypes.PrizeKind.MultiPrize:
 			# Apply multiple positive prizes; never recurse into MultiPrize.
 			for _i in range(multi_prize_count):
@@ -1550,6 +2199,75 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				if sub_kind < 0:
 					break
 				_apply_prize_effect(ship_state, sub_kind, false, now_tick)
+		DriftTypes.PrizeKind.Repel:
+			applied_effect = true
+			var spec_rep: Dictionary = _get_ship_spec_for(ship_state)
+			var rep_max: int = 3
+			var wpn_rep: Variant = spec_rep.get("weapons")
+			if typeof(wpn_rep) == TYPE_DICTIONARY:
+				rep_max = maxi(1, int((wpn_rep as Dictionary).get("RepelMax", 3)))
+			if is_negative:
+				ship_state.repel_count = maxi(0, int(ship_state.repel_count) - 1)
+			else:
+				ship_state.repel_count = mini(rep_max, int(ship_state.repel_count) + 1)
+		DriftTypes.PrizeKind.Burst:
+			applied_effect = true
+			var spec_bst: Dictionary = _get_ship_spec_for(ship_state)
+			var bst_max: int = 3
+			var wpn_bst: Variant = spec_bst.get("weapons")
+			if typeof(wpn_bst) == TYPE_DICTIONARY:
+				bst_max = maxi(1, int((wpn_bst as Dictionary).get("BurstMax", 3)))
+			if is_negative:
+				ship_state.burst_count = maxi(0, int(ship_state.burst_count) - 1)
+			else:
+				ship_state.burst_count = mini(bst_max, int(ship_state.burst_count) + 1)
+		DriftTypes.PrizeKind.Warp:
+			applied_effect = true
+			if is_negative:
+				ship_state.warp_count = maxi(0, int(ship_state.warp_count) - 1)
+			else:
+				ship_state.warp_count = mini(10, int(ship_state.warp_count) + 1)
+		DriftTypes.PrizeKind.Decoy:
+			applied_effect = true
+			if is_negative:
+				ship_state.decoy_count = maxi(0, int(ship_state.decoy_count) - 1)
+			else:
+				ship_state.decoy_count = mini(10, int(ship_state.decoy_count) + 1)
+		DriftTypes.PrizeKind.Brick:
+			applied_effect = true
+			if is_negative:
+				ship_state.brick_count = maxi(0, int(ship_state.brick_count) - 1)
+			else:
+				ship_state.brick_count = mini(10, int(ship_state.brick_count) + 1)
+		DriftTypes.PrizeKind.Portal:
+			applied_effect = true
+			if is_negative:
+				ship_state.portal_count = maxi(0, int(ship_state.portal_count) - 1)
+			else:
+				var pspec: Variant = _get_ship_spec_for(ship_state).get("weapons")
+				var pmax: int = 3
+				if typeof(pspec) == TYPE_DICTIONARY:
+					pmax = maxi(1, int((pspec as Dictionary).get("PortalMax", 3)))
+				ship_state.portal_count = mini(pmax, int(ship_state.portal_count) + 1)
+		DriftTypes.PrizeKind.Thor:
+			applied_effect = true
+			if is_negative:
+				ship_state.thor_count = maxi(0, int(ship_state.thor_count) - 1)
+			else:
+				ship_state.thor_count = mini(10, int(ship_state.thor_count) + 1)
+		DriftTypes.PrizeKind.Rocket:
+			applied_effect = true
+			if is_negative:
+				ship_state.rocket_count = maxi(0, int(ship_state.rocket_count) - 1)
+			else:
+				ship_state.rocket_count = mini(10, int(ship_state.rocket_count) + 1)
+		DriftTypes.PrizeKind.Shields:
+			applied_effect = true
+			if is_negative:
+				ship_state.shields_until_tick = 0
+				ship_state.super_shields = false
+			else:
+				_use_shields(ship_state, false)
 		_:
 			# Other prizes are currently stubs; must not crash.
 			pass
@@ -1709,6 +2427,16 @@ func adjust_energy(ship_id: int, delta: int, reason: int, source_id: int = -1) -
 	if d == 0:
 		return true
 
+	# Shields absorb incoming damage (negative delta with damage reason).
+	if d < 0 and _energy_reason_is_damage(reason) and int(ship.shields_until_tick) > int(tick):
+		if bool(ship.super_shields):
+			# Super shields absorb unlimited hits until time expires.
+			return true
+		else:
+			# Regular shields absorb one hit then expire.
+			ship.shields_until_tick = 0
+			return true
+
 	var cur: int = int(ship.energy_current)
 	var maxv: int = maxi(0, int(ship.energy_max))
 	var next: int = cur + d
@@ -1862,6 +2590,15 @@ func apply_damage(attacker_id: int, target_id: int, damage: int, source: Variant
 			target.antiwarp_on = false
 			_prev_fire_by_ship[target_id] = false
 			_prev_ability_buttons_by_ship[target_id] = 0
+			_prev_item_buttons_by_ship[target_id] = 0
+			# Increment kill/death counters.
+			target.deaths = int(target.deaths) + 1
+			if ships.has(attacker_id) and attacker_id != target_id:
+				var attacker_s: DriftTypes.DriftShipState = ships.get(attacker_id)
+				if attacker_s != null:
+					attacker_s.kills = int(attacker_s.kills) + 1
+			# Record kill event for server to broadcast.
+			_pending_kill_events.append({"attacker_id": attacker_id, "victim_id": target_id, "weapon_type": reason})
 	return ok
 
 
@@ -1891,12 +2628,24 @@ func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_spe
 	})
 
 
-func add_ship(id: int, position: Vector2) -> void:
+func _ship_spec_initial_item_count(ship_state: DriftTypes.DriftShipState, key: String) -> int:
+	var misc: Variant = _get_ship_spec_for(ship_state).get("misc")
+	if typeof(misc) == TYPE_DICTIONARY:
+		return maxi(0, int((misc as Dictionary).get(key, 0)))
+	return 0
+
+
+func add_ship(id: int, position: Vector2, ship_type: int = 0) -> void:
 	var s: DriftTypes.DriftShipState = DriftTypes.DriftShipState.new(id, position)
+	s.ship_type = clampi(int(ship_type), 0, 7)
+	s.gun_level = _ship_spec_initial_gun_level(s)
+	s.bomb_level = _ship_spec_initial_bomb_level(s)
+	s.repel_count = _ship_spec_initial_item_count(s, "InitialRepel")
+	s.burst_count = _ship_spec_initial_item_count(s, "InitialBurst")
 	s.safe_zone_time_used_ticks = 0
 	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 	s.energy_max = maxi(0, int(energy_max_points))
-	var init_e: int = _ship_spec_initial_energy_points()
+	var init_e: int = _ship_spec_initial_energy_points(s)
 	s.energy_current = clampi(init_e, 0, int(s.energy_max))
 	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
 	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
@@ -1906,6 +2655,8 @@ func add_ship(id: int, position: Vector2) -> void:
 	# Compatibility mirror.
 	s.energy = int(s.energy_current)
 	s.next_bullet_tick = 0
+	s.next_bomb_tick = 0
+	s.next_mine_tick = 0
 	ships[id] = s
 
 
@@ -1924,7 +2675,7 @@ func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
 	s.rotation = 0.0
 	# Energy reset.
 	s.energy_max = maxi(0, int(energy_max_points))
-	var init_e: int = _ship_spec_initial_energy_points()
+	var init_e: int = _ship_spec_initial_energy_points(s)
 	s.energy_current = clampi(init_e, 0, int(s.energy_max))
 	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
 	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
@@ -1933,12 +2684,17 @@ func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
 	s.energy_drain_fp_accum = 0
 	s.energy = int(s.energy_current)
 	s.next_bullet_tick = 0
+	s.next_bomb_tick = 0
+	s.next_mine_tick = 0
 	# Abilities off.
 	s.afterburner_on = false
 	s.stealth_on = false
 	s.cloak_on = false
 	s.xradar_on = false
 	s.antiwarp_on = false
+	# Shields cleared on death (SubSpace behavior — shields don't persist across lives).
+	s.shields_until_tick = 0
+	s.super_shields = false
 	# Engine shutdown cleared.
 	s.engine_shutdown_until_tick = 0
 	# Death/respawn cleared.
@@ -2206,6 +2962,273 @@ func respawn_ship(ship_id: int) -> void:
 	var spawn = get_spawn_point()
 	reset_ship_for_spawn(ship_id, spawn)
 	_assign_freq_on_spawn(ship_id)
+
+
+func _use_repel(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one repel charge. Push nearby enemy ships and all projectiles outward.
+	if int(ship_state.repel_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.repel_count = int(ship_state.repel_count) - 1
+	effect_events.append({"type": &"repel", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
+	var spec: Dictionary = _get_ship_spec_for(ship_state)
+	# SubSpace default repel radius ~512px, speed ~2000px/s.
+	var repel_radius: float = 512.0
+	var repel_speed: float = 2000.0
+	var center: Vector2 = ship_state.position
+	var my_freq: int = int(ship_state.freq)
+	# Push enemy ships.
+	for other in ships.values():
+		if other == null:
+			continue
+		if int(other.id) == int(ship_state.id):
+			continue
+		if _ship_is_dead(other, int(tick)):
+			continue
+		var dist: float = center.distance_to(other.position)
+		if dist > repel_radius or dist < 0.001:
+			continue
+		# Push all ships (SubSpace repels affect everyone including teammates).
+		var dir: Vector2 = (other.position - center).normalized()
+		other.velocity = dir * repel_speed
+	# Push all projectiles (bullets, bombs, mines that are triggered).
+	for b in bullets.values():
+		if b == null:
+			continue
+		var dist: float = center.distance_to(b.position)
+		if dist > repel_radius or dist < 0.001:
+			continue
+		var dir: Vector2 = (b.position - center).normalized()
+		b.velocity = dir * float(bullet_speed)
+	for bb in bombs.values():
+		if bb == null:
+			continue
+		var dist: float = center.distance_to(bb.position)
+		if dist > repel_radius or dist < 0.001:
+			continue
+		var dir: Vector2 = (bb.position - center).normalized()
+		bb.velocity = dir * float(BOMB_DEFAULT_SPEED_PX_S)
+
+
+func _use_burst(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one burst charge. Fire a ring of shrapnel bullets.
+	if int(ship_state.burst_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.burst_count = int(ship_state.burst_count) - 1
+	var spec: Dictionary = _get_ship_spec_for(ship_state)
+	var shrapnel_count: int = 24
+	var burst_speed: int = 900
+	var wpn: Variant = spec.get("weapons")
+	if typeof(wpn) == TYPE_DICTIONARY:
+		shrapnel_count = maxi(4, int((wpn as Dictionary).get("BurstShrapnel", 24)))
+	var mvt: Variant = spec.get("movement")
+	if typeof(mvt) == TYPE_DICTIONARY:
+		burst_speed = maxi(100, int((mvt as Dictionary).get("BurstSpeed", 900)))
+	var center: Vector2 = ship_state.position
+	var angle_step: float = TAU / float(shrapnel_count)
+	for i in range(shrapnel_count):
+		var angle: float = float(i) * angle_step
+		var dir: Vector2 = Vector2(cos(angle), sin(angle))
+		var vel: Vector2 = dir * float(burst_speed)
+		var bid: int = int(next_bullet_id)
+		next_bullet_id += 1
+		var lifetime_ticks: int = int(bullet_lifetime_ticks)
+		var die_tick: int = int(tick) + lifetime_ticks
+		bullets[bid] = DriftTypes.DriftBulletState.new(
+			bid, int(ship_state.id), 1, center + dir * 8.0, vel,
+			int(tick), die_tick, 0
+		)
+
+
+func _use_warp(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one warp charge. Teleport to random valid position.
+	## Blocked if any enemy with antiwarp_on is within antiwarp radius.
+	if int(ship_state.warp_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	# Antiwarp check: if any alive enemy with antiwarp_on is within range, block warp.
+	var antiwarp_radius: float = 512.0
+	var center: Vector2 = ship_state.position
+	var my_freq: int = int(ship_state.freq)
+	for other in ships.values():
+		if other == null:
+			continue
+		if int(other.id) == int(ship_state.id):
+			continue
+		if _ship_is_dead(other, int(tick)):
+			continue
+		if not bool(other.antiwarp_on):
+			continue
+		# In FFA (freq 0), everyone is an enemy. In teams, different freq = enemy.
+		var is_enemy: bool = (int(my_freq) == 0 or int(other.freq) == 0 or int(other.freq) != my_freq)
+		if not is_enemy:
+			continue
+		if center.distance_to(other.position) <= antiwarp_radius:
+			return  # Blocked by antiwarp
+	ship_state.warp_count = int(ship_state.warp_count) - 1
+	var depart_pos: Vector2 = ship_state.position
+	# Teleport to random non-safe spawn point.
+	var dest: Vector2 = get_random_valid_spawn_point()
+	ship_state.position = dest
+	ship_state.velocity = Vector2.ZERO
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+
+
+func _use_portal(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one portal charge. Teleport to random valid position (bypasses antiwarp).
+	if int(ship_state.portal_count) <= 0:
+		return
+	ship_state.portal_count = int(ship_state.portal_count) - 1
+	var depart_pos: Vector2 = ship_state.position
+	var dest: Vector2 = get_random_valid_spawn_point()
+	ship_state.position = dest
+	ship_state.velocity = Vector2.ZERO
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+
+
+func _use_brick(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one brick charge. Place a 10-tile wall perpendicular to ship facing.
+	if int(ship_state.brick_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.brick_count = int(ship_state.brick_count) - 1
+	# Wall is perpendicular to the ship's facing direction, centered on ship.
+	var facing: float = float(ship_state.rotation)
+	var perp: Vector2 = Vector2(cos(facing + PI * 0.5), sin(facing + PI * 0.5))
+	var center_tile := Vector2i(int(ship_state.position.x) / DriftConstants.TILE_SIZE, int(ship_state.position.y) / DriftConstants.TILE_SIZE)
+	var brick_tiles: Array[Vector2i] = []
+	var half: int = 5
+	for i in range(-half, half + 1):
+		var tile := Vector2i(center_tile.x + int(round(perp.x * float(i))), center_tile.y + int(round(perp.y * float(i))))
+		if _static_solid_tiles.has(tile):
+			continue  # Don't overwrite permanent walls.
+		if not solid_tiles.has(tile):
+			solid_tiles[tile] = true
+		brick_tiles.append(tile)
+	var lifetime_ticks: int = int(10.0 * DriftConstants.TICK_RATE)
+	bricks.append({"tiles": brick_tiles, "die_tick": int(tick) + lifetime_ticks, "freq": int(ship_state.freq)})
+
+
+func _use_decoy(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one decoy charge. Spawn a fake ship that drifts with current velocity.
+	if int(ship_state.decoy_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.decoy_count = int(ship_state.decoy_count) - 1
+	# Decoy lives for 3 seconds, drifts at owner's velocity (no thrust).
+	var lifetime_ticks: int = int(3.0 * DriftConstants.TICK_RATE)
+	var did: int = int(next_decoy_id)
+	next_decoy_id += 1
+	decoys[did] = DriftTypes.DriftDecoyState.new(
+		did, int(ship_state.id), int(ship_state.freq), int(ship_state.ship_type),
+		ship_state.position, ship_state.velocity, float(ship_state.rotation),
+		int(tick) + lifetime_ticks
+	)
+
+
+func _use_thor(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one Thor charge. Fire bullets in 8 directions (level 1, no energy cost).
+	if int(ship_state.thor_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.thor_count = int(ship_state.thor_count) - 1
+	effect_events.append({"type": &"thor", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
+	var thor_bullet_count: int = 8
+	var center: Vector2 = ship_state.position
+	var speed: float = float(bullet_speed)
+	var angle_step: float = TAU / float(thor_bullet_count)
+	for i in range(thor_bullet_count):
+		var angle: float = float(i) * angle_step
+		var dir: Vector2 = Vector2(cos(angle), sin(angle))
+		var vel: Vector2 = dir * speed
+		var bid: int = int(next_bullet_id)
+		next_bullet_id += 1
+		var die_tick: int = int(tick) + int(bullet_lifetime_ticks)
+		bullets[bid] = DriftTypes.DriftBulletState.new(
+			bid, int(ship_state.id), 1, center + dir * 8.0, vel, int(tick), die_tick, 0
+		)
+
+
+func _use_rocket(ship_state: DriftTypes.DriftShipState) -> void:
+	## Consume one Rocket charge. Grant a 5-second speed boost (separate timer, doesn't stack with TopSpeed prize).
+	if int(ship_state.rocket_count) <= 0:
+		return
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return
+	ship_state.rocket_count = int(ship_state.rocket_count) - 1
+	var boost_ticks: int = int(5.0 * DriftConstants.TICK_RATE)
+	ship_state.rocket_boost_until_tick = maxi(int(ship_state.rocket_boost_until_tick), int(tick) + boost_ticks)
+
+
+func _use_shields(ship_state: DriftTypes.DriftShipState, is_super: bool) -> void:
+	## Activate shields for a duration based on ship spec.
+	var spec: Dictionary = _get_ship_spec_for(ship_state)
+	var abilities: Variant = spec.get("abilities")
+	var duration_ms: int = 4000
+	if typeof(abilities) == TYPE_DICTIONARY:
+		if is_super:
+			duration_ms = maxi(0, int((abilities as Dictionary).get("SuperTime", 6000)))
+		else:
+			duration_ms = maxi(0, int((abilities as Dictionary).get("ShieldsTime", 4000)))
+	var duration_ticks: int = maxi(1, int(float(duration_ms) / 1000.0 * float(DriftConstants.TICK_RATE)))
+	ship_state.shields_until_tick = int(tick) + duration_ticks
+	ship_state.super_shields = is_super
+
+
+func change_ship_type(ship_id: int, new_type: int) -> bool:
+	## Change a ship's type and respawn. Returns false if invalid.
+	if new_type < 0 or new_type > 7:
+		return false
+	if not ships.has(ship_id):
+		return false
+	var s: DriftTypes.DriftShipState = ships.get(ship_id)
+	if s == null:
+		return false
+	s.ship_type = clampi(new_type, 0, 7)
+	# Reset weapons/upgrades to defaults on ship change (SubSpace behavior).
+	s.gun_level = _ship_spec_initial_gun_level(s)
+	s.bomb_level = _ship_spec_initial_bomb_level(s)
+	s.repel_count = _ship_spec_initial_item_count(s, "InitialRepel")
+	s.burst_count = _ship_spec_initial_item_count(s, "InitialBurst")
+	s.multi_fire_enabled = false
+	s.bullet_bounce_bonus = 0
+	s.shrapnel_bonus = 0
+	s.rotation_bonus = 0
+	s.bomb_proximity_enabled = false
+	s.rocket_boost_until_tick = 0
+	s.top_speed_bonus = 0
+	s.thruster_bonus = 0
+	s.recharge_bonus = 0
+	s.bounty = 0
+	s.repel_count = 0
+	s.burst_count = 0
+	s.warp_count = 0
+	s.thor_count = 0
+	s.rocket_count = 0
+	s.decoy_count = 0
+	s.brick_count = 0
+	s.portal_count = 0
+	s.shields_until_tick = 0
+	s.super_shields = false
+	# Respawn at safe zone.
+	respawn_ship(ship_id)
+	return true
 
 
 func _is_friendly_fire_enabled() -> bool:
@@ -2722,6 +3745,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	# Clear transient events each tick.
 	collision_events.clear()
 	prize_events.clear()
+	effect_events.clear()
 
 	# Stable update order for determinism.
 	var ship_ids: Array = ships.keys()
@@ -2855,7 +3879,11 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		var eff_max_speed: float = _ship_effective_max_speed(ship_state)
 		# High speed reduces control authority (turn + reverse) to make full-speed travel
 		# a tactical commitment rather than a free, always-on disengage.
-		var eff_turn_rate: float = ship_turn_rate * _ship_high_speed_turn_mult(ship_state, eff_max_speed)
+		var spec_mv_turn: Variant = _get_ship_spec_for(ship_state).get("movement")
+		var base_turn: float = ship_turn_rate
+		if typeof(spec_mv_turn) == TYPE_DICTIONARY and (spec_mv_turn as Dictionary).has("turn_rate_override"):
+			base_turn = clampf(float((spec_mv_turn as Dictionary).get("turn_rate_override")), 0.01, 100.0)
+		var eff_turn_rate: float = base_turn * (1.0 + ROTATION_BONUS_PCT * float(maxi(0, int(ship_state.rotation_bonus)))) * _ship_high_speed_turn_mult(ship_state, eff_max_speed)
 		var eff_rev_accel: float = _ship_effective_reverse_accel(ship_state) * _ship_high_speed_reverse_mult(ship_state, eff_max_speed)
 		DriftShip.apply_input(
 			ship_state,
@@ -3195,6 +4223,109 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 				}
 			next_bullet_id += 1
 
+	# --- Bombs ---
+	# Hold-to-fire with authoritative tick-based cooldown and energy cost.
+	for ship_id in ship_ids:
+		if not action_cmds.has(ship_id):
+			continue
+		var cmd2: DriftTypes.DriftInputCmd = action_cmds[ship_id]
+		if not bool(cmd2.fire_secondary):
+			continue
+		if not ships.has(ship_id):
+			continue
+		var ship_state2: DriftTypes.DriftShipState = ships[ship_id]
+		var prof2 := _resolve_bomb_fire_profile_for_ship(ship_state2)
+		var bomb_cost: int = int(prof2.get("cost", int(bomb_energy_cost)))
+		var bomb_delay: int = int(prof2.get("delay_ticks", int(BOMB_DEFAULT_DELAY_TICKS)))
+		var bomb_speed_px_s: int = int(prof2.get("speed_px_s", int(BOMB_DEFAULT_SPEED_PX_S)))
+		var bomb_level: int = int(prof2.get("level", clampi(int(ship_state2.bomb_level), 1, 3)))
+		var bomb_bounces: int = int(prof2.get("bounces", 0))
+		var bomb_life_ticks: int = int(prof2.get("lifetime_ticks", int(BOMB_DEFAULT_LIFETIME_TICKS)))
+		var bomb_max_active: int = int(prof2.get("max_active", int(BOMB_DEFAULT_MAX_ACTIVE)))
+		var bomb_is_emp: bool = bool(prof2.get("is_emp", false))
+
+		if t < int(ship_state2.next_bomb_tick):
+			continue
+		if bomb_max_active > 0 and _count_active_bombs_for_owner(int(ship_id)) >= bomb_max_active:
+			continue
+		if bomb_cost > 0:
+			if not spend_energy(int(ship_id), int(bomb_cost), EnergyReason.COST_FIRE_SECONDARY, ActionType.BOMB):
+				continue
+		ship_state2.next_bomb_tick = int(t) + int(bomb_delay)
+		var ang2: float = float(ship_state2.rotation)
+		var fwd2 := Vector2(cos(ang2), sin(ang2))
+		var pos2 := ship_state2.position + fwd2 * (float(DriftConstants.SHIP_RADIUS) + float(BOMB_RADIUS_PX) + 2.0)
+		var vel2 := ship_state2.velocity + (fwd2 * float(bomb_speed_px_s))
+		var die_tick2: int = -1
+		if bomb_life_ticks > 0:
+			die_tick2 = int(t) + int(bomb_life_ticks)
+		var bstate2 := DriftTypes.DriftBombState.new(next_bomb_id, int(ship_id), int(bomb_level), pos2, vel2, int(t), die_tick2, int(bomb_bounces), bool(bomb_is_emp))
+		bombs[next_bomb_id] = bstate2
+		collision_events.append({
+			"type": "bomb_fire",
+			"tick": int(t),
+			"ship_id": int(ship_id),
+			"pos": pos2,
+			"level": int(bomb_level),
+			"emp": bool(bomb_is_emp),
+		})
+		next_bomb_id += 1
+
+	# --- Mines ---
+	# Hold-to-lay with authoritative tick-based cooldown and energy cost.
+	for ship_id in ship_ids:
+		if not action_cmds.has(ship_id):
+			continue
+		var cmd3: DriftTypes.DriftInputCmd = action_cmds[ship_id]
+		if not bool(cmd3.lay_mine):
+			continue
+		if not ships.has(ship_id):
+			continue
+		var ship_state3: DriftTypes.DriftShipState = ships[ship_id]
+		var prof3 := _resolve_mine_lay_profile_for_ship(ship_state3)
+		var mine_cost: int = int(prof3.get("cost", int(bomb_energy_cost)))
+		var mine_delay: int = int(prof3.get("delay_ticks", int(MINE_DEFAULT_DELAY_TICKS)))
+		var mine_level: int = int(prof3.get("level", clampi(int(ship_state3.bomb_level), 1, 3)))
+		var mine_life_ticks: int = int(prof3.get("lifetime_ticks", int(MINE_DEFAULT_LIFETIME_TICKS)))
+		var mine_max_active: int = int(prof3.get("max_active", int(MINE_DEFAULT_MAX_ACTIVE)))
+
+		if t < int(ship_state3.next_mine_tick):
+			continue
+		if mine_max_active > 0 and _count_active_mines_for_owner(int(ship_id)) >= mine_max_active:
+			continue
+		if mine_cost > 0:
+			if not spend_energy(int(ship_id), int(mine_cost), EnergyReason.COST_FIRE_SECONDARY, ActionType.MINE):
+				continue
+		ship_state3.next_mine_tick = int(t) + int(mine_delay)
+		var ang3: float = float(ship_state3.rotation)
+		var fwd3 := Vector2(cos(ang3), sin(ang3))
+		# Drop behind the ship.
+		var pos3 := ship_state3.position - fwd3 * (float(DriftConstants.SHIP_RADIUS) + 4.0)
+		# Clamp within arena bounds.
+		pos3.x = clamp(pos3.x, DriftConstants.ARENA_MIN.x + 1.0, DriftConstants.ARENA_MAX.x - 1.0)
+		pos3.y = clamp(pos3.y, DriftConstants.ARENA_MIN.y + 1.0, DriftConstants.ARENA_MAX.y - 1.0)
+		if is_position_blocked(pos3, float(BOMB_RADIUS_PX)):
+			pos3 = ship_state3.position
+		var die_tick3: int = -1
+		if mine_life_ticks > 0:
+			die_tick3 = int(t) + int(mine_life_ticks)
+		var mstate := DriftTypes.DriftMineState.new(next_mine_id, int(ship_id), int(mine_level), pos3, int(t), die_tick3)
+		mines[next_mine_id] = mstate
+		collision_events.append({
+			"type": "mine_lay",
+			"tick": int(t),
+			"ship_id": int(ship_id),
+			"pos": pos3,
+			"level": int(mine_level),
+		})
+		next_mine_id += 1
+
+	# Step bombs and mines before bullets.
+	_step_bombs(ship_ids)
+	_step_mines(ship_ids)
+	_step_decoys()
+	_step_bricks()
+
 	# Step bullets (deterministic collision + damage).
 	_step_bullets(ship_ids)
 
@@ -3238,6 +4369,26 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 			continue
 		snapshot_bullets.append(DriftTypes.DriftBulletState.new(b.id, b.owner_id, b.level, b.position, b.velocity, b.spawn_tick, b.die_tick, b.bounces_left))
 
+	# Bombs snapshot (stable by id).
+	var snapshot_bombs: Array = []
+	var snapshot_bomb_ids: Array = bombs.keys()
+	snapshot_bomb_ids.sort()
+	for bid2 in snapshot_bomb_ids:
+		var bb: DriftTypes.DriftBombState = bombs.get(bid2)
+		if bb == null:
+			continue
+		snapshot_bombs.append(DriftTypes.DriftBombState.new(bb.id, bb.owner_id, bb.level, bb.position, bb.velocity, bb.spawn_tick, bb.die_tick, bb.bounces_left, bb.is_emp))
+
+	# Mines snapshot (stable by id).
+	var snapshot_mines: Array = []
+	var snapshot_mine_ids: Array = mines.keys()
+	snapshot_mine_ids.sort()
+	for mid in snapshot_mine_ids:
+		var mm: DriftTypes.DriftMineState = mines.get(mid)
+		if mm == null:
+			continue
+		snapshot_mines.append(DriftTypes.DriftMineState.new(mm.id, mm.owner_id, mm.level, mm.position, mm.spawn_tick, mm.die_tick, mm.triggered, mm.triggered_by_ship_id, mm.triggered_tick))
+
 	var snapshot_prizes: Array = []
 	if include_prizes:
 		var snapshot_prize_ids: Array = prizes.keys()
@@ -3248,12 +4399,26 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 				continue
 			snapshot_prizes.append(p)
 
-	return DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id, snapshot_bullets, snapshot_prizes)
+	var snapshot_decoys: Array = []
+	for did in decoys.keys():
+		var d: DriftTypes.DriftDecoyState = decoys[did]
+		snapshot_decoys.append(DriftTypes.DriftDecoyState.new(d.id, d.owner_id, d.freq, d.ship_type, d.position, d.velocity, d.rotation, d.die_tick))
+
+	var snap := DriftTypes.DriftWorldSnapshot.new(tick, snapshot_ships, ball.position, ball.velocity, ball.owner_id, snapshot_bullets, snapshot_bombs, snapshot_mines, snapshot_prizes)
+	snap.decoys = snapshot_decoys
+	snap.bricks = bricks.duplicate(false)
+	return snap
 
 
 func _ship_effective_max_speed(ship_state: DriftTypes.DriftShipState) -> float:
 	var bonus: int = int(ship_state.top_speed_bonus)
-	var base: float = ship_max_speed * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+	var spec_mv: Variant = _get_ship_spec_for(ship_state).get("movement")
+	var base_max: float = ship_max_speed
+	if typeof(spec_mv) == TYPE_DICTIONARY and (spec_mv as Dictionary).has("max_speed_override"):
+		base_max = clampf(float((spec_mv as Dictionary).get("max_speed_override")), 10.0, 9999.0)
+	var base: float = base_max * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+	if int(ship_state.rocket_boost_until_tick) > int(tick):
+		base *= 1.5
 	if bool(ship_state.afterburner_on):
 		return base * energy_afterburner_speed_multiplier
 	return base
@@ -3273,7 +4438,7 @@ func _ship_effective_thrust_accel(ship_state: DriftTypes.DriftShipState, input_c
 
 
 func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShipState:
-	return DriftTypes.DriftShipState.new(
+	var copy := DriftTypes.DriftShipState.new(
 		source.id,
 		source.position,
 		source.velocity,
@@ -3307,5 +4472,28 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 		source.dead_until_tick,
 		source.last_energy_change_reason,
 		source.last_energy_change_source_id,
-		source.last_energy_change_tick
+		source.last_energy_change_tick,
+		source.freq,
+		source.next_bomb_tick,
+		source.next_mine_tick
 	)
+	copy.ship_type = source.ship_type
+	copy.repel_count = source.repel_count
+	copy.burst_count = source.burst_count
+	copy.warp_count = source.warp_count
+	copy.shields_until_tick = source.shields_until_tick
+	copy.super_shields = source.super_shields
+	copy.kills = source.kills
+	copy.deaths = source.deaths
+	copy.freq = source.freq
+	copy.carried_flag_team = source.carried_flag_team
+	copy.thor_count = source.thor_count
+	copy.rocket_count = source.rocket_count
+	copy.decoy_count = source.decoy_count
+	copy.brick_count = source.brick_count
+	copy.portal_count = source.portal_count
+	copy.shrapnel_bonus = source.shrapnel_bonus
+	copy.rotation_bonus = source.rotation_bonus
+	copy.bomb_proximity_enabled = source.bomb_proximity_enabled
+	copy.rocket_boost_until_tick = source.rocket_boost_until_tick
+	return copy

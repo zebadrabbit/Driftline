@@ -30,6 +30,7 @@ const BugReportWriter = preload("res://client/replay/bug_report_writer.gd")
 const SpriteFontLabelScript = preload("res://client/SpriteFontLabel.gd")
 const DriftTeamColors = preload("res://client/team_colors.gd")
 const DriftShipAtlas = preload("res://client/ship_atlas.gd")
+const DriftShipRegistry = preload("res://shared/drift_ship_registry.gd")
 const SHIPS_TEX_FALLBACK: Texture2D = preload("res://client/graphics/ships/ships.png")
 
 var _ships_tex: Texture2D = null
@@ -41,7 +42,66 @@ const OptionsMenuScene: PackedScene = preload("res://client/ui/options_menu.tscn
 const PrizeFeedbackPipeline = preload("res://client/ui/prize_feedback_pipeline.gd")
 const DriftPrizeTypes = preload("res://client/ui/prize_types.gd")
 
+# Client-only atlas descriptors (pure visuals).
+const BombVisualsRes = preload("res://client/graphics/effects/bombs.tres")
+const MineVisualsRes = preload("res://client/graphics/effects/mines.tres")
+const BulletVisualsRes = preload("res://client/graphics/effects/bullets.tres")
+const Explode0Res = preload("res://client/graphics/effects/explode0.tres")
+const Explode1Res = preload("res://client/graphics/effects/explode1.tres")
+const Explode2Res = preload("res://client/graphics/effects/explode2.tres")
+const BombsRes = preload("res://client/graphics/effects/bombs.tres")
+const BOMB_EXPLODE_FRAME_PX: int = 16
+const BOMB_EXPLODE_FRAMES: int = 10
+const BOMB_EXPLODE_TICKS_PER_FRAME: int = 2
+
 const PRIZE_TEX: Texture2D = preload("res://client/graphics/entities/prizes.png")
+const FLAG_TEX: Texture2D = preload("res://client/graphics/entities/flag.png")
+const FLAG_FRAME_PX: int = 16
+const FLAG_FRAME_COUNT: int = 10
+const FLAG_ANIM_FPS: float = 10.0
+const FLAG_DRAW_SCALE: float = 2.0
+const GOAL_TEX: Texture2D = preload("res://client/graphics/entities/goal.png")
+const GOAL_FRAME_PX: int = 16
+const GOAL_FRAME_COUNT: int = 9
+const GOAL_ANIM_FPS: float = 8.0
+const GOAL_DRAW_SCALE: float = 2.0
+const KING_TEX: Texture2D = preload("res://client/graphics/entities/king.png")
+const WALL_TEX: Texture2D = preload("res://client/graphics/entities/wall.png")
+const WALL_FRAME_PX: int = 16
+const WALL_FRAME_COUNT: int = 10
+const WALL_ANIM_FPS: float = 8.0
+const WARPPNT_TEX: Texture2D = preload("res://client/graphics/entities/warppnt.png")
+const WARPPNT_FRAME_PX: int = 16
+const WARPPNT_FRAME_COUNT: int = 10
+const WARPPNT_ANIM_FPS: float = 10.0
+const WARP_TEX: Texture2D = preload("res://client/graphics/effects/warp.png")
+const WARP_FRAME_W: int = 72
+const WARP_FRAME_H: int = 48
+const WARP_COLS: int = 4
+const WARP_TOTAL_FRAMES: int = 12  # 4 cols x 3 rows
+const REPEL_TEX: Texture2D = preload("res://client/graphics/effects/repel.png")
+const REPEL_FRAME_PX: int = 32
+const REPEL_COLS: int = 15
+const REPEL_TOTAL_FRAMES: int = 15  # one row used per repel event
+const SHIELD_TEX: Texture2D = preload("res://client/graphics/effects/shield.png")
+const SHIELD_FRAME_PX: int = 16
+const SHIELD_FRAME_COUNT: int = 10
+const SHIELD_ANIM_FPS: float = 12.0
+const ROCKET_TEX: Texture2D = preload("res://client/graphics/effects/rocket.png")
+const ROCKET_FRAME_W: int = 24
+const ROCKET_FRAME_H: int = 24
+const ROCKET_COLS: int = 13
+const ROCKET_ANIM_FPS: float = 12.0
+const POWERB_TEX: Texture2D = preload("res://client/graphics/entities/powerb.png")
+const POWERB_FRAME_PX: int = 16
+const POWERB_FRAME_COUNT: int = 10
+const POWERB_ANIM_FPS: float = 12.0
+const SHRAPNEL_TEX: Texture2D = preload("res://client/graphics/effects/shrapnel.png")
+const SHRAPNEL_FRAME_PX: int = 16
+const SHRAPNEL_COLS: int = 5
+const KING_FRAME_PX: int = 16
+const KING_FRAME_COUNT: int = 10
+const KING_ANIM_FPS: float = 12.0
 const PRIZE_FRAME_PX: int = 16
 const PRIZE_FRAME_COUNT: int = 10
 const PRIZE_ANIM_FPS: float = 12.0
@@ -81,8 +141,7 @@ const DEBUG_NET: bool = false
 # does not try to parse our custom packets.
 const NET_CHANNEL: int = 1
 
-# Temporary dev username (set on the Main node in the Inspector).
-@export var player_username: String = "Player"
+var player_username: String = "Player"
 var _hello_sent: bool = false
 
 # Connection UI state
@@ -103,6 +162,18 @@ var _main_menu_ui_layer: CanvasLayer = null
 var _main_menu_options_panel: Control = null
 var _main_menu_options_btn: Button = null
 var _options_menu_instance: Control = null
+var _options_menu_layer: CanvasLayer = null
+
+# Connect screen proper (username + ship selection).
+var _connect_screen_layer: CanvasLayer = null
+var _connect_screen_status_label: Label = null
+var _connect_screen_username_field: LineEdit = null
+var _connect_screen_address_field: LineEdit = null
+var _connect_screen_ship_buttons: Array = []
+var _pending_ship_type: int = 0
+var _spectate_requested: bool = false    # true when player chose spectate on connect screen
+var _is_spectating: bool = false          # confirmed spectator (no ship in world)
+var _spectator_target_id: int = -1       # ship being watched
 
 # Wall-bounce audio (driven by shared simulation collision events)
 @export var bounce_sound_min_speed: float = 160.0
@@ -114,6 +185,7 @@ var _last_bounce_time_s: float = -999.0
 @onready var _thrust_audio: AudioStreamPlayer = get_node_or_null("ThrustAudio")
 
 var _prize_audio: AudioStreamPlayer = null
+var _jukebox: Node = null
 
 # Client-only combat feedback (must not affect sim determinism).
 var _gun_audio: AudioStreamPlayer = null
@@ -132,6 +204,7 @@ var accumulator_seconds: float = 0.0
 var client_map_meta: Dictionary = {}
 var client_map_solid_cells: Array = []
 var client_map_safe_cells: Array = []
+var client_goal_zones: Array = []  # Array of {pos:Vector2, team:int}
 
 # Camera2D reference
 var cam: Camera2D = null
@@ -149,7 +222,45 @@ var latest_snapshot: DriftTypes.DriftWorldSnapshot
 var ball_position: Vector2 = Vector2.ZERO
 var ball_velocity: Vector2 = Vector2.ZERO
 var authoritative_bullets: Array = [] # Array[DriftTypes.DriftBulletState]
+var authoritative_bombs: Array = [] # Array[DriftTypes.DriftBombState]
+var authoritative_mines: Array = [] # Array[DriftTypes.DriftMineState]
 var authoritative_prizes: Array = [] # Array[DriftTypes.DriftPrizeState]
+var authoritative_flags: Array = [] # Array[DriftTypes.DriftFlagState]
+var _active_brick_tiles: Dictionary = {} # Dictionary[Vector2i, bool] — tiles currently on TileMapSolid as bricks
+
+# Explosion effects (client-only).
+# Each entry: { "pos": Vector2, "start_tick": int, "tier": int }
+# tier 0 = small (bullet hit), 1 = medium (bomb), 2 = large (death)
+var _active_explosions: Array = []
+var _active_repel_rings: Array = [] # Array[{pos: Vector2, start_tick: int}]
+var _active_warp_flashes: Array = [] # Array[{pos: Vector2, start_tick: int}]
+var _active_thor_bursts: Array = [] # Array[{pos: Vector2, start_tick: int}]
+var _exhaust_particles: Array = [] # Array[{pos: Vector2, vel: Vector2, start_tick: int}]
+# Death transition tracking: previous tick alive state per ship id.
+var _prev_alive_by_ship: Dictionary = {} # Dictionary[int, bool]
+
+# Kill feed (client-only).
+# Each entry: { "text": String, "color": int, "expire_tick": int }
+var _kill_feed_entries: Array = []
+const KILL_FEED_DURATION_TICKS: int = 300  # 5 seconds at 60Hz
+const KILL_FEED_MAX: int = 8
+
+# Chat system (client-only).
+var _chat_messages: Array = []  # { "text": String, "color": int, "expire_tick": int }
+var _chat_input_active: bool = false
+var _chat_input_text: String = ""
+const CHAT_MAX_DISPLAY: int = 10
+const CHAT_DISPLAY_DURATION_TICKS: int = 600  # 10 seconds
+const CHAT_MAX_LENGTH: int = 200
+
+# Scoreboard (client-only).
+var _scoreboard_visible: bool = false
+
+# Powerball / match scoring (authoritative from server via PKT_SCORE_EVENT).
+var _team_scores: Array = [0, 0]  # index 0 = team 1, index 1 = team 2
+var _king_ship_id: int = -1  # ship with highest bounty, from latest server snapshot
+var _match_over: bool = false
+var _match_winner: int = 0
 
 # UI thresholds (server-authoritative via validated ruleset).
 var ui_low_energy_frac: float = 0.33
@@ -173,11 +284,13 @@ var _prize_feedback_pipeline = PrizeFeedbackPipeline.new()
 var _ui_inventory_counts: Dictionary = {
 	&"burst": 0,
 	&"repel": 0,
+	&"warp": 0,
 	&"decoy": 0,
 	&"thor": 0,
 	&"brick": 0,
 	&"rocket": 0,
 	&"teleport": 0,
+	&"portal": 0,
 }
 
 
@@ -281,6 +394,7 @@ func _apply_local_default_ruleset_if_available() -> void:
 	_build_pause_menu_ui()
 	_set_pause_menu_visible(false)
 	_build_main_menu_ui()
+	_build_connect_screen_ui()
 
 	_ensure_ui_escape_menu_action_has_escape_binding()
 	esc_menu = EscMenuScene.instantiate()
@@ -291,6 +405,8 @@ func _apply_local_default_ruleset_if_available() -> void:
 	# Debug: allow saving replay ring from the ESC menu without pausing.
 	if esc_menu != null and esc_menu.has_signal("save_bug_report_requested"):
 		esc_menu.connect("save_bug_report_requested", Callable(self, "_on_esc_menu_save_bug_report_requested"))
+	if esc_menu != null and esc_menu.has_signal("disconnect_requested"):
+		esc_menu.connect("disconnect_requested", Callable(self, "_on_server_disconnected"))
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -302,6 +418,13 @@ func _apply_local_default_ruleset_if_available() -> void:
 	# Prime snapshot so _draw() has something immediately.
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
 	queue_redraw()
+
+	# Music jukebox.
+	var JukeboxScript = load("res://client/audio/music_jukebox.gd")
+	if JukeboxScript != null:
+		_jukebox = JukeboxScript.new()
+		_jukebox.name = "MusicJukebox"
+		add_child(_jukebox)
 
 	# Prize pickup SFX (client-side). Created programmatically to avoid scene edits.
 	_prize_audio = AudioStreamPlayer.new()
@@ -502,10 +625,19 @@ func _load_client_map() -> void:
 			else:
 				client_map_solid_cells = []
 				client_map_safe_cells = []
+			# Read goal zones for minimap display.
+			client_goal_zones.clear()
+			var t_sz_c: int = int(DriftConstants.TILE_SIZE)
+			for ent_c in canonical.get("entities", []):
+				if typeof(ent_c) == TYPE_DICTIONARY and String(ent_c.get("type", "")) == "goal":
+					var gx: int = int(ent_c.get("x", 0))
+					var gy: int = int(ent_c.get("y", 0))
+					client_goal_zones.append({"pos": Vector2(gx * t_sz_c + t_sz_c / 2, gy * t_sz_c + t_sz_c / 2), "team": int(ent_c.get("team", 1))})
 		else:
 			client_map_meta = {}
 			client_map_solid_cells = []
 			client_map_safe_cells = []
+			client_goal_zones.clear()
 
 	# Also read raw map for checksum/manifest verification and canonical layers for collision.
 	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
@@ -711,10 +843,21 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 	# Camera follow and clamp (only when playing)
-	if not show_connect_ui and cam and local_ship_id >= 0 and world.ships.has(local_ship_id):
-		var ship = world.ships[local_ship_id]
-		# Always center camera on ship - no clamping
-		cam.global_position = ship.position
+	if not show_connect_ui and cam:
+		if _is_spectating and latest_snapshot != null:
+			# Spectator: follow chosen target; auto-pick first alive ship if none.
+			if _spectator_target_id < 0 or not latest_snapshot.ships.has(_spectator_target_id):
+				for sid in latest_snapshot.ships:
+					var s = latest_snapshot.ships[sid]
+					if int(s.dead_until_tick) <= 0 or int(latest_snapshot.tick) >= int(s.dead_until_tick):
+						_spectator_target_id = int(sid)
+						break
+			if _spectator_target_id >= 0 and latest_snapshot.ships.has(_spectator_target_id):
+				cam.global_position = latest_snapshot.ships[_spectator_target_id].position
+		elif local_ship_id >= 0 and world.ships.has(local_ship_id):
+			var ship = world.ships[local_ship_id]
+			# Always center camera on ship - no clamping
+			cam.global_position = ship.position
 
 	# Demo HUD line (SpriteFontLabel): feed it simple live values.
 	var hud := get_node_or_null("HUD")
@@ -722,6 +865,8 @@ func _process(delta: float) -> void:
 		# Minimap static geometry (client-only UI)
 		if hud.has_method("set_minimap_static") and not client_map_meta.is_empty():
 			hud.call("set_minimap_static", client_map_meta, client_map_solid_cells, client_map_safe_cells)
+		if hud.has_method("set_minimap_goal_zones"):
+			hud.call("set_minimap_goal_zones", client_goal_zones)
 
 		var name_value := player_username
 		var bounty_value := 0
@@ -753,8 +898,7 @@ func _process(delta: float) -> void:
 				var bomb_lvl: int = int(ss.bomb_level) if ("bomb_level" in ss) else 1
 				var mf: bool = bool(ss.multi_fire_enabled) if ("multi_fire_enabled" in ss) else false
 				var bb: int = int(ss.bullet_bounce_bonus) if ("bullet_bounce_bonus" in ss) else 0
-				# Proximity bombs are not implemented yet; keep false.
-				var prox: bool = false
+				var prox: bool = bool(ss.bomb_proximity_enabled) if ("bomb_proximity_enabled" in ss) else false
 				hud.call(
 					"set_ship_stats",
 					float(ss.velocity.length()),
@@ -784,6 +928,9 @@ func _process(delta: float) -> void:
 					var my_freq: int = int(ss.freq) if ("freq" in ss) else 0
 					var xr_on2: bool = bool(ss.xradar_on) if ("xradar_on" in ss) else false
 					var pos2: Vector2 = ss.position if ("position" in ss) else Vector2.ZERO
+					# Inject flags into snapshot for minimap rendering.
+					if latest_snapshot != null:
+						latest_snapshot.flags = authoritative_flags
 					hud.call("set_minimap_dynamic", latest_snapshot, local_ship_id, my_freq, pos2, xr_on2)
 				# New HUD UX: edge icon stacks.
 				if hud.has_method("set_ball_possession") and latest_snapshot != null and ("ball_owner_id" in latest_snapshot):
@@ -835,6 +982,15 @@ func _latest_tick_step() -> void:
 	input_history[next_tick] = input_cmd
 	_send_input_for_tick(next_tick, input_cmd)
 	latest_snapshot = world.step_tick({ local_ship_id: input_cmd })
+	_apply_brick_tiles(world.bricks)
+	_consume_local_effect_events()
+	# Exhaust for local ship.
+	if world.ships.has(local_ship_id) and bool(input_cmd.thrust):
+		var ls: DriftTypes.DriftShipState = world.ships[local_ship_id]
+		var ab: bool = bool(input_cmd.modifier) and bool(ls.afterburner_on)
+		_emit_exhaust(ls.position, ls.rotation + PI, ls.velocity, ab)
+		if ab:
+			_emit_exhaust(ls.position, ls.rotation + PI, ls.velocity, true)
 	_play_local_collision_sounds()
 	_consume_local_combat_events()
 
@@ -911,10 +1067,12 @@ func _consume_local_combat_events() -> void:
 			})
 			_play_gun_sfx(int(d.get("level", 1)))
 		elif ty == "bullet_hit":
-			if int(d.get("attacker_id", -1)) != local_ship_id:
-				continue
 			var pos2_any: Variant = d.get("pos", Vector2.ZERO)
 			var pos2: Vector2 = pos2_any if pos2_any is Vector2 else Vector2.ZERO
+			# Spawn small explosion sprite on any bullet hit.
+			_active_explosions.append({"pos": pos2, "start_tick": cur_tick, "tier": 0})
+			if int(d.get("attacker_id", -1)) != local_ship_id:
+				continue
 			var dmg: int = maxi(0, int(d.get("damage", 0)))
 			_hit_confirm_until_tick = maxi(_hit_confirm_until_tick, cur_tick + 6)
 			_hit_markers.append({
@@ -923,6 +1081,13 @@ func _consume_local_combat_events() -> void:
 				"start_tick": cur_tick,
 				"expire_tick": cur_tick + 20,
 			})
+
+		elif ty == "bomb_explode" or ty == "mine_explode":
+			var bpos_any: Variant = d.get("pos", Vector2.ZERO)
+			var bpos: Vector2 = bpos_any if bpos_any is Vector2 else Vector2.ZERO
+			var blvl: int = int(d.get("level", 1))
+			var tier: int = 2 if blvl >= 3 else 1
+			_active_explosions.append({"pos": bpos, "start_tick": cur_tick, "tier": tier, "level": blvl})
 
 	_prune_local_combat_fx(cur_tick)
 	queue_redraw()
@@ -977,17 +1142,29 @@ func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void
 
 
 func _collect_input_cmd() -> DriftTypes.DriftInputCmd:
+	# Suppress all gameplay input while chat is active.
+	if _chat_input_active:
+		return DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 	var rotate_axis: float = Input.get_action_strength("drift_rotate_right") - Input.get_action_strength("drift_rotate_left")
 	var thrust_axis: float = Input.get_action_strength("drift_thrust_forward") - Input.get_action_strength("drift_thrust_reverse")
 	var fire_primary: bool = Input.is_action_pressed("drift_fire_primary")
 	var fire_secondary: bool = Input.is_action_pressed("drift_fire_secondary")
+	var lay_mine: bool = Input.is_action_pressed("drift_lay_mine")
 	var modifier: bool = Input.is_action_pressed("drift_modifier_ability")
 	# Ability toggle buttons (edge detection happens in shared sim).
 	var stealth_btn: bool = Input.is_action_pressed("drift_ability_stealth")
 	var cloak_btn: bool = Input.is_action_pressed("drift_ability_cloak")
 	var xradar_btn: bool = Input.is_action_pressed("drift_ability_xradar")
 	var antiwarp_btn: bool = Input.is_action_pressed("drift_ability_antiwarp")
-	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn)
+	var repel_btn: bool = Input.is_action_pressed("drift_item_repel")
+	var burst_btn: bool = Input.is_action_pressed("drift_item_burst")
+	var warp_btn: bool = Input.is_action_pressed("drift_item_warp")
+	var thor_btn: bool = Input.is_action_pressed("drift_item_thor")
+	var rocket_btn: bool = Input.is_action_pressed("drift_item_rocket")
+	var decoy_btn: bool = Input.is_action_pressed("drift_item_decoy")
+	var brick_btn: bool = Input.is_action_pressed("drift_item_brick")
+	var portal_btn: bool = Input.is_action_pressed("drift_item_portal")
+	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn, lay_mine, repel_btn, burst_btn, warp_btn, thor_btn, rocket_btn, decoy_btn, brick_btn, portal_btn)
 
 
 func _ensure_debug_probe_action() -> void:
@@ -1064,6 +1241,18 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 			if _replay_save_keycode != 0 and code == _replay_save_keycode:
 				_save_replay_ring_manual()
+				get_viewport().set_input_as_handled()
+				return
+
+	# Ship selection: F1-F8 to switch ship type (only when ESC menu is open).
+	var _esc_open: bool = esc_menu != null and esc_menu.has_method("is_open") and bool(esc_menu.call("is_open"))
+	if is_connected and _esc_open and event is InputEventKey:
+		var kev: InputEventKey = event
+		if kev.pressed and (not kev.echo):
+			var kcode: int = int(kev.physical_keycode) if int(kev.physical_keycode) != 0 else int(kev.keycode)
+			if kcode >= KEY_F1 and kcode <= KEY_F8:
+				var desired_type: int = kcode - KEY_F1
+				_send_ship_change_request(desired_type)
 				get_viewport().set_input_as_handled()
 				return
 
@@ -1346,15 +1535,16 @@ func _draw() -> void:
 
 	# Pickup feed is now screen-space HUD-only (not drawn in world space).
 
+	# Exhaust trails (behind ships).
+	_draw_exhaust()
+
 	# Friend/enemy colors are derived from replicated team frequency.
 	var my_freq: int = int(ship_state.freq)
 
 	var font: Font = ThemeDB.fallback_font
 	var font_size: int = 16
 	var name_offset := Vector2(24, 16)
-	var king_id := -1
-	if latest_snapshot != null and "king_ship_id" in latest_snapshot:
-		king_id = latest_snapshot.king_ship_id
+	var king_id: int = _king_ship_id
 
 	# Interpolated remote ships
 	if snap_a_tick >= 0 and snap_b_tick > snap_a_tick:
@@ -1375,11 +1565,15 @@ func _draw() -> void:
 			var b = snap_b_ships[ship_id]
 			if a == null or b == null:
 				continue
+			# Determine friendliness from authoritative snapshot state.
+			var remote_state = latest_snapshot.ships.get(ship_id)
+			# Skip dead ships.
+			if remote_state != null and int(remote_state.dead_until_tick) > 0 and int(latest_snapshot.tick) < int(remote_state.dead_until_tick):
+				continue
 			var interp_pos = a.position.lerp(b.position, alpha)
 			var interp_rot = lerp_angle(a.rotation, b.rotation, alpha)
 			var interp_state = DriftTypes.DriftShipState.new(ship_id, interp_pos, Vector2.ZERO, interp_rot)
-			# Determine friendliness from authoritative snapshot state.
-			var remote_state = latest_snapshot.ships.get(ship_id)
+			interp_state.ship_type = int(b.ship_type)
 			var remote_freq: int = int(remote_state.freq) if remote_state != null else -1
 			_draw_remote_ship_triangle(interp_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
 			# Draw username and bounty
@@ -1387,9 +1581,8 @@ func _draw() -> void:
 				var label = "%s (%d)" % [remote_state.username, remote_state.bounty]
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, interp_pos + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
-				# Draw crown if king
 				if king_id == ship_id:
-					_draw_crown(interp_pos + Vector2(0, -48))
+					_draw_crown(interp_pos + name_offset, label)
 		# Interpolated ball
 		if latest_snapshot.ball_owner_id != local_ship_id:
 			var interp_ball_pos = snap_a_ball_pos.lerp(snap_b_ball_pos, alpha)
@@ -1403,6 +1596,9 @@ func _draw() -> void:
 				continue
 			var remote_state: DriftTypes.DriftShipState = remote_ships[ship_id]
 			var snap_state = latest_snapshot.ships.get(ship_id)
+			# Skip dead ships.
+			if snap_state != null and int(snap_state.dead_until_tick) > 0 and int(latest_snapshot.tick) < int(snap_state.dead_until_tick):
+				continue
 			var remote_freq: int = int(snap_state.freq) if snap_state != null else -1
 			_draw_remote_ship_triangle(remote_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
 			# Draw username and bounty
@@ -1410,16 +1606,27 @@ func _draw() -> void:
 				var label = "%s (%d)" % [snap_state.username, snap_state.bounty]
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, remote_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
-				# Draw crown if king
 				if king_id == ship_id:
-					_draw_crown(remote_state.position + Vector2(0, -48))
+					_draw_crown(remote_state.position + name_offset, label)
 		if latest_snapshot.ball_owner_id != local_ship_id:
 			_draw_ball_at(ball_position)
 
 	# Local ship (predicted)
 	_draw_ship_triangle(ship_state)
+	_draw_portal_points()
+	_draw_bricks()
+	_draw_goal_zones()
 	_draw_prizes()
+	_draw_flags()
+	_draw_bombs()
+	_draw_mines()
+	_draw_decoys()
 	_draw_bullets()
+	_draw_explosions()
+	_draw_repel_rings()
+	_draw_warp_flashes()
+	_draw_thor_bursts()
+	_draw_shield_bubbles(latest_snapshot)
 	_draw_local_combat_fx(ship_state)
 	
 	# ⚠️ ALWAYS VISIBLE: Draw username and bounty for local ship (blue sprite font)
@@ -1429,7 +1636,7 @@ func _draw() -> void:
 		var label = "%s(%d)" % [local_state.username, local_state.bounty]
 		SpriteFontLabelScript.draw_text(self, ship_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
 		if king_id == local_ship_id:
-			_draw_crown(ship_state.position + Vector2(0, -48))
+			_draw_crown(ship_state.position + name_offset, label)
 
 	# _draw_authoritative_ghost_ship()  # Disabled - no ghost ship
 	if debug_show_overlay:
@@ -1451,6 +1658,22 @@ func _draw() -> void:
 		var king_state = latest_snapshot.ships[king_id]
 		king_label = "KING: %s (%d)" % [king_state.username, king_state.bounty]
 	draw_string(font, Vector2(32, 80), king_label, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, Color(1, 1, 0.4, 1))
+
+	# Kill feed (screen-space, top-right).
+	_draw_kill_feed()
+
+	# Team score banner (screen-space, top-center).
+	_draw_score_banner()
+	# Spectator label.
+	if _is_spectating:
+		_draw_spectator_hud()
+
+	# Chat overlay (screen-space, bottom-left).
+	_draw_chat_overlay()
+
+	# Scoreboard overlay (screen-space, centered).
+	if _scoreboard_visible:
+		_draw_scoreboard()
 
 
 	# Local ship (predicted)
@@ -1501,24 +1724,198 @@ func _draw_local_combat_fx(local_ship_state: DriftTypes.DriftShipState) -> void:
 		draw_string(font, pos3 + Vector2(-8.0, yoff), "%d" % dmg, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 14, Color(1.0, 0.9, 0.9, alpha))
 
 func _draw_ball_at(pos: Vector2) -> void:
-	var color := Color(1.0, 0.6, 0.9, 1.0) # bright white/pink
-	var outline := Color(1.0, 0.2, 0.7, 1.0) # pink outline
-	var radius := 6.0
-	draw_circle(pos, radius, color)
-	draw_circle(pos, radius, outline, 2.0)
+	if POWERB_TEX != null:
+		var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+		var frame: int = int(floor(t_s * POWERB_ANIM_FPS)) % POWERB_FRAME_COUNT
+		var fp: float = float(POWERB_FRAME_PX)
+		# powerb.png: 10 cols x 3 rows at 16px. Row 0 = standard ball.
+		var src := Rect2(float(frame) * fp, 0.0, fp, fp)
+		var draw_sz: float = fp * 2.0
+		var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+		draw_texture_rect_region(POWERB_TEX, dst, src, Color.WHITE)
+	else:
+		draw_circle(pos, 6.0, Color(1.0, 0.6, 0.9, 1.0))
+		draw_circle(pos, 6.0, Color(1.0, 0.2, 0.7, 1.0), 2.0)
+
+
+func _get_camera_offset() -> Vector2:
+	if cam != null:
+		return cam.position - get_viewport_rect().size * 0.5
+	return Vector2.ZERO
+
+
+func _draw_kill_feed() -> void:
+	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	# Prune expired entries.
+	while _kill_feed_entries.size() > 0 and int(_kill_feed_entries[0].get("expire_tick", 0)) <= now_tick:
+		_kill_feed_entries.pop_front()
+	if _kill_feed_entries.is_empty():
+		return
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var x_right: float = cam_offset.x + vp_size.x - 16.0
+	var y_start: float = cam_offset.y + 40.0
+	var idx: int = 0
+	for entry in _kill_feed_entries:
+		var text: String = String(entry.get("text", ""))
+		var color_idx: int = int(entry.get("color", 0))
+		# Right-align: estimate width (6px per char at small size).
+		var est_width: float = float(text.length()) * 6.0
+		var pos := Vector2(x_right - est_width, y_start + float(idx) * 14.0)
+		SpriteFontLabelScript.draw_text(self, pos, text, SpriteFontLabelScript.FontSize.SMALL, color_idx, 0)
+		idx += 1
+
+
+func _draw_chat_overlay() -> void:
+	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	# Prune expired entries (keep all if chat input is active).
+	if not _chat_input_active:
+		while _chat_messages.size() > 0 and int(_chat_messages[0].get("expire_tick", 0)) <= now_tick:
+			_chat_messages.pop_front()
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var x_left: float = cam_offset.x + 16.0
+	var y_bottom: float = cam_offset.y + vp_size.y - 40.0
+	# Show last N messages above the input line.
+	var visible: Array = _chat_messages.slice(maxi(0, _chat_messages.size() - CHAT_MAX_DISPLAY))
+	var line_height: float = 14.0
+	var y_offset: float = y_bottom - float(visible.size()) * line_height
+	if _chat_input_active:
+		y_offset -= line_height  # Make room for the input line.
+	for entry in visible:
+		var text: String = String(entry.get("text", ""))
+		var color_idx: int = int(entry.get("color", 0))
+		SpriteFontLabelScript.draw_text(self, Vector2(x_left, y_offset), text, SpriteFontLabelScript.FontSize.SMALL, color_idx, 0)
+		y_offset += line_height
+	# Draw input line.
+	if _chat_input_active:
+		var input_line: String = "> " + _chat_input_text + "_"
+		SpriteFontLabelScript.draw_text(self, Vector2(x_left, y_bottom), input_line, SpriteFontLabelScript.FontSize.SMALL, 0, 0)
+
+
+func _draw_score_banner() -> void:
+	if _team_scores[0] == 0 and _team_scores[1] == 0 and not _match_over:
+		return
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var cx: float = cam_offset.x + vp_size.x * 0.5
+	var cy: float = cam_offset.y + 8.0
+	if _match_over and _match_winner > 0:
+		var msg: String = "Team %d WINS!  (%d - %d)  Restarting..." % [_match_winner, _team_scores[0], _team_scores[1]]
+		SpriteFontLabelScript.draw_text(self, Vector2(cx - 120.0, cy), msg, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
+	else:
+		var score_str: String = "%d  -  %d" % [_team_scores[0], _team_scores[1]]
+		SpriteFontLabelScript.draw_text(self, Vector2(cx - 20.0, cy), score_str, SpriteFontLabelScript.FontSize.SMALL, 0, 0)
+
+
+func _draw_spectator_hud() -> void:
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var cx: float = cam_offset.x + vp_size.x * 0.5
+	var cy: float = cam_offset.y + vp_size.y - 20.0
+	var target_name: String = "?"
+	if _spectator_target_id >= 0 and latest_snapshot != null and latest_snapshot.ships.has(_spectator_target_id):
+		var s = latest_snapshot.ships[_spectator_target_id]
+		target_name = String(s.username) if (typeof(s.username) == TYPE_STRING and s.username != "") else str(_spectator_target_id)
+	var label: String = "SPECTATING: %s  [Tab] to switch" % target_name
+	SpriteFontLabelScript.draw_text(self, Vector2(cx - 100.0, cy), label, SpriteFontLabelScript.FontSize.SMALL, 1, 0)
+
+
+func _draw_scoreboard() -> void:
+	if latest_snapshot == null:
+		return
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var cx: float = cam_offset.x + vp_size.x * 0.5
+	var cy_start: float = cam_offset.y + 80.0
+	# Semi-transparent background.
+	var bg_w: float = 500.0
+	var bg_h: float = 24.0 + float(latest_snapshot.ships.size()) * 16.0 + 8.0
+	draw_rect(Rect2(cx - bg_w * 0.5, cy_start - 4.0, bg_w, bg_h), Color(0, 0, 0, 0.7))
+	# Header.
+	var header: String = "  NAME            SHIP  FREQ  KILLS DEATHS BOUNTY"
+	SpriteFontLabelScript.draw_text(self, Vector2(cx - bg_w * 0.5 + 8.0, cy_start + 4.0), header, SpriteFontLabelScript.FontSize.SMALL, 1, 0)
+	# Sort ships by kills desc, then bounty desc.
+	var ship_ids: Array = latest_snapshot.ships.keys()
+	ship_ids.sort_custom(func(a, b):
+		var sa = latest_snapshot.ships.get(a)
+		var sb = latest_snapshot.ships.get(b)
+		if sa == null or sb == null: return false
+		if int(sa.kills) != int(sb.kills): return int(sa.kills) > int(sb.kills)
+		return int(sa.bounty) > int(sb.bounty)
+	)
+	var y: float = cy_start + 20.0
+	var ship_names: Array[String] = ["WB", "JV", "SP", "LV", "TR", "WS", "LC", "SH"]
+	for sid in ship_ids:
+		var s = latest_snapshot.ships.get(sid)
+		if s == null:
+			continue
+		var sname: String = String(s.username) if String(s.username) != "" else ("Ship%d" % int(s.id))
+		var st_idx: int = clampi(int(s.ship_type), 0, 7)
+		var line: String = "  %-16s %-4s  %-5d %-5d %-6d %d" % [sname.left(16), ship_names[st_idx], int(s.freq), int(s.kills), int(s.deaths), int(s.bounty)]
+		var color_idx: int = 0  # white
+		if int(s.id) == local_ship_id:
+			color_idx = 2  # blue for local player
+		SpriteFontLabelScript.draw_text(self, Vector2(cx - bg_w * 0.5 + 8.0, y), line, SpriteFontLabelScript.FontSize.SMALL, color_idx, 0)
+		y += 16.0
+
+
+func _draw_explosions() -> void:
+	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	var i: int = 0
+	while i < _active_explosions.size():
+		var ex: Dictionary = _active_explosions[i]
+		var elapsed: int = int(now_tick) - int(ex.get("start_tick", 0))
+		var tier: int = int(ex.get("tier", 2))
+
+		if tier == 1 and BombsRes != null:
+			# Bomb hit: play through one row of bombs.png keyed by bomb level.
+			var total_ticks: int = BOMB_EXPLODE_FRAMES * BOMB_EXPLODE_TICKS_PER_FRAME
+			if elapsed >= total_ticks:
+				_active_explosions.remove_at(i)
+				continue
+			var col: int = mini(elapsed / BOMB_EXPLODE_TICKS_PER_FRAME, BOMB_EXPLODE_FRAMES - 1)
+			var level: int = clampi(int(ex.get("level", 1)) - 1, 0, 12)
+			var fp: float = float(BOMB_EXPLODE_FRAME_PX)
+			var src := Rect2(float(col) * fp, float(level) * fp, fp, fp)
+			var pos: Vector2 = ex.get("pos", Vector2.ZERO)
+			var draw_sz: float = fp * 2.0
+			var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+			draw_texture_rect_region(BombsRes.texture, dst, src)
+			i += 1
+			continue
+
+		var vis = null
+		match tier:
+			0: vis = Explode0Res
+			_: vis = Explode2Res
+		if vis == null or vis.is_finished(elapsed):
+			_active_explosions.remove_at(i)
+			continue
+		var frame: int = vis.get_frame_for_tick(elapsed)
+		var uv: Vector2i = vis.get_frame_uv(frame)
+		var fw: int = int(vis.frame_size_px.x)
+		var fh: int = int(vis.frame_size_px.y)
+		var src := Rect2(float(uv.x * fw), float(uv.y * fh), float(fw), float(fh))
+		var pos: Vector2 = ex.get("pos", Vector2.ZERO)
+		var dst := Rect2(pos - Vector2(float(fw), float(fh)) * 0.5, Vector2(float(fw), float(fh)))
+		draw_texture_rect_region(vis.texture, dst, src)
+		i += 1
 
 
 func _draw_bullets() -> void:
+	var tick_i: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
 	# Remote bullets: authoritative snapshots.
 	for b in authoritative_bullets:
 		if b == null:
 			continue
 		if local_ship_id >= 0 and int(b.owner_id) == local_ship_id:
 			continue
-		_draw_bullet_at(Vector2(b.position.x, b.position.y))
+		_draw_bullet_at(Vector2(b.position.x, b.position.y), int(b.level), int(b.bounces_left) > 0, tick_i)
 
 	# Local bullets: predicted world state (shows shots immediately).
 	if local_ship_id >= 0 and world != null and typeof(world.bullets) == TYPE_DICTIONARY:
+		var tick_local: int = int(world.tick) if ("tick" in world) else tick_i
 		var ids: Array = world.bullets.keys()
 		ids.sort()
 		for bid in ids:
@@ -1527,19 +1924,442 @@ func _draw_bullets() -> void:
 				continue
 			if int(pb.owner_id) != local_ship_id:
 				continue
-			_draw_bullet_at(Vector2(pb.position.x, pb.position.y))
+			_draw_bullet_at(Vector2(pb.position.x, pb.position.y), int(pb.level), int(pb.bounces_left) > 0, tick_local)
 
 
-func _draw_bullet_at(pos: Vector2) -> void:
-	# Simple, readable bullet marker.
+func _draw_bullet_at(pos: Vector2, level: int, has_bounce: bool, tick_value: int) -> void:
+	# Client-only visuals; driven by traits only.
+	var vis = BulletVisualsRes
+	if vis != null and vis.texture != null:
+		var uv: Vector2i = vis.get_bullet_uv(level, has_bounce, 0, tick_value)
+		var fw: int = maxi(1, int(vis.frame_size_px.x))
+		var fh: int = maxi(1, int(vis.frame_size_px.y))
+		var src := Rect2(float(uv.x * fw), float(uv.y * fh), float(fw), float(fh))
+		var scale: float = 2.0 + float(clampi(level, 1, 4) - 1) * 0.5
+		var dw: float = float(fw) * scale
+		var dh: float = float(fh) * scale
+		var dst := Rect2(pos - Vector2(dw, dh) * 0.5, Vector2(dw, dh))
+		draw_texture_rect_region(vis.texture, dst, src)
+		return
+	# Fallback: simple, readable bullet marker.
 	draw_circle(pos, 2.5, Color(0.95, 0.95, 1.0, 0.9))
 
 
+func _draw_bombs() -> void:
+	var tick_i: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	# Remote bombs: authoritative snapshots.
+	for b in authoritative_bombs:
+		if b == null:
+			continue
+		if local_ship_id >= 0 and int(b.owner_id) == local_ship_id:
+			continue
+		_draw_bomb_at(Vector2(b.position.x, b.position.y), int(b.level), bool(b.has_shrapnel), int(b.bounces_left) > 0, tick_i)
+
+	# Local bombs: predicted world state.
+	if local_ship_id >= 0 and world != null and typeof(world.bombs) == TYPE_DICTIONARY:
+		var tick_local: int = int(world.tick) if ("tick" in world) else tick_i
+		var ids: Array = world.bombs.keys()
+		ids.sort()
+		for bid in ids:
+			var pb = world.bombs.get(bid)
+			if pb == null:
+				continue
+			if int(pb.owner_id) != local_ship_id:
+				continue
+			_draw_bomb_at(Vector2(pb.position.x, pb.position.y), int(pb.level), bool(pb.has_shrapnel), int(pb.bounces_left) > 0, tick_local)
+
+
+func _draw_bomb_at(pos: Vector2, level: int, has_shrapnel: bool, has_bounce: bool, tick_value: int) -> void:
+	# Client-only visuals; driven by traits only.
+	var vis = BombVisualsRes
+	if vis != null and vis.texture != null:
+		var uv: Vector2i = vis.get_bomb_uv(level, has_shrapnel, has_bounce, tick_value)
+		var fw: int = maxi(1, int(vis.frame_size_px.x))
+		var fh: int = maxi(1, int(vis.frame_size_px.y))
+		var src := Rect2(float(uv.x * fw), float(uv.y * fh), float(fw), float(fh))
+		var dst := Rect2(pos - Vector2(float(fw), float(fh)) * 0.5, Vector2(float(fw), float(fh)))
+		draw_texture_rect_region(vis.texture, dst, src)
+		return
+	# Fallback marker.
+	draw_circle(pos, 4.0, Color(1.0, 0.6, 0.2, 0.9))
+
+
+const BRICK_ATLAS_COORD := Vector2i(0, 9)
+const BRICK_TILEMAP_SOURCE_ID := 0
+
+func _apply_brick_tiles(bricks: Array) -> void:
+	if _tilemap_solid == null:
+		return
+	# Collect all tiles that should be active from the current brick list.
+	var wanted: Dictionary = {}
+	for br in bricks:
+		for tile in br.get("tiles", []):
+			wanted[tile] = true
+	# Remove tiles no longer wanted.
+	for tile in _active_brick_tiles.keys():
+		if not wanted.has(tile):
+			_tilemap_solid.set_cell(0, tile, -1)
+			_active_brick_tiles.erase(tile)
+	# Add new tiles.
+	for tile in wanted.keys():
+		if not _active_brick_tiles.has(tile):
+			_tilemap_solid.set_cell(0, tile, BRICK_TILEMAP_SOURCE_ID, BRICK_ATLAS_COORD)
+			_active_brick_tiles[tile] = true
+
+
+const EXHAUST_DURATION_TICKS: int = 10
+const EXHAUST_SPREAD: float = 0.4 # radians
+
+func _emit_exhaust(ship_pos: Vector2, exhaust_angle: float, ship_vel: Vector2, afterburner: bool = false) -> void:
+	# ponytail: fixed random via deterministic offset from position hash — no RNG state
+	var h: int = int(ship_pos.x * 7.0 + ship_pos.y * 13.0 + world.tick * 3.0)
+	var spread: float = EXHAUST_SPREAD * (1.8 if afterburner else 1.0)
+	var jitter: float = float(h % 100) / 100.0 * spread - spread * 0.5
+	var dir := Vector2(cos(exhaust_angle + jitter), sin(exhaust_angle + jitter))
+	var speed: float = ship_vel.length() * 0.3 + (60.0 if afterburner else 30.0)
+	_exhaust_particles.append({
+		"pos": ship_pos + dir * 14.0,
+		"vel": dir * speed,
+		"start_tick": int(world.tick) if world != null else 0,
+		"afterburner": afterburner,
+	})
+
+
+func _draw_exhaust() -> void:
+	var cur_tick: int = int(world.tick) if world != null else 0
+	var i: int = 0
+	while i < _exhaust_particles.size():
+		var p: Dictionary = _exhaust_particles[i]
+		var elapsed: int = cur_tick - int(p.get("start_tick", cur_tick))
+		if elapsed >= EXHAUST_DURATION_TICKS:
+			_exhaust_particles.remove_at(i)
+			continue
+		var t: float = float(elapsed) / float(EXHAUST_DURATION_TICKS)
+		var alpha: float = (1.0 - t) * 0.7
+		var radius: float = 3.0 - t * 2.0
+		var pos: Vector2 = p.get("pos", Vector2.ZERO) + p.get("vel", Vector2.ZERO) * float(elapsed) / 60.0
+		var ab: bool = bool(p.get("afterburner", false))
+		var col: Color
+		if ab:
+			if t < 0.4:
+				col = Color(0.6, 0.9, 1.0, alpha) # hot blue-white
+			else:
+				col = Color(0.2, 0.5, 1.0, alpha * 0.6)
+		else:
+			if t < 0.3:
+				col = Color(1.0, 1.0, 0.6, alpha)
+			elif t < 0.6:
+				col = Color(1.0, 0.5, 0.1, alpha)
+			else:
+				col = Color(0.4, 0.4, 0.4, alpha * 0.5)
+		var draw_radius: float = maxf(radius * (1.6 if ab else 1.0), 0.5)
+		draw_circle(pos, draw_radius, col)
+		i += 1
+
+
+func _consume_local_effect_events() -> void:
+	for ee in world.effect_events:
+		var pos := Vector2(float(ee.get("px", 0.0)), float(ee.get("py", 0.0)))
+		match StringName(ee.get("type", "")):
+			&"repel":
+				_active_repel_rings.append({"pos": pos, "start_tick": int(world.tick)})
+			&"warp":
+				_active_warp_flashes.append({"pos": pos, "start_tick": int(world.tick)})
+			&"thor":
+				_active_thor_bursts.append({"pos": pos, "start_tick": int(world.tick)})
+
+
+const REPEL_RING_DURATION_TICKS: int = 24 # 0.4s at 60Hz
+const REPEL_RING_MAX_RADIUS: float = 512.0
+const WARP_FLASH_DURATION_TICKS: int = 12 # matches WARP_TOTAL_FRAMES (one tick per frame)
+const THOR_BURST_DURATION_TICKS: int = 12 # 0.2s at 60Hz
+const THOR_BURST_LINE_LENGTH: float = 80.0
+
+func _draw_repel_rings() -> void:
+	var cur_tick: int = int(world.tick) if world != null else 0
+	var i: int = 0
+	while i < _active_repel_rings.size():
+		var rr: Dictionary = _active_repel_rings[i]
+		var elapsed: int = cur_tick - int(rr.get("start_tick", cur_tick))
+		if elapsed >= REPEL_RING_DURATION_TICKS:
+			_active_repel_rings.remove_at(i)
+			continue
+		var pos: Vector2 = rr.get("pos", Vector2.ZERO)
+		if REPEL_TEX != null:
+			# Sheet 480x192: 32px frames, 15 cols x 6 rows. Row 0 = main ring.
+			var col: int = mini(elapsed * REPEL_COLS / REPEL_RING_DURATION_TICKS, REPEL_COLS - 1)
+			var fp: float = float(REPEL_FRAME_PX)
+			var src := Rect2(float(col) * fp, 0.0, fp, fp)
+			# Scale to match repel visual size (~256px at peak)
+			var t: float = float(elapsed) / float(REPEL_RING_DURATION_TICKS)
+			var draw_sz: float = fp * (4.0 + 12.0 * t)
+			var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+			draw_texture_rect_region(REPEL_TEX, dst, src, Color(1, 1, 1, 1.0 - t))
+		else:
+			var t: float = float(elapsed) / float(REPEL_RING_DURATION_TICKS)
+			draw_arc(pos, REPEL_RING_MAX_RADIUS * t, 0.0, TAU, 48, Color(0.4, 0.7, 1.0, 1.0 - t), 2.0)
+		i += 1
+
+
+func _draw_warp_flashes() -> void:
+	var cur_tick: int = int(world.tick) if world != null else 0
+	# warp.png: 12 frames (4 cols x 3 rows) at 72x48px. One tick per frame.
+	var total_ticks: int = WARP_TOTAL_FRAMES
+	var i: int = 0
+	while i < _active_warp_flashes.size():
+		var wf: Dictionary = _active_warp_flashes[i]
+		var elapsed: int = cur_tick - int(wf.get("start_tick", cur_tick))
+		if elapsed >= total_ticks:
+			_active_warp_flashes.remove_at(i)
+			continue
+		var pos: Vector2 = wf.get("pos", Vector2.ZERO)
+		if WARP_TEX != null:
+			var frame: int = mini(elapsed, WARP_TOTAL_FRAMES - 1)
+			var col: int = frame % WARP_COLS
+			var row: int = frame / WARP_COLS
+			var src := Rect2(float(col * WARP_FRAME_W), float(row * WARP_FRAME_H), float(WARP_FRAME_W), float(WARP_FRAME_H))
+			var dst := Rect2(pos - Vector2(float(WARP_FRAME_W), float(WARP_FRAME_H)) * 0.5, Vector2(float(WARP_FRAME_W), float(WARP_FRAME_H)))
+			draw_texture_rect_region(WARP_TEX, dst, src, Color.WHITE)
+		else:
+			var t: float = float(elapsed) / float(total_ticks)
+			var alpha: float = 1.0 - t
+			var radius: float = 24.0 + 40.0 * t
+			draw_arc(pos, radius, 0.0, TAU, 32, Color(0.8, 0.4, 1.0, alpha), 3.0)
+		i += 1
+
+
+func _draw_portal_points() -> void:
+	if WARPPNT_TEX == null:
+		return
+	# portals not yet in snapshot — draw from predicted world when available
+	var portals_src: Array = []
+	if world != null and "portals" in world:
+		portals_src = world.portals
+	if portals_src.is_empty():
+		return
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * WARPPNT_ANIM_FPS)) % WARPPNT_FRAME_COUNT
+	var fp: float = float(WARPPNT_FRAME_PX)
+	var draw_sz: float = fp * 2.0
+	for p in portals_src:
+		if p == null:
+			continue
+		var ppos: Vector2 = p.position if p is Object else p.get("position", Vector2.ZERO)
+		var src := Rect2(float(frame) * fp, 0.0, fp, fp)
+		var dst := Rect2(ppos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+		draw_texture_rect_region(WARPPNT_TEX, dst, src, Color.WHITE)
+
+
+const THOR_SPRITE_ROW: int = 12  # last row of bombs.png
+const THOR_SPRITE_FRAMES: int = 10
+const THOR_SPRITE_TICKS_PER_FRAME: int = 2
+const THOR_SPRITE_SCALE: float = 4.0  # 16px * 4 = 64px burst
+
+func _draw_thor_bursts() -> void:
+	var cur_tick: int = int(world.tick) if world != null else 0
+	var total_ticks: int = THOR_SPRITE_FRAMES * THOR_SPRITE_TICKS_PER_FRAME
+	var i: int = 0
+	while i < _active_thor_bursts.size():
+		var tb: Dictionary = _active_thor_bursts[i]
+		var elapsed: int = cur_tick - int(tb.get("start_tick", cur_tick))
+		if elapsed >= total_ticks:
+			_active_thor_bursts.remove_at(i)
+			continue
+		var pos: Vector2 = tb.get("pos", Vector2.ZERO)
+		if BombsRes != null and BombsRes.texture != null:
+			var col: int = mini(elapsed / THOR_SPRITE_TICKS_PER_FRAME, THOR_SPRITE_FRAMES - 1)
+			var fp: float = float(BOMB_EXPLODE_FRAME_PX)
+			var src := Rect2(float(col) * fp, float(THOR_SPRITE_ROW) * fp, fp, fp)
+			var draw_sz: float = fp * THOR_SPRITE_SCALE
+			var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+			draw_texture_rect_region(BombsRes.texture, dst, src)
+		else:
+			var t: float = float(elapsed) / float(total_ticks)
+			var len: float = THOR_BURST_LINE_LENGTH * t
+			for j in range(8):
+				var angle: float = float(j) * (TAU / 8.0)
+				var dir := Vector2(cos(angle), sin(angle))
+				draw_line(pos + dir * 8.0, pos + dir * len, Color(1.0, 0.9, 0.3, 1.0 - t), 2.0)
+		i += 1
+
+
+func _draw_shield_at(pos: Vector2, alpha: float) -> void:
+	if SHIELD_TEX != null:
+		var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+		var frame: int = int(floor(t_s * SHIELD_ANIM_FPS)) % SHIELD_FRAME_COUNT
+		var fp: float = float(SHIELD_FRAME_PX)
+		var src := Rect2(float(frame) * fp, 0.0, fp, fp)
+		var draw_sz: float = fp * 3.0  # 48px bubble
+		var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+		draw_texture_rect_region(SHIELD_TEX, dst, src, Color(1, 1, 1, alpha))
+	else:
+		draw_arc(pos, 24.0, 0.0, TAU, 32, Color(0.3, 0.8, 1.0, 0.6 * alpha), 2.5)
+
+
+func _draw_shield_bubbles(snap: DriftTypes.DriftWorldSnapshot) -> void:
+	var cur_tick: int = int(snap.tick)
+	if world != null and world.ships.has(local_ship_id):
+		var ls: DriftTypes.DriftShipState = world.ships[local_ship_id]
+		if int(ls.shields_until_tick) > cur_tick:
+			var t: float = clampf(float(int(ls.shields_until_tick) - cur_tick) / 60.0, 0.0, 1.0)
+			_draw_shield_at(ls.position, t)
+	for s in snap.ships.values():
+		if s == null or int(s.id) == local_ship_id:
+			continue
+		if int(s.shields_until_tick) > cur_tick:
+			var t: float = clampf(float(int(s.shields_until_tick) - cur_tick) / 60.0, 0.0, 1.0)
+			_draw_shield_at(s.position, t)
+
+
+func _local_ship_see_mines() -> bool:
+	if local_ship_id < 0 or world == null or not world.ships.has(local_ship_id):
+		return false
+	var st: int = clampi(int(world.ships[local_ship_id].ship_type), 0, 7)
+	if world.ship_specs.size() > st:
+		var sens: Variant = world.ship_specs[st].get("sensors")
+		if typeof(sens) == TYPE_DICTIONARY:
+			return int((sens as Dictionary).get("SeeMines", 0)) != 0
+	return false
+
+
+func _draw_mines() -> void:
+	var tick_i: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	var see_enemy_mines: bool = _local_ship_see_mines()
+	# Remote mines: authoritative snapshots.
+	for m in authoritative_mines:
+		if m == null:
+			continue
+		var is_mine_owner: bool = local_ship_id >= 0 and int(m.owner_id) == local_ship_id
+		if not is_mine_owner and not see_enemy_mines:
+			continue
+		_draw_mine_at(Vector2(m.position.x, m.position.y), int(m.level), bool(m.has_shrapnel), int(m.bounces_left) > 0, tick_i)
+
+	# Local mines: predicted world state.
+	if local_ship_id >= 0 and world != null and typeof(world.mines) == TYPE_DICTIONARY:
+		var tick_local: int = int(world.tick) if ("tick" in world) else tick_i
+		var ids: Array = world.mines.keys()
+		ids.sort()
+		for mid in ids:
+			var pm = world.mines.get(mid)
+			if pm == null:
+				continue
+			if int(pm.owner_id) != local_ship_id:
+				continue
+			_draw_mine_at(Vector2(pm.position.x, pm.position.y), int(pm.level), bool(pm.has_shrapnel), int(pm.bounces_left) > 0, tick_local)
+
+
+func _draw_mine_at(pos: Vector2, level: int, has_shrapnel: bool, _has_bounce: bool, tick_value: int) -> void:
+	var vis = MineVisualsRes
+	if vis == null or vis.texture == null:
+		_draw_bomb_at(pos, level, has_shrapnel, false, tick_value)
+		return
+	# Sheet: 10 cols x 8 rows at 16x16.
+	# Rows 0-3: normal mine levels 1-4. Rows 4-7: EMP/shrapnel mine levels 1-4.
+	var row: int = (4 if has_shrapnel else 0) + clampi(level - 1, 0, 3)
+	var period: int = maxi(1, int(vis.anim_period_ticks))
+	var col: int = (int(tick_value) / period) % int(vis.frames_per_row)
+	var fp: float = float(vis.frame_size_px.x)
+	var src := Rect2(float(col) * fp, float(row) * fp, fp, fp)
+	var draw_sz: float = fp * 2.0
+	var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+	draw_texture_rect_region(vis.texture, dst, src)
+
+
+func _draw_decoys() -> void:
+	if latest_snapshot == null:
+		return
+	var my_freq: int = 0
+	if local_ship_id >= 0 and latest_snapshot.ships.has(local_ship_id):
+		my_freq = int(latest_snapshot.ships[local_ship_id].freq)
+	var decoy_list: Array = latest_snapshot.decoys if "decoys" in latest_snapshot else []
+	for d in decoy_list:
+		if d == null:
+			continue
+		# Draw as remote ship triangle — same visual as a real ship.
+		var fake_state := DriftTypes.DriftShipState.new(int(d.id), d.position, d.velocity, float(d.rotation))
+		fake_state.ship_type = int(d.ship_type)
+		_draw_remote_ship_triangle(fake_state, DriftTeamColors.ship_marker_color(my_freq, int(d.freq)))
+
+
 func _draw_prizes() -> void:
-	for p in authoritative_prizes:
+	var prize_list: Array = authoritative_prizes if not authoritative_prizes.is_empty() else (world.prizes.values() if world != null and typeof(world.prizes) == TYPE_DICTIONARY else [])
+	for p in prize_list:
 		if p == null:
 			continue
 		_draw_prize_at(int(p.id), Vector2(p.pos.x, p.pos.y), int(p.kind), bool(p.is_negative), bool(p.is_death_drop))
+
+
+func _draw_bricks() -> void:
+	if WALL_TEX == null:
+		return
+	var bricks_src: Array = []
+	if latest_snapshot != null and "bricks" in latest_snapshot:
+		bricks_src = latest_snapshot.bricks
+	elif world != null:
+		bricks_src = world.bricks
+	if bricks_src.is_empty():
+		return
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * WALL_ANIM_FPS)) % WALL_FRAME_COUNT
+	var fp: float = float(WALL_FRAME_PX)
+	var tile_px: float = float(DriftConstants.TILE_SIZE)
+	for br in bricks_src:
+		if br == null:
+			continue
+		var freq: int = int(br.get("freq", 1))
+		var row: int = 0 if freq == 1 else 1
+		var src := Rect2(float(frame) * fp, float(row) * fp, fp, fp)
+		for tile in br.get("tiles", []):
+			var world_pos := Vector2(float(tile.x) * tile_px + tile_px * 0.5, float(tile.y) * tile_px + tile_px * 0.5)
+			var dst := Rect2(world_pos - Vector2(tile_px, tile_px) * 0.5, Vector2(tile_px, tile_px))
+			draw_texture_rect_region(WALL_TEX, dst, src)
+
+
+func _draw_goal_zones() -> void:
+	if client_goal_zones.is_empty() or GOAL_TEX == null:
+		return
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * GOAL_ANIM_FPS)) % GOAL_FRAME_COUNT
+	var frame_sz: float = float(GOAL_FRAME_PX)
+	var draw_sz: float = frame_sz * GOAL_DRAW_SCALE
+	for gz in client_goal_zones:
+		var gpos: Vector2 = gz.get("pos", Vector2.ZERO)
+		var gteam: int = int(gz.get("team", 1))
+		var row: int = clampi(gteam - 1, 0, 1)
+		var src := Rect2(float(frame) * frame_sz, float(row) * frame_sz, frame_sz, frame_sz)
+		var dst := Rect2(gpos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+		draw_texture_rect_region(GOAL_TEX, dst, src, Color.WHITE)
+
+
+func _draw_flags() -> void:
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * FLAG_ANIM_FPS)) % FLAG_FRAME_COUNT
+	var frame_sz: float = float(FLAG_FRAME_PX)
+	var draw_sz: float = frame_sz * FLAG_DRAW_SCALE
+
+	for fl in authoritative_flags:
+		if fl == null:
+			continue
+		var fteam: int = int(fl.team)
+		var pos: Vector2 = fl.position
+		if fl.carrier_ship_id >= 0 and latest_snapshot != null and latest_snapshot.ships.has(fl.carrier_ship_id):
+			pos = latest_snapshot.ships[fl.carrier_ship_id].position + Vector2(0, -22)
+
+		if FLAG_TEX != null:
+			# Row 0 = team 1 (yellow), row 1 = team 2 (blue).
+			var row: int = clampi(fteam - 1, 0, 1)
+			var src := Rect2(float(frame) * frame_sz, float(row) * frame_sz, frame_sz, frame_sz)
+			var dst := Rect2(pos - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+			var modulate := Color(1, 1, 1, 0.7 if (not fl.at_home and fl.carrier_ship_id < 0) else 1.0)
+			draw_texture_rect_region(FLAG_TEX, dst, src, modulate)
+		else:
+			# Fallback: vector pole + pennant.
+			var flag_color: Color = Color(0.2, 1.0, 0.3) if fteam == 1 else Color(1.0, 0.3, 0.2)
+			if not fl.at_home and fl.carrier_ship_id < 0:
+				flag_color = flag_color.darkened(0.4)
+			draw_line(pos, pos + Vector2(0, 12), flag_color, 2.0)
+			draw_polygon(PackedVector2Array([pos, pos + Vector2(8, 4), pos + Vector2(0, 8)]),
+				PackedColorArray([flag_color, flag_color, flag_color]))
 
 
 func _draw_prize_at(prize_id: int, pos: Vector2, _kind: int, is_negative: bool, is_death_drop: bool) -> void:
@@ -1588,8 +2408,7 @@ func _draw_ball() -> void:
 	draw_line(ball_position, vel_end, Color(1.0, 0.7, 0.2, 1.0), 2.0)
 func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_color: Color) -> void:
 	# Atlas-based ship sprite (no SpriteFrames assets).
-	# Ship selection is currently a single default (0=Warbird) until ship choice is replicated.
-	var ship_index := 0
+	var ship_index := clampi(int(ship_state.ship_type), 0, 7)
 	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
 	var heading_deg := -rad_to_deg(float(ship_state.rotation))
 	var tex := _ships_tex if _ships_tex != null else SHIPS_TEX_FALLBACK
@@ -1614,7 +2433,7 @@ func _draw_remote_ship_triangle(ship_state: DriftTypes.DriftShipState, fill_colo
 
 func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 	# Atlas-based ship sprite (no SpriteFrames assets).
-	var ship_index := 0
+	var ship_index := clampi(int(ship_state.ship_type), 0, 7)
 	# Godot 2D rotation increases clockwise on screen; convert to CCW degrees for the atlas mapper.
 	var heading_deg := -rad_to_deg(float(ship_state.rotation))
 	var tex := _ships_tex if _ships_tex != null else SHIPS_TEX_FALLBACK
@@ -1635,6 +2454,11 @@ func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 
 	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
 	draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, 1))
+	# Rocket boost glow.
+	var cur_t: int = int(world.tick) if world != null else 0
+	if int(ship_state.rocket_boost_until_tick) > cur_t:
+		var remain: float = clampf(float(int(ship_state.rocket_boost_until_tick) - cur_t) / 30.0, 0.0, 1.0)
+		draw_arc(ship_state.position, src.size.x * 0.65, 0.0, TAU, 24, Color(1.0, 0.5, 0.1, 0.55 * remain), 3.0)
 
 
 func _draw_authoritative_ghost_ship() -> void:
@@ -1658,23 +2482,23 @@ func _draw_authoritative_ghost_ship() -> void:
 	draw_polyline(world_points, Color(0.9, 0.9, 0.9, 1.0), 2.0)
 
 
-func _draw_crown(pos: Vector2) -> void:
-	# Draw a simple yellow crown above the ship at the given position.
-	# Crown: triangle points and a base line
-	var crown_color = Color(1.0, 0.9, 0.2, 1.0)
-	var base_y = pos.y + 8
-	var points = [
-		pos + Vector2(-12, 8),
-		pos + Vector2(-6, -8),
-		pos + Vector2(0, 4),
-		pos + Vector2(6, -8),
-		pos + Vector2(12, 8)
-	]
-	draw_polyline(points, crown_color, 3.0)
-	draw_line(points[0], points[4], crown_color, 3.0)
-	# Optionally, draw small circles for crown jewels
-	for i in [1, 2, 3]:
-		draw_circle(points[i], 2.5, Color(1.0, 0.7, 0.2, 1.0))
+func _draw_crown(label_pos: Vector2, label: String) -> void:
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * KING_ANIM_FPS)) % KING_FRAME_COUNT
+	var label_px_w: int = label.length() * SpriteFontLabelScript.SMALL_CELL_W
+	# Place crown sprite just to the right of the label, vertically centered on it.
+	var crown_draw_sz: float = float(KING_FRAME_PX)
+	var crown_pos := label_pos + Vector2(float(label_px_w) + 2.0, 0.0)
+	if KING_TEX != null:
+		var src := Rect2(float(frame) * float(KING_FRAME_PX), 0.0, float(KING_FRAME_PX), float(KING_FRAME_PX))
+		var dst := Rect2(crown_pos, Vector2(crown_draw_sz, crown_draw_sz))
+		draw_texture_rect_region(KING_TEX, dst, src, Color.WHITE)
+	else:
+		var crown_color := Color(1.0, 0.9, 0.2, 1.0)
+		var cp := crown_pos + Vector2(8.0, 8.0)
+		var pts := PackedVector2Array([cp+Vector2(-8,4),cp+Vector2(-4,-4),cp,cp+Vector2(4,-4),cp+Vector2(8,4)])
+		draw_polyline(pts, crown_color, 2.0)
+		draw_line(pts[0], pts[4], crown_color, 2.0)
 
 func _draw_debug_overlay(ship_state: DriftTypes.DriftShipState, tick: int) -> void:
 	# 1) Predicted position marker (same as current sim position in this phase).
@@ -1736,6 +2560,8 @@ func _on_connected_to_server() -> void:
 
 	# Wait for welcome packet to assign ship_id.
 	local_ship_id = -1
+	_is_spectating = false
+	_spectator_target_id = -1
 	world.tick = 0
 	world.ships.clear()
 	latest_snapshot = DriftTypes.DriftWorldSnapshot.new(0, {})
@@ -1751,54 +2577,65 @@ func _on_connected_to_server() -> void:
 
 
 func _draw_connection_ui() -> void:
-	var viewport_size := get_viewport_rect().size
-	var font: Font = ThemeDB.fallback_font
-	var font_size: int = 20
-	var title_size: int = 32
-	
-	# Get camera offset to draw in screen space
-	var cam_offset := Vector2.ZERO
-	if cam:
-		cam_offset = cam.position - viewport_size * 0.5
-	
-	# Dark background
-	draw_rect(Rect2(cam_offset, viewport_size), Color(0.1, 0.1, 0.15, 0.95))
-	
-	# Title
-	var title := "DRIFTLINE - SERVER CONNECTION"
-	var title_pos := cam_offset + Vector2(0.0, 100.0)
-	draw_string(font, title_pos, title, HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, title_size, Color.WHITE)
-	
-	# Server address display
-	var addr_label := "Server Address: " + server_address
-	var addr_pos := cam_offset + Vector2(0.0, 200.0)
-	draw_string(font, addr_pos, addr_label, HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, font_size, Color(0.8, 0.8, 1.0))
-	
-	# Status message
-	var status_pos := cam_offset + Vector2(0.0, 250.0)
-	var status_color := Color(1.0, 1.0, 0.5) if is_connected else Color(0.7, 0.7, 0.7)
-	draw_string(font, status_pos, connection_status_message, HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, font_size, status_color)
-	
-	# Instructions
-	var instructions := [
-		"",
-		"Press ENTER to connect to server",
-		"Press O for offline mode (local play only)",
-		"Press M to open Map Editor",
-		"Press T to open Tilemap Editor",
-		"",
-		"In offline mode: no server sync, collision still works"
-	]
-	
-	var y := 320.0
-	for line in instructions:
-		var line_pos := cam_offset + Vector2(0.0, y)
-		var color := Color(0.6, 0.6, 0.6) if line == "" else Color(0.9, 0.9, 0.9)
-		draw_string(font, line_pos, line, HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, font_size - 2, color)
-		y += 30
+	# Status sync: update the Control-based connect screen label each redraw.
+	if _connect_screen_status_label != null:
+		_connect_screen_status_label.text = connection_status_message
 
 
 func _input(event: InputEvent) -> void:
+	# Chat input handling (highest priority when active).
+	if _chat_input_active and event is InputEventKey:
+		var kev: InputEventKey = event
+		if kev.pressed:
+			if int(kev.keycode) == KEY_ENTER:
+				_send_chat_message()
+				_chat_input_active = false
+				_chat_input_text = ""
+				queue_redraw()
+				get_viewport().set_input_as_handled()
+				return
+			elif int(kev.keycode) == KEY_ESCAPE:
+				_chat_input_active = false
+				_chat_input_text = ""
+				queue_redraw()
+				get_viewport().set_input_as_handled()
+				return
+			elif int(kev.keycode) == KEY_BACKSPACE:
+				if _chat_input_text.length() > 0:
+					_chat_input_text = _chat_input_text.left(_chat_input_text.length() - 1)
+					queue_redraw()
+				get_viewport().set_input_as_handled()
+				return
+			elif kev.unicode > 0 and _chat_input_text.length() < CHAT_MAX_LENGTH:
+				_chat_input_text += char(kev.unicode)
+				queue_redraw()
+				get_viewport().set_input_as_handled()
+				return
+		get_viewport().set_input_as_handled()
+		return
+
+	# Chat activation: Enter or T to open chat (when not in menus).
+	if not show_connect_ui and is_connected and event is InputEventKey:
+		var kev2: InputEventKey = event
+		if kev2.pressed and not kev2.echo:
+			var kc: int = int(kev2.keycode)
+			if kc == KEY_ENTER or kc == KEY_T:
+				if not _chat_input_active:
+					_chat_input_active = true
+					_chat_input_text = ""
+					queue_redraw()
+					get_viewport().set_input_as_handled()
+					return
+
+	# Scoreboard toggle: F9
+	if not show_connect_ui and is_connected and event is InputEventKey:
+		var kev3: InputEventKey = event
+		if kev3.pressed and not kev3.echo and int(kev3.physical_keycode) == KEY_F9:
+			_scoreboard_visible = not _scoreboard_visible
+			queue_redraw()
+			get_viewport().set_input_as_handled()
+			return
+
 	# ESC menu overlay (client-only UI; must not pause the sim)
 	if not show_connect_ui and esc_menu != null and esc_menu.has_method("is_open"):
 		var menu_open: bool = bool(esc_menu.call("is_open"))
@@ -1811,6 +2648,23 @@ func _input(event: InputEvent) -> void:
 		# The menu itself enforces click-away and "unbound input dismiss" in _unhandled_input.
 		if menu_open:
 			return
+
+	# Spectator: Tab cycles through ships.
+	if _is_spectating and event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
+		if latest_snapshot != null and latest_snapshot.ships.size() > 0:
+			var ids: Array = latest_snapshot.ships.keys()
+			ids.sort()
+			var cur_idx: int = ids.find(_spectator_target_id)
+			_spectator_target_id = int(ids[(cur_idx + 1) % ids.size()])
+		get_viewport().set_input_as_handled()
+		return
+
+	# Music skip (Ctrl+M).
+	if event is InputEventKey and event.pressed and event.ctrl_pressed and event.keycode == KEY_M:
+		if _jukebox != null and _jukebox.has_method("skip_next"):
+			_jukebox.call("skip_next")
+		get_viewport().set_input_as_handled()
+		return
 
 	# Help ticker (client-only UI). Does not affect sim/input cmd collection.
 	if not show_connect_ui:
@@ -1944,6 +2798,14 @@ func _open_tilemap_editor() -> void:
 
 
 func _attempt_server_connection() -> void:
+	if _connect_screen_username_field != null:
+		var uname := _connect_screen_username_field.text.strip_edges()
+		if uname != "":
+			player_username = uname
+	if _connect_screen_address_field != null:
+		var addr := _connect_screen_address_field.text.strip_edges()
+		if addr != "":
+			server_address = addr
 	connection_status_message = "Connecting to " + server_address + "..."
 	queue_redraw()
 	_setup_networking()
@@ -1986,6 +2848,149 @@ func _update_ui_visibility() -> void:
 	# Pause menu is never shown over the connection UI.
 	_set_pause_menu_visible(pause_menu_visible)
 	_update_main_menu_ui_visibility()
+	if _connect_screen_layer != null:
+		_connect_screen_layer.visible = show_connect_ui
+
+
+func _build_connect_screen_ui() -> void:
+	_connect_screen_layer = CanvasLayer.new()
+	_connect_screen_layer.layer = 80
+	add_child(_connect_screen_layer)
+
+	var root := ColorRect.new()
+	root.color = Color(0.06, 0.06, 0.10, 0.97)
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	_connect_screen_layer.add_child(root)
+
+	var center := VBoxContainer.new()
+	center.set_anchors_preset(Control.PRESET_CENTER)
+	center.custom_minimum_size = Vector2(520, 0)
+	center.add_theme_constant_override("separation", 10)
+	# Offset to visually center (anchor is at mid-screen; shift up by half estimated height).
+	center.offset_left = -260
+	center.offset_right = 260
+	center.offset_top = -220
+	center.offset_bottom = 220
+	root.add_child(center)
+
+	var title_lbl := Label.new()
+	title_lbl.text = "DRIFTLINE"
+	title_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title_lbl.add_theme_font_size_override("font_size", 32)
+	center.add_child(title_lbl)
+
+	var sep1 := HSeparator.new()
+	center.add_child(sep1)
+
+	# Username row.
+	var uname_row := HBoxContainer.new()
+	uname_row.add_theme_constant_override("separation", 8)
+	center.add_child(uname_row)
+	var uname_lbl := Label.new()
+	uname_lbl.text = "Username:"
+	uname_lbl.custom_minimum_size = Vector2(90, 0)
+	uname_row.add_child(uname_lbl)
+	_connect_screen_username_field = LineEdit.new()
+	_connect_screen_username_field.text = player_username
+	_connect_screen_username_field.placeholder_text = "Enter username"
+	_connect_screen_username_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_connect_screen_username_field.max_length = 24
+	uname_row.add_child(_connect_screen_username_field)
+
+	# Server address row.
+	var addr_row := HBoxContainer.new()
+	addr_row.add_theme_constant_override("separation", 8)
+	center.add_child(addr_row)
+	var addr_lbl := Label.new()
+	addr_lbl.text = "Server:"
+	addr_lbl.custom_minimum_size = Vector2(90, 0)
+	addr_row.add_child(addr_lbl)
+	_connect_screen_address_field = LineEdit.new()
+	_connect_screen_address_field.text = server_address
+	_connect_screen_address_field.placeholder_text = "127.0.0.1"
+	_connect_screen_address_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	addr_row.add_child(_connect_screen_address_field)
+
+	var sep2 := HSeparator.new()
+	center.add_child(sep2)
+
+	# Ship selection.
+	var ship_lbl := Label.new()
+	ship_lbl.text = "Select Ship  (F1–F8 to change in-game)"
+	ship_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	center.add_child(ship_lbl)
+
+	var ship_row := HBoxContainer.new()
+	ship_row.add_theme_constant_override("separation", 4)
+	ship_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(ship_row)
+
+	_connect_screen_ship_buttons.clear()
+	for i in range(DriftShipRegistry.SHIP_COUNT):
+		var btn := Button.new()
+		btn.text = DriftShipRegistry.SHIP_NAMES[i]
+		btn.custom_minimum_size = Vector2(60, 32)
+		btn.pressed.connect(_on_connect_screen_ship_selected.bind(i))
+		ship_row.add_child(btn)
+		_connect_screen_ship_buttons.append(btn)
+	_update_connect_screen_ship_buttons()
+
+	var sep3 := HSeparator.new()
+	center.add_child(sep3)
+
+	# Action buttons.
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 12)
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(btn_row)
+
+	var connect_btn := Button.new()
+	connect_btn.text = "Connect"
+	connect_btn.custom_minimum_size = Vector2(120, 36)
+	connect_btn.pressed.connect(func():
+		_spectate_requested = false
+		_attempt_server_connection()
+	)
+	btn_row.add_child(connect_btn)
+
+	var spectate_btn := Button.new()
+	spectate_btn.text = "Spectate"
+	spectate_btn.custom_minimum_size = Vector2(100, 36)
+	spectate_btn.pressed.connect(func():
+		_spectate_requested = true
+		_attempt_server_connection()
+	)
+	btn_row.add_child(spectate_btn)
+
+	var offline_btn := Button.new()
+	offline_btn.text = "Offline Mode"
+	offline_btn.custom_minimum_size = Vector2(120, 36)
+	offline_btn.pressed.connect(_start_offline_mode)
+	btn_row.add_child(offline_btn)
+
+	# Status label.
+	_connect_screen_status_label = Label.new()
+	_connect_screen_status_label.text = connection_status_message
+	_connect_screen_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_connect_screen_status_label.modulate = Color(1.0, 1.0, 0.6)
+	center.add_child(_connect_screen_status_label)
+
+	_connect_screen_layer.visible = show_connect_ui
+
+
+func _on_connect_screen_ship_selected(ship_type: int) -> void:
+	_pending_ship_type = ship_type
+	_update_connect_screen_ship_buttons()
+
+
+func _update_connect_screen_ship_buttons() -> void:
+	for i in range(_connect_screen_ship_buttons.size()):
+		var btn: Button = _connect_screen_ship_buttons[i]
+		if i == _pending_ship_type:
+			btn.modulate = Color(1.0, 0.85, 0.2)
+		else:
+			btn.modulate = Color(1.0, 1.0, 1.0)
 
 
 func _build_main_menu_ui() -> void:
@@ -2042,8 +3047,11 @@ func _open_options_menu_from_main_menu() -> void:
 		return
 	if OptionsMenuScene == null:
 		return
+	_options_menu_layer = CanvasLayer.new()
+	_options_menu_layer.layer = 100
+	add_child(_options_menu_layer)
 	_options_menu_instance = OptionsMenuScene.instantiate()
-	add_child(_options_menu_instance)
+	_options_menu_layer.add_child(_options_menu_instance)
 	if _options_menu_instance.has_signal("back_requested"):
 		_options_menu_instance.connect("back_requested", _on_options_menu_back_requested)
 	_update_main_menu_ui_visibility()
@@ -2051,6 +3059,9 @@ func _open_options_menu_from_main_menu() -> void:
 
 func _on_options_menu_back_requested() -> void:
 	_options_menu_instance = null
+	if _options_menu_layer != null:
+		_options_menu_layer.queue_free()
+		_options_menu_layer = null
 	_update_main_menu_ui_visibility()
 
 
@@ -2099,6 +3110,22 @@ func _on_server_disconnected() -> void:
 	local_ship_id = -1
 	input_history.clear()
 	snapshot_history.clear()
+	_apply_brick_tiles([])
+	_active_repel_rings.clear()
+	_active_warp_flashes.clear()
+	_active_thor_bursts.clear()
+	_exhaust_particles.clear()
+	_active_explosions.clear()
+	_kill_feed_entries.clear()
+	_chat_messages.clear()
+	for k in _ui_inventory_counts.keys():
+		_ui_inventory_counts[k] = 0
+	_prev_alive_by_ship.clear()
+	remote_ships.clear()
+	_team_scores = [0, 0]
+	_match_over = false
+	_match_winner = 0
+	_king_ship_id = -1
 	print("Disconnected from server")
 	
 	# Show connection UI again
@@ -2144,6 +3171,21 @@ func _poll_network_packets() -> void:
 				print("[NET] set freq ok freq=", f)
 			else:
 				print("[NET] set freq rejected freq=", f, " reason=", _set_freq_reason_to_string(reason))
+			continue
+		if pkt_type == DriftNet.PKT_SHIP_CHANGE_RESULT:
+			var scr: Dictionary = DriftNet.unpack_ship_change_result(bytes)
+			if scr.is_empty():
+				continue
+			var ok: bool = bool(scr.get("ok", false))
+			var st: int = int(scr.get("ship_type", 0))
+			if ok:
+				if st == 255:
+					_is_spectating = true
+					print("[NET] spectate confirmed")
+				else:
+					print("[NET] ship change ok type=", st)
+			else:
+				print("[NET] ship change rejected type=", st, " reason=", int(scr.get("reason", 0)))
 			continue
 		if pkt_type == DriftNet.PKT_WELCOME:
 			var w: Dictionary = DriftNet.unpack_welcome_packet(bytes)
@@ -2259,6 +3301,40 @@ func _poll_network_packets() -> void:
 				var td: float = float(w.get("tangent_damping", -1.0))
 				if td >= 0.0:
 					world.tangent_damping = td
+				# Optional: ship spec JSON (server.cfg-derived). Used for deterministic prediction.
+				var ship_spec_json: String = String(w.get("ship_spec_json", "")).strip_edges()
+				if ship_spec_json != "":
+					var ship_json := JSON.new()
+					var ship_parse_err := ship_json.parse(ship_spec_json)
+					if ship_parse_err != OK or typeof(ship_json.data) != TYPE_DICTIONARY:
+						on_desync_detected("handshake_ship_spec_parse_failed", {
+							"parse_err": int(ship_parse_err),
+							"ship_spec_json_len": int(ship_spec_json.length()),
+						})
+						push_error("Ship spec JSON parse failed from welcome packet")
+						connection_status_message = "Ship config mismatch with server."
+						show_connect_ui = true
+						allow_offline_mode = false
+						is_connected = false
+						_update_ui_visibility()
+						if enet_peer != null:
+							enet_peer.close()
+							enet_peer = null
+						return
+					world.set_ship_spec(ship_json.data)
+				# Optional: all ship specs JSON array (per-ship-type selection).
+				var all_specs_json: String = String(w.get("all_ship_specs_json", "")).strip_edges()
+				if all_specs_json != "":
+					var all_json := JSON.new()
+					var all_parse_err := all_json.parse(all_specs_json)
+					if all_parse_err == OK and typeof(all_json.data) == TYPE_ARRAY:
+						var specs_arr: Array[Dictionary] = []
+						for item in (all_json.data as Array):
+							if typeof(item) == TYPE_DICTIONARY:
+								specs_arr.append(item)
+							else:
+								specs_arr.append({})
+						world.set_all_ship_specs(specs_arr)
 				if DEBUG_NET:
 					print("[NET] assigned ship_id=", local_ship_id)
 				# Reset local baseline.
@@ -2269,6 +3345,11 @@ func _poll_network_packets() -> void:
 				authoritative_tick = -1
 				authoritative_ship_state = null
 				has_authoritative = false
+				# Apply ship selection or spectate request made on the connect screen.
+				if _spectate_requested:
+					_send_ship_change_request(255)
+				elif _pending_ship_type != 0:
+					_send_ship_change_request(_pending_ship_type)
 			continue
 
 		if pkt_type == DriftNet.PKT_PRIZE_EVENT:
@@ -2279,6 +3360,67 @@ func _poll_network_packets() -> void:
 				if _prize_audio != null and _prize_audio.stream != null:
 					_prize_audio.play()
 				continue
+
+		if pkt_type == DriftNet.PKT_KILL_EVENT:
+			var ke: Dictionary = DriftNet.unpack_kill_event(bytes)
+			if not ke.is_empty():
+				var a_name: String = String(ke.get("attacker_name", "???"))
+				var v_name: String = String(ke.get("victim_name", "???"))
+				var wt: int = int(ke.get("weapon_type", 0))
+				var weapon_label: String = "killed"
+				if wt == 1:
+					weapon_label = "bombed"
+				elif wt == 2:
+					weapon_label = "mined"
+				var line: String = "%s %s %s" % [a_name, weapon_label, v_name]
+				var expire_tick: int = (int(latest_snapshot.tick) if latest_snapshot != null else 0) + KILL_FEED_DURATION_TICKS
+				_kill_feed_entries.append({"text": line, "color": 3, "expire_tick": expire_tick})
+				if _kill_feed_entries.size() > KILL_FEED_MAX:
+					_kill_feed_entries = _kill_feed_entries.slice(_kill_feed_entries.size() - KILL_FEED_MAX)
+			continue
+
+		if pkt_type == DriftNet.PKT_CHAT_BROADCAST:
+			var cm: Dictionary = DriftNet.unpack_chat_broadcast(bytes)
+			if not cm.is_empty():
+				var sender: String = String(cm.get("sender_name", ""))
+				var ctype: int = int(cm.get("chat_type", 0))
+				var txt: String = String(cm.get("text", ""))
+				var prefix: String = ""
+				var color_idx: int = 0  # white
+				if ctype == DriftNet.CHAT_TYPE_TEAM:
+					prefix = "[TEAM] "
+					color_idx = 1  # green
+				elif ctype == DriftNet.CHAT_TYPE_PRIVATE:
+					prefix = "[PM] "
+					color_idx = 5  # purple
+				elif ctype == DriftNet.CHAT_TYPE_ARENA:
+					prefix = "[ARENA] "
+					color_idx = 4  # orange
+				var line: String = "%s%s: %s" % [prefix, sender, txt]
+				var expire_tick: int = (int(latest_snapshot.tick) if latest_snapshot != null else 0) + CHAT_DISPLAY_DURATION_TICKS
+				_chat_messages.append({"text": line, "color": color_idx, "expire_tick": expire_tick})
+				if _chat_messages.size() > CHAT_MAX_DISPLAY * 2:
+					_chat_messages = _chat_messages.slice(_chat_messages.size() - CHAT_MAX_DISPLAY)
+			continue
+
+		if pkt_type == DriftNet.PKT_SCORE_EVENT:
+			var se: Dictionary = DriftNet.unpack_score_event(bytes)
+			if not se.is_empty():
+				_team_scores[0] = int(se.get("team1_score", 0))
+				_team_scores[1] = int(se.get("team2_score", 0))
+				_match_over = bool(se.get("match_over", false))
+				_match_winner = int(se.get("winner_team", 0))
+				var scorer: int = int(se.get("scoring_team", 0))
+				if bool(se.get("match_reset", false)):
+					_match_over = false
+					_match_winner = 0
+				if scorer > 0:
+					var score_line: String = "Team %d scores! (%d-%d)" % [scorer, _team_scores[0], _team_scores[1]]
+					var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+					_kill_feed_entries.append({"text": score_line, "color": 2, "expire_tick": now_tick + KILL_FEED_DURATION_TICKS})
+					if _kill_feed_entries.size() > KILL_FEED_MAX:
+						_kill_feed_entries = _kill_feed_entries.slice(_kill_feed_entries.size() - KILL_FEED_MAX)
+			continue
 
 		if pkt_type == DriftNet.PKT_SNAPSHOT:
 			var snap_dict: Dictionary = DriftNet.unpack_snapshot_packet(bytes)
@@ -2326,6 +3468,48 @@ func _set_freq_reason_to_string(reason: int) -> String:
 			return "NOT_ALLOWED"
 		_:
 			return "UNKNOWN"
+
+
+func _send_ship_change_request(desired_type: int) -> void:
+	if enet_peer == null or local_ship_id < 0:
+		return
+	var packet: PackedByteArray = DriftNet.pack_ship_change_request(local_ship_id, desired_type)
+	enet_peer.set_transfer_channel(NET_CHANNEL)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_target_peer(1) # server
+	enet_peer.put_packet(packet)
+	print("[NET] requesting ship change to type=", desired_type)
+
+
+func _send_chat_message() -> void:
+	if enet_peer == null or local_ship_id < 0 or _chat_input_text.strip_edges().is_empty():
+		return
+	var text: String = _chat_input_text.strip_edges()
+	var chat_type: int = DriftNet.CHAT_TYPE_PUBLIC
+	var target_name: String = ""
+	# Chat command parsing.
+	if text.begins_with("/team ") or text.begins_with("/t "):
+		chat_type = DriftNet.CHAT_TYPE_TEAM
+		text = text.substr(text.find(" ") + 1).strip_edges()
+	elif text.begins_with("/priv ") or text.begins_with("/pm "):
+		chat_type = DriftNet.CHAT_TYPE_PRIVATE
+		var rest: String = text.substr(text.find(" ") + 1).strip_edges()
+		var space_idx: int = rest.find(" ")
+		if space_idx > 0:
+			target_name = rest.left(space_idx)
+			text = rest.substr(space_idx + 1).strip_edges()
+		else:
+			return  # No message body after target name.
+	elif text.begins_with("/arena "):
+		chat_type = DriftNet.CHAT_TYPE_ARENA
+		text = text.substr(text.find(" ") + 1).strip_edges()
+	if text.is_empty():
+		return
+	var packet: PackedByteArray = DriftNet.pack_chat_message(local_ship_id, chat_type, text, target_name)
+	enet_peer.set_transfer_channel(NET_CHANNEL)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_target_peer(1)
+	enet_peer.put_packet(packet)
 
 
 func _update_connection_state() -> void:
@@ -2474,6 +3658,22 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 			if b == null:
 				continue
 			authoritative_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
+	# Authoritative bombs (render remote bombs; local bombs are predicted).
+	authoritative_bombs.clear()
+	if snap_dict.has("bombs") and (snap_dict.get("bombs") is Array):
+		var bbs: Array = snap_dict.get("bombs")
+		for bb in bbs:
+			if bb == null:
+				continue
+			authoritative_bombs.append(DriftTypes.DriftBombState.new(int(bb.id), int(bb.owner_id), int(bb.level), bb.position, bb.velocity, int(bb.spawn_tick), int(bb.die_tick), int(bb.bounces_left), bool(bb.is_emp)))
+	# Authoritative mines (render remote mines; local mines are predicted).
+	authoritative_mines.clear()
+	if snap_dict.has("mines") and (snap_dict.get("mines") is Array):
+		var ms: Array = snap_dict.get("mines")
+		for m in ms:
+			if m == null:
+				continue
+			authoritative_mines.append(DriftTypes.DriftMineState.new(int(m.id), int(m.owner_id), int(m.level), m.position, int(m.spawn_tick), int(m.die_tick), bool(m.triggered), int(m.triggered_by_ship_id), int(m.triggered_tick)))
 	# Authoritative prizes (render only; no client simulation).
 	authoritative_prizes.clear()
 	if snap_dict.has("prizes") and (snap_dict.get("prizes") is Array):
@@ -2489,6 +3689,47 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	# (which consumes latest_snapshot) can draw prize dots.
 	if latest_snapshot != null:
 		latest_snapshot.prizes = authoritative_prizes
+
+	# Authoritative flag state (CTF).
+	authoritative_flags.clear()
+	if snap_dict.has("flags") and (snap_dict.get("flags") is Array):
+		for fl in (snap_dict.get("flags") as Array):
+			if fl != null and fl is DriftTypes.DriftFlagState:
+				authoritative_flags.append(fl)
+
+	# Radar ships: lightweight out-of-AOI ship positions for minimap.
+	if latest_snapshot != null:
+		latest_snapshot.radar_ships = snap_dict.get("radar_ships", [])
+		latest_snapshot.decoys = snap_dict.get("decoys", [])
+		latest_snapshot.bricks = snap_dict.get("bricks", [])
+
+	# Spawn effect visuals from authoritative events (remote ships' repels, warps, etc.).
+	for ee in snap_dict.get("effect_events", []):
+		var ee_ship_id: int = int(ee.get("ship_id", -1))
+		var ee_pos := Vector2(float(ee.get("px", 0.0)), float(ee.get("py", 0.0)))
+		# Skip local ship — local prediction already spawned it.
+		if ee_ship_id == local_ship_id:
+			continue
+		match StringName(ee.get("type", "")):
+			&"repel":
+				_active_repel_rings.append({"pos": ee_pos, "start_tick": snap_tick})
+			&"warp":
+				_active_warp_flashes.append({"pos": ee_pos, "start_tick": snap_tick})
+			&"thor":
+				_active_thor_bursts.append({"pos": ee_pos, "start_tick": snap_tick})
+
+	# Apply authoritative brick tiles to TileMapSolid.
+	_apply_brick_tiles(snap_dict.get("bricks", []))
+
+	# Death transition detection: spawn explosions when ships go from alive to dead.
+	for ship_state in ships:
+		var sid: int = int(ship_state.id)
+		var was_alive: bool = bool(_prev_alive_by_ship.get(sid, true))
+		var is_dead: bool = int(ship_state.dead_until_tick) > 0 and int(snap_tick) < int(ship_state.dead_until_tick)
+		if was_alive and is_dead:
+			_active_explosions.append({"pos": ship_state.position, "start_tick": snap_tick, "tier": 2})
+		_prev_alive_by_ship[sid] = not is_dead
+
 	# Track remote ships
 	remote_ships.clear()
 	var local_pos_found: bool = false
@@ -2500,6 +3741,15 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 			authoritative_tick = snap_tick
 			authoritative_ship_state = ship_state
 			has_authoritative = true
+			# Sync inventory counts from auth state — covers both pickup and usage.
+			_ui_inventory_counts[&"repel"] = int(ship_state.repel_count)
+			_ui_inventory_counts[&"burst"] = int(ship_state.burst_count)
+			_ui_inventory_counts[&"warp"] = int(ship_state.warp_count)
+			_ui_inventory_counts[&"thor"] = int(ship_state.thor_count)
+			_ui_inventory_counts[&"rocket"] = int(ship_state.rocket_count)
+			_ui_inventory_counts[&"decoy"] = int(ship_state.decoy_count)
+			_ui_inventory_counts[&"brick"] = int(ship_state.brick_count)
+			_ui_inventory_counts[&"portal"] = int(ship_state.portal_count)
 			snapshot_history[snap_tick] = DriftTypes.DriftShipState.new(
 				ship_state.id,
 				ship_state.position,
@@ -2525,7 +3775,7 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 						int(ship_state.energy_recharge_fp_accum),
 						int(ship_state.energy_drain_fp_accum)
 			)
-			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets)
+			_reconcile_to_authoritative_snapshot(snap_tick, ship_state, authoritative_bullets, authoritative_bombs, authoritative_mines)
 		else:
 			# Store a deep copy for remote rendering
 			var state_copy = DriftTypes.DriftShipState.new(
@@ -2553,8 +3803,16 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 				int(ship_state.energy_recharge_fp_accum),
 				int(ship_state.energy_drain_fp_accum)
 			)
+			state_copy.ship_type = int(ship_state.ship_type)
 			remote_ships[ship_state.id] = state_copy
 			snap_b_ships[ship_state.id] = state_copy
+			# Exhaust for remote ships: emit a burst to smooth 10Hz snapshots.
+			if int(ship_state.id) != local_ship_id and not bool(ship_state.cloak_on):
+				var spd: float = ship_state.velocity.length()
+				if spd > 20.0:
+					var ab_remote: bool = bool(ship_state.afterburner_on)
+					for _ei in range(4 if ab_remote else 2):
+						_emit_exhaust(ship_state.position, ship_state.rotation + PI, ship_state.velocity, ab_remote)
 	remote_tick = snap_tick
 
 	# Store authoritative ball state from snapshot
@@ -2568,9 +3826,10 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		ball_velocity = snap_dict["ball_velocity"]
 	else:
 		ball_velocity = Vector2.ZERO
+	_king_ship_id = int(snap_dict.get("king_ship_id", -1))
 
 
-func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array) -> void:
+func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftTypes.DriftShipState, auth_bullets_for_tick: Array, auth_bombs_for_tick: Array, auth_mines_for_tick: Array) -> void:
 	# If the snapshot tick is ahead of our current tick (e.g. after reconnect),
 	# snap to the authoritative tick/state and continue from there.
 	var current_tick: int = world.tick
@@ -2591,12 +3850,18 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.bomb_level = int(auth_state.bomb_level)
 	local_state.multi_fire_enabled = bool(auth_state.multi_fire_enabled)
 	local_state.bullet_bounce_bonus = int(auth_state.bullet_bounce_bonus)
+	local_state.shrapnel_bonus = int(auth_state.shrapnel_bonus)
+	local_state.rotation_bonus = int(auth_state.rotation_bonus)
+	local_state.bomb_proximity_enabled = bool(auth_state.bomb_proximity_enabled)
+	local_state.rocket_boost_until_tick = int(auth_state.rocket_boost_until_tick)
 	local_state.engine_shutdown_until_tick = int(auth_state.engine_shutdown_until_tick)
 	local_state.top_speed_bonus = int(auth_state.top_speed_bonus)
 	local_state.thruster_bonus = int(auth_state.thruster_bonus)
 	local_state.recharge_bonus = int(auth_state.recharge_bonus)
 	local_state.energy = int(auth_state.energy)
 	local_state.next_bullet_tick = int(auth_state.next_bullet_tick)
+	local_state.next_bomb_tick = int(auth_state.next_bomb_tick)
+	local_state.next_mine_tick = int(auth_state.next_mine_tick)
 	local_state.energy_current = int(auth_state.energy_current)
 	local_state.energy_max = int(auth_state.energy_max)
 	local_state.energy_recharge_rate_per_sec = int(auth_state.energy_recharge_rate_per_sec)
@@ -2610,11 +3875,22 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.antiwarp_on = bool(auth_state.antiwarp_on)
 	local_state.in_safe_zone = bool(auth_state.in_safe_zone)
 	local_state.damage_protect_until_tick = int(auth_state.damage_protect_until_tick)
+	local_state.ship_type = int(auth_state.ship_type)
+	local_state.repel_count = int(auth_state.repel_count)
+	local_state.burst_count = int(auth_state.burst_count)
+	local_state.warp_count = int(auth_state.warp_count)
+	local_state.thor_count = int(auth_state.thor_count)
+	local_state.rocket_count = int(auth_state.rocket_count)
+	local_state.decoy_count = int(auth_state.decoy_count)
+	local_state.brick_count = int(auth_state.brick_count)
+	local_state.portal_count = int(auth_state.portal_count)
+	local_state.shields_until_tick = int(auth_state.shields_until_tick)
+	local_state.super_shields = bool(auth_state.super_shields)
 
 	# 2) Rewind/snap world.tick to the snapshot tick.
 	world.tick = snapshot_tick
 
-	# Reset predicted bullets to the authoritative baseline for the LOCAL player.
+	# Reset predicted projectiles to the authoritative baseline for the LOCAL player.
 	if world != null:
 		world.bullets.clear()
 		for b in auth_bullets_for_tick:
@@ -2623,6 +3899,20 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 			if int(b.owner_id) != local_ship_id:
 				continue
 			world.bullets[int(b.id)] = DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left))
+		world.bombs.clear()
+		for bb in auth_bombs_for_tick:
+			if bb == null:
+				continue
+			if int(bb.owner_id) != local_ship_id:
+				continue
+			world.bombs[int(bb.id)] = DriftTypes.DriftBombState.new(int(bb.id), int(bb.owner_id), int(bb.level), bb.position, bb.velocity, int(bb.spawn_tick), int(bb.die_tick), int(bb.bounces_left), bool(bb.is_emp))
+		world.mines.clear()
+		for mm in auth_mines_for_tick:
+			if mm == null:
+				continue
+			if int(mm.owner_id) != local_ship_id:
+				continue
+			world.mines[int(mm.id)] = DriftTypes.DriftMineState.new(int(mm.id), int(mm.owner_id), int(mm.level), mm.position, int(mm.spawn_tick), int(mm.die_tick), bool(mm.triggered), int(mm.triggered_by_ship_id), int(mm.triggered_tick))
 		# Ensure edge-triggered fire state matches the snapshot baseline.
 		var base_cmd: DriftTypes.DriftInputCmd = input_history.get(snapshot_tick, DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false))
 		world._prev_fire_by_ship[local_ship_id] = bool(base_cmd.fire_primary)
@@ -2674,7 +3964,7 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 		return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict)
 	var state: DriftTypes.DriftShipState = world.ships.get(local_ship_id)
 	if state != null:
-		ships_dict[local_ship_id] = DriftTypes.DriftShipState.new(
+		var snap_state := DriftTypes.DriftShipState.new(
 			state.id,
 			state.position,
 			state.velocity,
@@ -2691,6 +3981,8 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 			state.recharge_bonus,
 			state.energy
 		)
+		snap_state.ship_type = state.ship_type
+		ships_dict[local_ship_id] = snap_state
 	# Include predicted local bullets for debug/prediction.
 	var local_bullets: Array = []
 	if world != null and typeof(world.bullets) == TYPE_DICTIONARY:
@@ -2703,7 +3995,10 @@ func _build_snapshot_from_current_world() -> DriftTypes.DriftWorldSnapshot:
 			if int(b.owner_id) != local_ship_id:
 				continue
 			local_bullets.append(DriftTypes.DriftBulletState.new(int(b.id), int(b.owner_id), int(b.level), b.position, b.velocity, int(b.spawn_tick), int(b.die_tick), int(b.bounces_left)))
-	return DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict, Vector2.ZERO, Vector2.ZERO, -1, local_bullets)
+	var snap := DriftTypes.DriftWorldSnapshot.new(world.tick, ships_dict, Vector2.ZERO, Vector2.ZERO, -1, local_bullets)
+	if world != null and typeof(world.prizes) == TYPE_DICTIONARY:
+		snap.prizes = world.prizes.values()
+	return snap
 
 
 func _prune_input_history(upto_tick_inclusive: int) -> void:

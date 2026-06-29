@@ -122,11 +122,13 @@ var _right_stack: VBoxContainer = null
 var _left_counts: Dictionary = {
 	&"burst": 0,
 	&"repel": 0,
+	&"warp": 0,
 	&"decoy": 0,
 	&"thor": 0,
 	&"brick": 0,
 	&"rocket": 0,
 	&"teleport": 0,
+	&"portal": 0,
 }
 
 var _left_slots: Array = [] # Array[Dictionary]
@@ -375,6 +377,11 @@ func set_minimap_static(meta: Dictionary, solid_cells: Array, safe_cells: Array)
 		_minimap.call("set_static_geometry", meta, solid_cells, safe_cells)
 
 
+func set_minimap_goal_zones(zones: Array) -> void:
+	if _minimap != null and _minimap.has_method("set_goal_zones"):
+		_minimap.call("set_goal_zones", zones)
+
+
 func set_minimap_dynamic(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
 	if _minimap != null and _minimap.has_method("set_dynamic_state"):
 		_minimap.call("set_dynamic_state", snapshot, local_ship_id, my_freq, player_world_pos, xradar_active)
@@ -607,7 +614,7 @@ func _build_edge_icon_stacks() -> void:
 	_right_slots.clear()
 
 	# Left inventory stack (fixed order; always visible; per-slot slide when inactive).
-	var left_order: Array = [&"burst", &"repel", &"decoy", &"thor", &"brick", &"rocket", &"teleport"]
+	var left_order: Array = [&"burst", &"repel", &"warp", &"portal", &"decoy", &"thor", &"brick", &"rocket", &"teleport"]
 	for item in left_order:
 		var slot := _make_icon_slot(true)
 		slot["item"] = item
@@ -1083,7 +1090,9 @@ func _update_right_islands() -> void:
 	if spawn_protect:
 		tokens.append("SPAWN")
 	if dead:
-		tokens.append("DEAD")
+		var ticks_left: int = int(ship_dead_until_tick) - int(ship_tick)
+		var secs_left: float = float(ticks_left) / 60.0
+		tokens.append("DEAD %.1fs" % secs_left)
 
 	var status_text := " ".join(tokens)
 	if right_status_label != null:

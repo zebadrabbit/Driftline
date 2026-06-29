@@ -16,7 +16,7 @@ mouse_filter = 0
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-color = Color(0, 0, 0, 0.45)
+color = Color(0, 0, 0, 0.5)
 mouse_filter = 0
 
 [node name="MenuPanel" type="PanelContainer" parent="Root"]
@@ -25,36 +25,47 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -220.0
-offset_top = -170.0
-offset_right = 220.0
-offset_bottom = 170.0
+offset_left = -140.0
+offset_top = -150.0
+offset_right = 140.0
+offset_bottom = 150.0
 mouse_filter = 1
 
 [node name="VBox" type="VBoxContainer" parent="Root/MenuPanel"]
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 14.0
-offset_top = 12.0
-offset_right = -14.0
-offset_bottom = -12.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = -16.0
+theme_override_constants/separation = 8
 
 [node name="Title" type="Label" parent="Root/MenuPanel/VBox"]
-text = "Menu"
+text = "PAUSED"
 horizontal_alignment = 1
 
-[node name="Bindings" type="RichTextLabel" parent="Root/MenuPanel/VBox"]
-custom_minimum_size = Vector2(0, 200)
-fit_content = true
-bbcode_enabled = false
-scroll_active = false
+[node name="HSep" type="HSeparator" parent="Root/MenuPanel/VBox"]
 
-[node name="SaveReplay" type="Button" parent="Root/MenuPanel/VBox"]
-text = "Save Bug Report"
-
-[node name="Resume" type="Button" parent="Root/MenuPanel/VBox"]
+[node name="ResumeButton" type="Button" parent="Root/MenuPanel/VBox"]
 text = "Resume"
 
-[connection signal="pressed" from="Root/MenuPanel/VBox/SaveReplay" to="." method="_on_save_replay_pressed"]
-[connection signal="pressed" from="Root/MenuPanel/VBox/Resume" to="." method="_on_resume_pressed"]
+[node name="OptionsButton" type="Button" parent="Root/MenuPanel/VBox"]
+text = "Options"
+
+[node name="BugReportButton" type="Button" parent="Root/MenuPanel/VBox"]
+text = "Save Bug Report"
+
+[node name="HSep2" type="HSeparator" parent="Root/MenuPanel/VBox"]
+
+[node name="DisconnectButton" type="Button" parent="Root/MenuPanel/VBox"]
+text = "Disconnect"
+
+[node name="QuitButton" type="Button" parent="Root/MenuPanel/VBox"]
+text = "Quit to Desktop"
+
+[connection signal="pressed" from="Root/MenuPanel/VBox/ResumeButton" to="." method="_on_resume_pressed"]
+[connection signal="pressed" from="Root/MenuPanel/VBox/OptionsButton" to="." method="_on_options_pressed"]
+[connection signal="pressed" from="Root/MenuPanel/VBox/BugReportButton" to="." method="_on_bug_report_pressed"]
+[connection signal="pressed" from="Root/MenuPanel/VBox/DisconnectButton" to="." method="_on_disconnect_pressed"]
+[connection signal="pressed" from="Root/MenuPanel/VBox/QuitButton" to="." method="_on_quit_pressed"]

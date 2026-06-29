@@ -43,6 +43,11 @@ func set_static_geometry(meta: Dictionary, solid_cells: Array, safe_cells: Array
 		_view.call("set_static_geometry", meta, solid_cells, safe_cells)
 
 
+func set_goal_zones(zones: Array) -> void:
+	if _view != null and _view.has_method("set_goal_zones"):
+		_view.call("set_goal_zones", zones)
+
+
 func set_dynamic_state(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
 	# Coordinates label is intentionally separate from minimap rendering.
 	if _coord_label != null:

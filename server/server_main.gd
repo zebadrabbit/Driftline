@@ -22,6 +22,7 @@ const DriftShipConfig = preload("res://server/ship_config.gd")
 const DriftHash = preload("res://shared/drift_hash.gd")
 const DriftPrizeConfig = preload("res://server/prize_config.gd")
 const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
+const DriftShipRegistry = preload("res://shared/drift_ship_registry.gd")
 
 const SERVER_PORT: int = 5000
 const MAX_CLIENTS: int = 8
@@ -58,6 +59,7 @@ var latest_snapshot: DriftTypes.DriftWorldSnapshot
 
 # Buffer prize events between snapshot sends.
 var _pending_prize_events: Array = []
+var _pending_effect_events: Array = []
 
 var enet_peer: ENetMultiplayerPeer
 var next_ship_id: int = 1
@@ -69,6 +71,7 @@ var map_version: int = 0
 
 var wall_restitution: float = DriftConstants.SHIP_WALL_RESTITUTION
 var canonical_ruleset: Dictionary = {}
+var ship_registry: DriftShipRegistry = null
 
 var quit_flag_path: String = QUIT_FLAG_PATH
 var quit_after_seconds: float = -1.0
@@ -93,8 +96,33 @@ var ship_id_by_peer: Dictionary = {} # Dictionary[int, int]
 # ship_id -> last known input (fallback when packets are missing)
 var last_cmd_by_ship: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
 
+# Chat rate limiting: peer_id -> Array[int] of recent chat tick timestamps.
+var _chat_ticks_by_peer: Dictionary = {} # Dictionary[int, Array]
+const CHAT_RATE_LIMIT_MSGS: int = 3
+const CHAT_RATE_LIMIT_TICKS: int = 60  # 1 second at 60Hz
+
 # ship_id -> last tick when freq was manually changed
 var last_freq_change_tick_by_ship: Dictionary = {} # Dictionary[int, int]
+
+# Powerball / match scoring.
+var _team_scores: Dictionary = {1: 0, 2: 0}
+const SCORE_LIMIT: int = 5
+var _match_over: bool = false
+var _match_winner: int = 0
+var _match_reset_tick: int = -1
+const MATCH_RESET_DELAY_TICKS: int = 600  # 10s at 60Hz
+# Ship IDs that belong to spectator peers (no world entity).
+var _spectator_ship_ids: Dictionary = {}  # ship_id -> true
+
+# Each entry: {pos: Vector2, radius: float, team: int}  (team = owner of this goal)
+var _goal_zones: Array = []
+# CTF flags: Array[DriftFlagState] (at most 2 entries, one per team).
+var _flags: Array = []
+# Home position per team (Vector2). Used for auto-return and capture check.
+var _flag_homes: Dictionary = {}  # team -> Vector2
+const FLAG_PICKUP_RADIUS: float = 40.0
+const FLAG_CAPTURE_RADIUS: float = 64.0
+const FLAG_RETURN_DELAY_TICKS: int = 600  # 10s
 
 
 func _initialize() -> void:
@@ -281,10 +309,6 @@ func _parse_user_args() -> void:
 				ship_spec_weapons = false
 
 
-func _load_map(path: String) -> void:
-	push_warning("_load_map() is deprecated; use _load_selected_map_from_config()")
-
-
 func _load_selected_map_from_config() -> bool:
 	var cfg_res: Dictionary = DriftServerConfig.load_config()
 	if not bool(cfg_res.get("ok", false)):
@@ -324,9 +348,6 @@ func _load_selected_map_from_config() -> bool:
 		ruleset_json_for_hash = JSON.stringify(canonical_ruleset)
 	var ship_res: Dictionary = DriftShipConfig.load_config()
 	if bool(ship_res.get("ok", false)):
-		# Inject ship spec into the authoritative world for deterministic spawn init.
-		# For now DriftWorld holds a single ship spec (no per-ship-type selection yet),
-		# so we pick Warbird as the canonical default.
 		var ships_obj: Dictionary = ship_res.get("ships", {})
 		var warbird_spec: Dictionary = ships_obj.get("Warbird", {})
 		if warbird_spec != null and typeof(warbird_spec) == TYPE_DICTIONARY:
@@ -339,10 +360,33 @@ func _load_selected_map_from_config() -> bool:
 		var ships_hash: int = int(ship_res.get("ships_hash", 0))
 		var joined: String = "ruleset_json=" + ruleset_json_for_hash + "\nships_hash=" + str(ships_hash)
 		_replay_ruleset_hash = int(DriftHash.int31_from_string_sha256(joined))
+
+		# Use server.cfg as source of truth for all 8 ship specs when all are present.
+		var cfg_specs: Array[Dictionary] = []
+		for sname in DriftShipConfig.SHIP_NAMES_IN_ORDER:
+			cfg_specs.append(ships_obj.get(sname, {}) as Dictionary)
+		var cfg_all_present: bool = cfg_specs.all(func(s): return not s.is_empty())
+		if cfg_all_present:
+			world.set_all_ship_specs(cfg_specs)
+			print("[SHIPS] loaded all 8 ship specs from server.cfg")
+		else:
+			ship_registry = DriftShipRegistry.new()
+			if ship_registry.load_all_specs():
+				world.set_all_ship_specs(ship_registry.specs)
+				print("[SHIPS] loaded all 8 ship specs from registry (server.cfg incomplete)")
+			else:
+				push_warning("[SHIPS] some ship specs failed to load; per-ship-type selection may be incomplete")
 	else:
 		world.set_ship_spec({})
 		# If ship config fails to load (missing server.cfg), keep hash based only on ruleset.
 		_replay_ruleset_hash = int(DriftHash.int31_from_string_sha256("ruleset_json=" + ruleset_json_for_hash))
+
+		ship_registry = DriftShipRegistry.new()
+		if ship_registry.load_all_specs():
+			world.set_all_ship_specs(ship_registry.specs)
+			print("[SHIPS] loaded all 8 ship specs from registry")
+		else:
+			push_warning("[SHIPS] some ship specs failed to load; per-ship-type selection may be incomplete")
 
 	# Strict: no fallback map. Missing/invalid is fatal.
 	var res: Dictionary = DriftMapLoader.load_map(selected_path)
@@ -411,10 +455,28 @@ func _load_selected_map_from_config() -> bool:
 	print("Map checksum (sha256): ", DriftMap.bytes_to_hex(map_checksum))
 	print("Map version: ", map_version)
 	var spawn_count: int = 0
+	_goal_zones.clear()
+	_flags.clear()
+	_flag_homes.clear()
 	for e in map_entities:
-		if typeof(e) == TYPE_DICTIONARY and String((e as Dictionary).get("type", "")) == "spawn":
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		var etype: String = String(d.get("type", ""))
+		var tx: int = int(d.get("x", 0))
+		var ty: int = int(d.get("y", 0))
+		var eteam: int = int(d.get("team", 1))
+		var epos: Vector2 = Vector2(float(tx) + 0.5, float(ty) + 0.5) * float(DriftMap.TILE_SIZE)
+		if etype == "spawn":
 			spawn_count += 1
-	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ")")
+		elif etype == "goal" or etype == "base":
+			var grad: float = float(d.get("radius", 64.0))
+			_goal_zones.append({"pos": epos, "radius": grad, "team": eteam})
+		elif etype == "flag":
+			_flag_homes[eteam] = epos
+			var fl := DriftTypes.DriftFlagState.new(eteam, epos)
+			_flags.append(fl)
+	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ", goals=", _goal_zones.size(), ", flags=", _flags.size(), ")")
 
 	# Static map hash for replay headers (computed once).
 	_replay_map_hash = 0
@@ -492,6 +554,7 @@ func _on_peer_disconnected(peer_id: int) -> void:
 		last_cmd_by_ship.erase(ship_id)
 		last_freq_change_tick_by_ship.erase(ship_id)
 		_remove_buffered_inputs_for_ship(ship_id)
+		_spectator_ship_ids.erase(ship_id)
 
 	print("Client disconnected: ", peer_id)
 
@@ -505,6 +568,160 @@ func _respawn_ship(ship_id: int) -> void:
 	world.respawn_ship(ship_id)
 	_remove_buffered_inputs_for_ship(ship_id)
 	last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+
+
+func _check_ball_goals() -> void:
+	if world == null or _goal_zones.is_empty():
+		return
+	# Match-over: wait for reset timer.
+	if _match_over:
+		if _match_reset_tick >= 0 and world.tick >= _match_reset_tick:
+			_reset_match()
+		return
+	var ball_pos: Vector2 = world.ball.position
+	for gz in _goal_zones:
+		var gpos: Vector2 = gz.get("pos", Vector2.ZERO)
+		var grad: float = float(gz.get("radius", 64.0))
+		var gteam: int = int(gz.get("team", 1))
+		if ball_pos.distance_to(gpos) > grad:
+			continue
+		# Ball in this goal zone. Scoring team is the opponent.
+		var scorer: int = 3 - gteam  # 1→2, 2→1
+		_team_scores[scorer] = int(_team_scores.get(scorer, 0)) + 1
+		var s1: int = int(_team_scores.get(1, 0))
+		var s2: int = int(_team_scores.get(2, 0))
+		print("[SERVER] GOAL! Team %d scores. Score: %d-%d" % [scorer, s1, s2])
+		# Reset ball to arena center.
+		world.ball.position = DriftConstants.ARENA_CENTER
+		world.ball.velocity = Vector2.ZERO
+		world.ball.owner_id = -1
+		var over: bool = (s1 >= SCORE_LIMIT or s2 >= SCORE_LIMIT)
+		var winner: int = 0
+		if over:
+			winner = 1 if s1 >= SCORE_LIMIT else 2
+			_match_over = true
+			_match_winner = winner
+			_match_reset_tick = world.tick + MATCH_RESET_DELAY_TICKS
+			print("[SERVER] MATCH OVER! Winner: Team %d" % winner)
+		_broadcast_reliable(DriftNet.pack_score_event(s1, s2, scorer, over, false, winner))
+		break  # Only one goal per tick.
+
+
+func _reset_match() -> void:
+	_match_over = false
+	_match_winner = 0
+	_match_reset_tick = -1
+	_team_scores = {1: 0, 2: 0}
+	world.ball.position = DriftConstants.ARENA_CENTER
+	world.ball.velocity = Vector2.ZERO
+	world.ball.owner_id = -1
+	# Reset all flags to home positions.
+	for fl in _flags:
+		var fteam: int = int(fl.team)
+		fl.position = _flag_homes.get(fteam, fl.position)
+		fl.at_home = true
+		fl.carrier_ship_id = -1
+		fl.drop_tick = -1
+	# Clear carrier state on all ships.
+	for ship_id in world.ships.keys():
+		world.ships[ship_id].carried_flag_team = -1
+		_respawn_ship(ship_id)
+	print("[SERVER] Match reset.")
+	_broadcast_reliable(DriftNet.pack_score_event(0, 0, 0, false, true, 0))
+
+
+func _check_ctf() -> void:
+	if world == null or _flags.is_empty() or _match_over:
+		return
+	var now_tick: int = int(world.tick)
+	for fl in _flags:
+		var fteam: int = int(fl.team)
+		var enemy_team: int = 3 - fteam
+		var home: Vector2 = _flag_homes.get(fteam, fl.position)
+
+		# Auto-return dropped flag after timeout.
+		if not fl.at_home and fl.carrier_ship_id == -1:
+			if int(fl.drop_tick) >= 0 and now_tick - int(fl.drop_tick) >= FLAG_RETURN_DELAY_TICKS:
+				fl.position = home
+				fl.at_home = true
+				fl.drop_tick = -1
+				print("[SERVER] Flag team=%d auto-returned." % fteam)
+				continue
+
+		# Skip carried flags for pickup/return checks.
+		if fl.carrier_ship_id >= 0:
+			# Verify carrier still alive.
+			if world.ships.has(fl.carrier_ship_id):
+				var carrier: DriftTypes.DriftShipState = world.ships[fl.carrier_ship_id]
+				if world._ship_is_dead(carrier, now_tick):
+					# Drop flag at carrier's last position.
+					fl.position = carrier.position
+					fl.carrier_ship_id = -1
+					fl.at_home = false
+					fl.drop_tick = now_tick
+					carrier.carried_flag_team = -1
+					print("[SERVER] Flag team=%d dropped (carrier died)." % fteam)
+			else:
+				fl.carrier_ship_id = -1
+				fl.at_home = false
+				fl.drop_tick = now_tick
+			continue
+
+		# Check each ship for pickup or friendly return.
+		for sid in world.ships.keys():
+			var s: DriftTypes.DriftShipState = world.ships[sid]
+			if world._ship_is_dead(s, now_tick):
+				continue
+			var steam: int = int(s.freq)
+			var dist: float = s.position.distance_to(fl.position)
+			# Friendly ship touches own dropped flag → return it home.
+			if steam == fteam and not fl.at_home and dist <= FLAG_PICKUP_RADIUS:
+				fl.position = home
+				fl.at_home = true
+				fl.drop_tick = -1
+				print("[SERVER] Flag team=%d returned by friendly." % fteam)
+				break
+			# Enemy ship picks up flag (must be at home or dropped).
+			if steam == enemy_team and dist <= FLAG_PICKUP_RADIUS:
+				fl.carrier_ship_id = sid
+				fl.at_home = false
+				fl.drop_tick = -1
+				s.carried_flag_team = fteam
+				print("[SERVER] Flag team=%d picked up by ship %d (team %d)." % [fteam, sid, steam])
+				break
+
+	# Capture check: carrier in their own team's home base.
+	for fl in _flags:
+		if fl.carrier_ship_id < 0:
+			continue
+		if not world.ships.has(fl.carrier_ship_id):
+			continue
+		var carrier: DriftTypes.DriftShipState = world.ships[fl.carrier_ship_id]
+		if world._ship_is_dead(carrier, now_tick):
+			continue
+		var cteam: int = int(carrier.freq)  # capturing team
+		var cap_home: Vector2 = _flag_homes.get(cteam, Vector2.ZERO)
+		if carrier.position.distance_to(cap_home) <= FLAG_CAPTURE_RADIUS:
+			# Score!
+			_team_scores[cteam] = int(_team_scores.get(cteam, 0)) + 1
+			var s1: int = int(_team_scores.get(1, 0))
+			var s2: int = int(_team_scores.get(2, 0))
+			print("[SERVER] CTF CAPTURE! Team %d scores. Score: %d-%d" % [cteam, s1, s2])
+			# Return captured flag home.
+			fl.position = _flag_homes.get(int(fl.team), fl.position)
+			fl.at_home = true
+			fl.drop_tick = -1
+			carrier.carried_flag_team = -1
+			fl.carrier_ship_id = -1
+			var over: bool = (s1 >= SCORE_LIMIT or s2 >= SCORE_LIMIT)
+			var winner: int = 0
+			if over:
+				winner = 1 if s1 >= SCORE_LIMIT else 2
+				_match_over = true
+				_match_winner = winner
+				_match_reset_tick = world.tick + MATCH_RESET_DELAY_TICKS
+				print("[SERVER] MATCH OVER! Winner: Team %d" % winner)
+			_broadcast_reliable(DriftNet.pack_score_event(s1, s2, cteam, over, false, winner))
 
 
 func _poll_network_packets() -> void:
@@ -558,7 +775,15 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 			bool(input_dict.get("stealth_btn", false)),
 			bool(input_dict.get("cloak_btn", false)),
 			bool(input_dict.get("xradar_btn", false)),
-			bool(input_dict.get("antiwarp_btn", false))
+			bool(input_dict.get("antiwarp_btn", false)),
+			bool(input_dict.get("lay_mine", false)),
+			bool(input_dict.get("repel_btn", false)),
+			bool(input_dict.get("burst_btn", false)),
+			bool(input_dict.get("warp_btn", false)),
+			bool(input_dict.get("thor_btn", false)),
+			bool(input_dict.get("rocket_btn", false)),
+			bool(input_dict.get("decoy_btn", false)),
+			bool(input_dict.get("brick_btn", false))
 		)
 		return
 
@@ -575,6 +800,126 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 		var res: Dictionary = request_set_freq(ship_id, desired_freq)
 		_send_set_freq_result(sender_id, ship_id, desired_freq, res)
 		return
+
+	if pkt_type == DriftNet.PKT_SHIP_CHANGE_REQUEST:
+		var req2: Dictionary = DriftNet.unpack_ship_change_request(bytes)
+		if req2.is_empty():
+			return
+		if not ship_id_by_peer.has(sender_id):
+			return
+		var ship_id: int = int(req2.get("ship_id", -1))
+		if int(ship_id_by_peer[sender_id]) != ship_id:
+			return
+		var desired_type: int = int(req2.get("desired_ship_type", 0))
+		if desired_type == 255:  # spectate: remove ship from world, keep peer
+			if world.ships.has(ship_id):
+				world.ships.erase(ship_id)
+			_spectator_ship_ids[ship_id] = true
+			var sp_pkt: PackedByteArray = DriftNet.pack_ship_change_result(ship_id, true, 255, DriftNet.SHIP_CHANGE_REASON_NONE)
+			enet_peer.set_transfer_channel(NET_CHANNEL)
+			enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+			enet_peer.set_target_peer(int(sender_id))
+			enet_peer.put_packet(sp_pkt)
+			return
+		var ok: bool = false
+		var reason: int = DriftNet.SHIP_CHANGE_REASON_NONE
+		if desired_type < 0 or desired_type >= DriftShipRegistry.SHIP_COUNT:
+			reason = DriftNet.SHIP_CHANGE_REASON_INVALID_TYPE
+		else:
+			ok = world.change_ship_type(ship_id, desired_type)
+			if ok:
+				_remove_buffered_inputs_for_ship(ship_id)
+				last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+			else:
+				reason = DriftNet.SHIP_CHANGE_REASON_INVALID_TYPE
+		var result_pkt: PackedByteArray = DriftNet.pack_ship_change_result(ship_id, ok, desired_type, reason)
+		enet_peer.set_transfer_channel(NET_CHANNEL)
+		enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+		enet_peer.set_target_peer(int(sender_id))
+		enet_peer.put_packet(result_pkt)
+		return
+
+	if pkt_type == DriftNet.PKT_HELLO:
+		if ship_id_by_peer.has(sender_id):
+			var sid_h: int = int(ship_id_by_peer[sender_id])
+			var uname: String = DriftNet.unpack_hello(bytes).strip_edges().left(32)
+			if uname != "" and world.ships.has(sid_h):
+				world.ships[sid_h].username = uname
+		return
+
+	if pkt_type == DriftNet.PKT_CHAT_MESSAGE:
+		_handle_chat_message(sender_id, bytes)
+		return
+
+
+func _handle_chat_message(sender_id: int, bytes: PackedByteArray) -> void:
+	if not ship_id_by_peer.has(sender_id):
+		return
+	var msg: Dictionary = DriftNet.unpack_chat_message(bytes)
+	if msg.is_empty():
+		return
+	var ship_id: int = int(ship_id_by_peer[sender_id])
+	if int(msg.get("ship_id", -1)) != ship_id:
+		return
+	var text: String = String(msg.get("text", "")).strip_edges()
+	if text.is_empty() or text.length() > 200:
+		return
+	var chat_type: int = int(msg.get("chat_type", DriftNet.CHAT_TYPE_PUBLIC))
+
+	# Rate limit: max CHAT_RATE_LIMIT_MSGS per CHAT_RATE_LIMIT_TICKS.
+	var now_tick: int = int(world.tick) if world != null else 0
+	if not _chat_ticks_by_peer.has(sender_id):
+		_chat_ticks_by_peer[sender_id] = []
+	var ticks_arr: Array = _chat_ticks_by_peer[sender_id]
+	# Prune old entries.
+	while ticks_arr.size() > 0 and (now_tick - int(ticks_arr[0])) > CHAT_RATE_LIMIT_TICKS:
+		ticks_arr.pop_front()
+	if ticks_arr.size() >= CHAT_RATE_LIMIT_MSGS:
+		return  # Rate limited, silently drop.
+	ticks_arr.append(now_tick)
+
+	var sender_name: String = ""
+	var sender_freq: int = 0
+	if world != null and world.ships.has(ship_id):
+		sender_name = String(world.ships.get(ship_id).username)
+		sender_freq = int(world.ships.get(ship_id).freq)
+
+	var broadcast_pkt: PackedByteArray = DriftNet.pack_chat_broadcast(sender_name, chat_type, text, sender_freq)
+
+	match chat_type:
+		DriftNet.CHAT_TYPE_PUBLIC, DriftNet.CHAT_TYPE_ARENA:
+			_broadcast_reliable(broadcast_pkt)
+		DriftNet.CHAT_TYPE_TEAM:
+			# Send only to players on the same freq.
+			if enet_peer == null:
+				return
+			enet_peer.set_transfer_channel(NET_CHANNEL)
+			enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+			for peer_id in ship_id_by_peer.keys():
+				var sid: int = int(ship_id_by_peer[peer_id])
+				if world != null and world.ships.has(sid):
+					if int(world.ships.get(sid).freq) == sender_freq:
+						enet_peer.set_target_peer(int(peer_id))
+						enet_peer.put_packet(broadcast_pkt)
+		DriftNet.CHAT_TYPE_PRIVATE:
+			# Find target player by name.
+			var target_name: String = String(msg.get("target_name", "")).strip_edges()
+			if target_name.is_empty():
+				return
+			if enet_peer == null:
+				return
+			enet_peer.set_transfer_channel(NET_CHANNEL)
+			enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+			# Send to target and back to sender.
+			for peer_id in ship_id_by_peer.keys():
+				var sid: int = int(ship_id_by_peer[peer_id])
+				if world != null and world.ships.has(sid):
+					var name_check: String = String(world.ships.get(sid).username)
+					if name_check == target_name or int(peer_id) == int(sender_id):
+						enet_peer.set_target_peer(int(peer_id))
+						enet_peer.put_packet(broadcast_pkt)
+		_:
+			_broadcast_reliable(broadcast_pkt)
 
 
 func _send_set_freq_result(peer_id: int, ship_id: int, desired_freq: int, res: Dictionary) -> void:
@@ -651,6 +996,32 @@ func _step_authoritative_tick() -> void:
 		for ev in (world.prize_events as Array):
 			_pending_prize_events.append(ev)
 
+	# Collect effect events (repel, etc.) from this tick.
+	if world != null and (world.effect_events is Array) and world.effect_events.size() > 0:
+		for ev in (world.effect_events as Array):
+			_pending_effect_events.append(ev)
+
+	# Broadcast kill events from this tick.
+	if world != null and world._pending_kill_events.size() > 0:
+		for ke in world._pending_kill_events:
+			var a_id: int = int(ke.get("attacker_id", -1))
+			var v_id: int = int(ke.get("victim_id", -1))
+			var wt: int = int(ke.get("weapon_type", 0))
+			var a_name: String = ""
+			var v_name: String = ""
+			if world.ships.has(a_id):
+				a_name = String(world.ships.get(a_id).username)
+			if world.ships.has(v_id):
+				v_name = String(world.ships.get(v_id).username)
+			var pkt: PackedByteArray = DriftNet.pack_kill_event(a_id, v_id, wt, a_name, v_name)
+			_broadcast_reliable(pkt)
+		world._pending_kill_events.clear()
+
+	# Powerball goal detection and match flow.
+	_check_ball_goals()
+	# CTF flag pickup / capture / auto-return.
+	_check_ctf()
+
 	if world.tick % DriftConstants.TICK_RATE == 0 and world.tick != last_printed_tick:
 		last_printed_tick = world.tick
 		if debug_sim:
@@ -662,6 +1033,17 @@ func _step_authoritative_tick() -> void:
 		print("[NET] tick mismatch after step: intended=", intended_tick, " actual=", world.tick)
 
 	if (latest_snapshot.tick % SNAPSHOT_INTERVAL_TICKS) == 0:
+		# Compute king: alive ship with highest bounty.
+		var king_id: int = -1
+		var king_bounty: int = 0
+		for sid_k in latest_snapshot.ships.keys():
+			var sk = latest_snapshot.ships[sid_k]
+			if sk == null or world._ship_is_dead(sk, latest_snapshot.tick):
+				continue
+			if int(sk.bounty) > king_bounty:
+				king_bounty = int(sk.bounty)
+				king_id = int(sid_k)
+		latest_snapshot.king_ship_id = king_id
 		_send_snapshot(latest_snapshot)
 
 	if (latest_snapshot.tick % DriftConstants.TICK_RATE) == 0:
@@ -677,34 +1059,28 @@ func _step_authoritative_tick() -> void:
 
 
 
+# ponytail: 1200px AOI, bump if map grows or max-zoom changes.
+const AOI_RADIUS: float = 1200.0
+
 func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
-
-	
-
 	if ship_id_by_peer.size() == 0:
 		return
 
-	var ships_array: Array = DriftNet.snapshot_ships_from_dict(snapshot.ships)
-	var packet: PackedByteArray = DriftNet.pack_snapshot_packet(
-		snapshot.tick,
-		ships_array,
-		snapshot.ball_position,
-		snapshot.ball_velocity,
-		snapshot.ball_owner_id,
-		snapshot.bullets,
-		snapshot.prizes,
-		_pending_prize_events
-	)
+	# Apply CTF carrier state once before per-client packing.
+	for fl in _flags:
+		var cid: int = int(fl.carrier_ship_id)
+		if cid >= 0 and snapshot.ships.has(cid):
+			snapshot.ships[cid].carried_flag_team = int(fl.team)
 
-	# Broadcast to all connected clients.
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
 	for peer_id in ship_id_by_peer.keys():
+		var my_ship_id: int = int(ship_id_by_peer.get(peer_id, -1))
+		var packet: PackedByteArray = _pack_snapshot_for_client(my_ship_id, snapshot)
 		enet_peer.set_target_peer(int(peer_id))
 		enet_peer.put_packet(packet)
 
 	# Prize pickup events: send reliably to the owning peer.
-	# Snapshots are unreliable, so event tails may be dropped.
 	if _pending_prize_events.size() > 0:
 		for ev in _pending_prize_events:
 			if ev == null or typeof(ev) != TYPE_DICTIONARY:
@@ -716,7 +1092,6 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 			var pid: int = int(d.get("prize_id", -1))
 			if sid < 0 or pid < 0:
 				continue
-			# Find owning peer.
 			var target_peer: int = -1
 			for peer_id in ship_id_by_peer.keys():
 				if int(ship_id_by_peer.get(peer_id, -1)) == sid:
@@ -730,15 +1105,86 @@ func _send_snapshot(snapshot: DriftTypes.DriftWorldSnapshot) -> void:
 			enet_peer.set_target_peer(target_peer)
 			enet_peer.put_packet(ev_pkt)
 
-	# Flush buffered events after snapshot send.
 	_pending_prize_events.clear()
+	_pending_effect_events.clear()
+
+
+func _pack_snapshot_for_client(my_ship_id: int, snapshot: DriftTypes.DriftWorldSnapshot) -> PackedByteArray:
+	# Spectators and unspawned peers get full state (no AOI).
+	if my_ship_id < 0 or _spectator_ship_ids.has(my_ship_id) or not snapshot.ships.has(my_ship_id):
+		return DriftNet.pack_snapshot_packet(
+			snapshot.tick,
+			DriftNet.snapshot_ships_from_dict(snapshot.ships),
+			snapshot.ball_position, snapshot.ball_velocity, snapshot.ball_owner_id,
+			snapshot.bullets, snapshot.bombs, snapshot.mines, snapshot.prizes,
+			_pending_prize_events, {"flags": _flags, "king_ship_id": snapshot.king_ship_id}, snapshot.decoys, snapshot.bricks, _pending_effect_events
+		)
+
+	var center: Vector2 = snapshot.ships[my_ship_id].position
+
+	# Split ships into full-state (AOI) and radar-only.
+	var ships_in_aoi: Array = []
+	var radar_ships: Array = []
+	for sid in snapshot.ships:
+		var s = snapshot.ships[sid]
+		if int(sid) == my_ship_id or s.position.distance_to(center) <= AOI_RADIUS:
+			ships_in_aoi.append(s)
+		else:
+			var is_dead: bool = int(s.dead_until_tick) > 0 and int(snapshot.tick) < int(s.dead_until_tick)
+			radar_ships.append({"id": int(sid), "px": s.position.x, "py": s.position.y,
+				"freq": int(s.freq), "dead": is_dead})
+
+	# Filter positional entities by AOI.
+	var bullets_aoi: Array = snapshot.bullets.filter(
+		func(b): return b.position.distance_to(center) <= AOI_RADIUS)
+	var bombs_aoi: Array = snapshot.bombs.filter(
+		func(b): return b.position.distance_to(center) <= AOI_RADIUS)
+	var mines_aoi: Array = snapshot.mines.filter(
+		func(m): return m.position.distance_to(center) <= AOI_RADIUS)
+	var prizes_aoi: Array = snapshot.prizes.filter(
+		func(p): return p.pos.distance_to(center) <= AOI_RADIUS)
+
+	return DriftNet.pack_snapshot_packet(
+		snapshot.tick,
+		ships_in_aoi,
+		snapshot.ball_position,
+		snapshot.ball_velocity,
+		snapshot.ball_owner_id,
+		bullets_aoi,
+		bombs_aoi,
+		mines_aoi,
+		prizes_aoi,
+		_pending_prize_events,
+		{"flags": _flags, "radar_ships": radar_ships, "king_ship_id": snapshot.king_ship_id},
+		snapshot.decoys.filter(func(d): return d.position.distance_to(center) <= AOI_RADIUS),
+		snapshot.bricks,
+		_pending_effect_events
+	)
+
+
+func _broadcast_reliable(packet: PackedByteArray) -> void:
+	if enet_peer == null:
+		return
+	enet_peer.set_transfer_channel(NET_CHANNEL)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	for peer_id in ship_id_by_peer.keys():
+		enet_peer.set_target_peer(int(peer_id))
+		enet_peer.put_packet(packet)
 
 
 func _send_welcome(peer_id: int, ship_id: int) -> void:
 	var ruleset_json := ""
 	if canonical_ruleset != null and typeof(canonical_ruleset) == TYPE_DICTIONARY and not canonical_ruleset.is_empty():
 		ruleset_json = JSON.stringify(canonical_ruleset)
-	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum, map_path, map_version, wall_restitution, ruleset_json, world.tangent_damping)
+	var ship_spec_json := ""
+	if world != null and world.ship_spec != null and typeof(world.ship_spec) == TYPE_DICTIONARY and not world.ship_spec.is_empty():
+		ship_spec_json = JSON.stringify(world.ship_spec)
+	var all_ship_specs_json := ""
+	if world != null and world.ship_specs.size() == DriftShipRegistry.SHIP_COUNT:
+		all_ship_specs_json = JSON.stringify(world.ship_specs)
+	elif ship_registry != null and ship_registry.specs.size() == DriftShipRegistry.SHIP_COUNT:
+		all_ship_specs_json = JSON.stringify(ship_registry.specs)
+	var packet: PackedByteArray = DriftNet.pack_welcome_packet(ship_id, map_checksum, map_path, map_version, wall_restitution, ruleset_json, world.tangent_damping, ship_spec_json, all_ship_specs_json)
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
 	enet_peer.set_target_peer(peer_id)

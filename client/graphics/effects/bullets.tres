@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="BulletVisuals" load_steps=3 format=3 uid="uid://d4ifugevhbj3"]
+
+[ext_resource type="Script" uid="uid://hh4x524oh0wb" path="res://client/graphics/effects/bullet_visuals.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://dujg5tisdbdcr" path="res://client/graphics/effects/bullets.png" id="2"]
+
+[resource]
+script = ExtResource("1")
+texture = ExtResource("2")
+frame_size_px = Vector2i(5, 5)
+frames_per_row = 4
+anim_period_ticks = 20

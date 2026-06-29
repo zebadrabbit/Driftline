@@ -26,6 +26,7 @@ const SettingsManager = preload("res://client/settings/settings_manager.gd")
 const DriftUiIconAtlas = preload("res://client/ui/ui_icon_atlas.gd")
 const DriftPrizeTypes = preload("res://client/ui/prize_types.gd")
 const PrizeFeedbackPipeline = preload("res://client/ui/prize_feedback_pipeline.gd")
+const DriftShipRegistry = preload("res://shared/drift_ship_registry.gd")
 
 var _failures: int = 0
 var _ran: int = 0
@@ -58,6 +59,10 @@ func _initialize() -> void:
 	_test_bullet_bounce_restitution_is_level_based_per_projectile()
 	_test_bullet_swept_collision_prevents_tunneling()
 	_test_projectile_velocity_inheritance_sanity()
+	_test_mine_trigger_leave_explodes_immediately()
+	_test_emp_bomb_applies_engine_shutdown()
+	_test_bomb_bounce_depletes_then_explodes()
+	_test_bomb_and_mine_max_active_caps_enforced()
 	_test_team_auto_balance_assigns_even_teams()
 	_test_set_freq_rejects_when_force_even_violated()
 	_test_team_color_mapping_flips_with_freq()
@@ -87,6 +92,32 @@ func _initialize() -> void:
 	_test_ui_icon_atlas_contract_mapping()
 	_test_prize_types_mapping_contract()
 	_test_prize_feedback_pipeline_transient_non_stacking()
+	_test_all_eight_ship_specs_load()
+	_test_ship_type_change_respawns_with_correct_spec()
+	_test_ship_type_persists_across_snapshot_roundtrip()
+	_test_repel_pushes_nearby_ships()
+	_test_burst_fires_shrapnel_ring()
+	_test_shields_absorb_damage()
+	_test_warp_teleports_ship()
+	_test_antiwarp_blocks_warp()
+	_test_thor_fires_ring()
+	_test_rocket_boosts_speed()
+	_test_decoy_spawns_and_expires()
+	_test_shrapnel_prize_adds_bonus()
+	_test_rotation_prize_adds_bonus()
+	_test_all_weapons_prize()
+	_test_quickcharge_prize_fills_energy()
+	_test_stealth_prize_toggles_ability()
+	_test_portal_prize_and_use()
+	_test_decoy_snapshot_roundtrip()
+	_test_brick_places_and_expires()
+	_test_items_persist_across_snapshot_roundtrip()
+	_test_kill_event_packet_roundtrip()
+	_test_chat_message_packet_roundtrip()
+	_test_chat_broadcast_packet_roundtrip()
+	_test_kill_death_stats_in_snapshot()
+	_test_king_ship_id_snapshot_roundtrip()
+	_test_server_hello_sets_username()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -273,6 +304,352 @@ func _test_projectile_velocity_inheritance_sanity() -> void:
 		return
 
 	_pass("projectile_velocity_inheritance_sanity")
+
+
+func _test_mine_trigger_leave_explodes_immediately() -> void:
+	_ran += 1
+	# Proximity mine rule: once triggered, if the triggering enemy leaves the trigger radius,
+	# the mine must explode immediately (no waiting out the fuse).
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("mine_trigger_leave (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	if typeof(rs) != TYPE_DICTIONARY:
+		_fail("mine_trigger_leave (ruleset missing)")
+		return
+	# Ensure teams exist so mine hostility logic is unambiguous.
+	rs["team"] = {"max_freq": 2, "force_even": false}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("mine_trigger_leave (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", rs)
+
+	var world := DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+
+	# Enable ship_spec weapon overrides so we can force 0 cost/0 delay deterministically.
+	world.set_ship_spec_overrides_weapons(true)
+	world.set_ship_spec({
+		"energy": {"InitialEnergy": 9999, "LandmineFireEnergy": 0, "LandmineFireEnergyUpgrade": 0},
+		"weapons": {"LandmineFireDelay": 0, "MaxMines": 10},
+	})
+
+	world.add_ship(1, Vector2(512, 512))
+	world.add_ship(2, Vector2(800, 512))
+	world.set_ship_freq(1, 0)
+	world.set_ship_freq(2, 1)
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	var s2: DriftTypes.DriftShipState = world.ships.get(2)
+	if s1 == null or s2 == null:
+		_fail("mine_trigger_leave (ship missing)")
+		return
+	s1.rotation = 0.0
+	s1.velocity = Vector2.ZERO
+	s2.velocity = Vector2.ZERO
+
+	# Lay exactly one mine.
+	var lay_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false, false, false, false, false, true)
+	world.step_tick({1: lay_cmd}, false, 0)
+	if world.mines.size() != 1:
+		_fail("mine_trigger_leave (expected 1 mine laid; got %d)" % int(world.mines.size()))
+		return
+	var mine_ids: Array = world.mines.keys()
+	mine_ids.sort()
+	var mid: int = int(mine_ids[0])
+	var m: DriftTypes.DriftMineState = world.mines.get(mid)
+	if m == null:
+		_fail("mine_trigger_leave (mine missing)")
+		return
+
+	# Move enemy into trigger radius and step once -> should trigger but not explode.
+	s2.position = m.position + Vector2(float(DriftWorld.MINE_TRIGGER_RADIUS_PX) - 1.0, 0.0)
+	world.step_tick({}, false, 0)
+	if not world.mines.has(mid):
+		_fail("mine_trigger_leave (mine exploded on trigger tick; expected triggered state first)")
+		return
+	var m2: DriftTypes.DriftMineState = world.mines.get(mid)
+	if m2 == null or not bool(m2.triggered):
+		_fail("mine_trigger_leave (expected mine triggered after enemy enters radius)")
+		return
+
+	# Now move enemy outside trigger radius and step once -> must explode immediately.
+	s2.position = m2.position + Vector2(float(DriftWorld.MINE_TRIGGER_RADIUS_PX) + 10.0, 0.0)
+	world.step_tick({}, false, 0)
+	if world.mines.size() != 0:
+		_fail("mine_trigger_leave (expected mine removed after leave-radius; mines=%d)" % int(world.mines.size()))
+		return
+	var saw_explode := false
+	for ev_any in world.collision_events:
+		if typeof(ev_any) != TYPE_DICTIONARY:
+			continue
+		var ev: Dictionary = ev_any
+		if str(ev.get("type", "")) == "mine_explode":
+			saw_explode = true
+			break
+	if not saw_explode:
+		_fail("mine_trigger_leave (expected mine_explode event)")
+		return
+
+	_pass("mine_trigger_leave_explodes_immediately")
+
+
+func _test_emp_bomb_applies_engine_shutdown() -> void:
+	_ran += 1
+	# EMP bombs must apply engine shutdown deterministically when they explode.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("emp_bomb (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	if typeof(rs) != TYPE_DICTIONARY:
+		_fail("emp_bomb (ruleset missing)")
+		return
+	rs["team"] = {"max_freq": 2, "force_even": false}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("emp_bomb (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", rs)
+
+	var world := DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_ship_spec_overrides_weapons(true)
+	world.set_ship_spec({
+		"energy": {"InitialEnergy": 9999, "BombFireEnergy": 0, "BombFireEnergyUpgrade": 0},
+		"weapons": {"BombFireDelay": 0, "BombSpeed": 0, "BombBounceCount": 0, "MaxBombs": 10, "EmpBomb": 1},
+	})
+
+	world.add_ship(1, Vector2(512, 512))
+	world.add_ship(2, Vector2(512, 512))
+	world.set_ship_freq(1, 0)
+	world.set_ship_freq(2, 1)
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	var s2: DriftTypes.DriftShipState = world.ships.get(2)
+	if s1 == null or s2 == null:
+		_fail("emp_bomb (ship missing)")
+		return
+	s1.rotation = 0.0
+	s1.velocity = Vector2.ZERO
+	s2.velocity = Vector2.ZERO
+	s2.engine_shutdown_until_tick = 0
+
+	# Place enemy exactly at the bomb spawn position so detonation occurs immediately.
+	var fwd := Vector2(1.0, 0.0)
+	var spawn_pos := s1.position + fwd * (float(DriftConstants.SHIP_RADIUS) + float(DriftWorld.BOMB_RADIUS_PX) + 2.0)
+	s2.position = spawn_pos
+
+	var t0: int = int(world.tick)
+	var fire_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, true, false)
+	world.step_tick({1: fire_cmd}, false, 0)
+
+	# Bomb should have exploded in the same tick.
+	if world.bombs.size() != 0:
+		_fail("emp_bomb (expected bombs cleared after immediate detonation)")
+		return
+	var s2_after: DriftTypes.DriftShipState = world.ships.get(2)
+	if s2_after == null:
+		_fail("emp_bomb (enemy ship missing after step)")
+		return
+	if int(s2_after.engine_shutdown_until_tick) < t0 + int(DriftWorld.EMP_DEFAULT_TICKS):
+		_fail("emp_bomb (expected engine_shutdown_until_tick >= %d; got %d)" % [t0 + int(DriftWorld.EMP_DEFAULT_TICKS), int(s2_after.engine_shutdown_until_tick)])
+		return
+	var saw_emp_explode := false
+	for ev_any in world.collision_events:
+		if typeof(ev_any) != TYPE_DICTIONARY:
+			continue
+		var ev: Dictionary = ev_any
+		if str(ev.get("type", "")) == "bomb_explode" and bool(ev.get("emp", false)):
+			saw_emp_explode = true
+			break
+	if not saw_emp_explode:
+		_fail("emp_bomb (expected bomb_explode event with emp=true)")
+		return
+
+	_pass("emp_bomb_applies_engine_shutdown")
+
+
+func _test_bomb_bounce_depletes_then_explodes() -> void:
+	_ran += 1
+	# Bombs with bounces_left>0 should bounce off walls consuming a bounce.
+	# When bounces_left==0, the next wall impact should detonate.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("bomb_bounce (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	if typeof(rs) != TYPE_DICTIONARY:
+		_fail("bomb_bounce (ruleset missing)")
+		return
+	rs["team"] = {"max_freq": 2, "force_even": false}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("bomb_bounce (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", rs)
+
+	var world := DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_ship_spec_overrides_weapons(true)
+	world.set_ship_spec({
+		"energy": {"InitialEnergy": 9999, "BombFireEnergy": 0, "BombFireEnergyUpgrade": 0},
+		"weapons": {"BombFireDelay": 0, "BombSpeed": 2000, "BombBounceCount": 1, "MaxBombs": 10, "EmpBomb": 0},
+	})
+
+	# Create two vertical walls so the bomb will ping-pong: first hit consumes bounce, second hit detonates.
+	var solids: Array = []
+	var wall_x1: int = 20
+	var wall_x2: int = 30
+	for y in range(0, 64):
+		solids.append([wall_x1, y, 0, 0])
+		solids.append([wall_x2, y, 0, 0])
+	world.set_solid_tiles(solids)
+
+	world.add_ship(1, Vector2(float(25 * 16), float(25 * 16)))
+	world.set_ship_freq(1, 0)
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	if s1 == null:
+		_fail("bomb_bounce (ship missing)")
+		return
+	s1.rotation = 0.0
+	s1.velocity = Vector2.ZERO
+
+	# Fire one bomb.
+	world.step_tick({1: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, true, false)}, false, 0)
+	if world.bombs.size() != 1:
+		_fail("bomb_bounce (expected 1 bomb spawned; got %d)" % int(world.bombs.size()))
+		return
+	var bomb_ids: Array = world.bombs.keys()
+	bomb_ids.sort()
+	var bid: int = int(bomb_ids[0])
+	var b: DriftTypes.DriftBombState = world.bombs.get(bid)
+	if b == null:
+		_fail("bomb_bounce (bomb missing)")
+		return
+
+	# Move owner away from the corridor so the bomb doesn't detonate on self.
+	s1.position = Vector2(s1.position.x, s1.position.y + 400.0)
+
+	# Step until we observe the first bounce (bounces_left becomes 0) and later detonation.
+	var saw_bounces_depleted := false
+	var saw_explode := false
+	for i in range(0, 120):
+		world.step_tick({}, false, 0)
+		if world.bombs.has(bid):
+			var bb: DriftTypes.DriftBombState = world.bombs.get(bid)
+			if bb != null and int(bb.bounces_left) == 0:
+				saw_bounces_depleted = true
+		else:
+			for ev_any in world.collision_events:
+				if typeof(ev_any) != TYPE_DICTIONARY:
+					continue
+				var ev: Dictionary = ev_any
+				if str(ev.get("type", "")) == "bomb_explode":
+					saw_explode = true
+					break
+			break
+
+	if not saw_bounces_depleted:
+		_fail("bomb_bounce (expected to observe bounces_left depleted to 0 before detonation)")
+		return
+	if not saw_explode:
+		_fail("bomb_bounce (expected bomb_explode after second wall hit)")
+		return
+
+	_pass("bomb_bounce_depletes_then_explodes")
+
+
+func _test_bomb_and_mine_max_active_caps_enforced() -> void:
+	_ran += 1
+	# Enforce MaxBombs/MaxMines: even with 0 delay and 0 energy cost, we must not spawn
+	# more than the configured active count.
+
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("weapon_caps (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	if typeof(rs) != TYPE_DICTIONARY:
+		_fail("weapon_caps (ruleset missing)")
+		return
+	rs["team"] = {"max_freq": 2, "force_even": false}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("weapon_caps (ruleset validation failed)")
+		return
+	var canonical_ruleset: Dictionary = valid.get("ruleset", rs)
+
+	var world := DriftWorld.new()
+	world.apply_ruleset(canonical_ruleset)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_ship_spec_overrides_weapons(true)
+	world.set_ship_spec({
+		"energy": {
+			"InitialEnergy": 9999,
+			"BombFireEnergy": 0,
+			"BombFireEnergyUpgrade": 0,
+			"LandmineFireEnergy": 0,
+			"LandmineFireEnergyUpgrade": 0,
+		},
+		"weapons": {
+			"BombFireDelay": 0,
+			"BombSpeed": 0,
+			"BombBounceCount": 0,
+			"MaxBombs": 1,
+			"EmpBomb": 0,
+			"LandmineFireDelay": 0,
+			"MaxMines": 1,
+		},
+	})
+	world.add_ship(1, Vector2(512, 512))
+	world.set_ship_freq(1, 0)
+	var s1: DriftTypes.DriftShipState = world.ships.get(1)
+	if s1 == null:
+		_fail("weapon_caps (ship missing)")
+		return
+	s1.rotation = 0.0
+	s1.velocity = Vector2.ZERO
+
+	# Spam bomb fire for a few ticks; cap must hold at 1.
+	for i in range(0, 5):
+		world.step_tick({1: DriftTypes.DriftInputCmd.new(0.0, 0.0, false, true, false)}, false, 0)
+		if world.bombs.size() > 1:
+			_fail("weapon_caps (expected MaxBombs=1; got %d)" % int(world.bombs.size()))
+			return
+	if world.bombs.size() != 1:
+		_fail("weapon_caps (expected exactly 1 bomb active; got %d)" % int(world.bombs.size()))
+		return
+
+	# Spam mine lay for a few ticks; cap must hold at 1.
+	var lay_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false, false, false, false, false, true)
+	for i in range(0, 5):
+		world.step_tick({1: lay_cmd}, false, 0)
+		if world.mines.size() > 1:
+			_fail("weapon_caps (expected MaxMines=1; got %d)" % int(world.mines.size()))
+			return
+	if world.mines.size() != 1:
+		_fail("weapon_caps (expected exactly 1 mine active; got %d)" % int(world.mines.size()))
+		return
+
+	_pass("bomb_and_mine_max_active_caps_enforced")
 
 
 func _test_prize_types_mapping_contract() -> void:
@@ -992,10 +1369,10 @@ func _test_deterministic_replay_bullets() -> void:
 	for t in range(ticks):
 		# Ship 1 fires a burst; ship 2 stays idle.
 		var fire_now: bool = t < 40
-		var di1 := DriftInput.new(0, 0, fire_now, false, false, false)
-		var di2 := DriftInput.new(0, 0, false, false, false, false)
-		var cmd1 := DriftTypes.DriftInputCmd.new(float(di1.thrust), float(di1.turn), bool(di1.fire), bool(di1.bomb), bool(di1.afterburner))
-		var cmd2 := DriftTypes.DriftInputCmd.new(float(di2.thrust), float(di2.turn), bool(di2.fire), bool(di2.bomb), bool(di2.afterburner))
+		var di1 := DriftInput.new(0, 0, fire_now, false, false, false, false)
+		var di2 := DriftInput.new(0, 0, false, false, false, false, false)
+		var cmd1 := DriftTypes.DriftInputCmd.new(float(di1.thrust), float(di1.turn), bool(di1.fire), bool(di1.bomb), bool(di1.afterburner), false, false, false, false, bool(di1.mine))
+		var cmd2 := DriftTypes.DriftInputCmd.new(float(di2.thrust), float(di2.turn), bool(di2.fire), bool(di2.bomb), bool(di2.afterburner), false, false, false, false, bool(di2.mine))
 		var t_before: int = int(wrec.tick)
 		wrec.step_tick({1: cmd1, 2: cmd2}, false, 0)
 		recorder.record_tick(t_before, {1: di1, 2: di2}, int(wrec.compute_world_hash()))
@@ -1115,6 +1492,7 @@ func _test_drift_input_roundtrip() -> void:
 		-1, # turn
 		true,  # fire
 		false, # bomb
+		false, # mine
 		true,  # afterburner
 		false  # ability1
 	)
@@ -1677,10 +2055,10 @@ func _test_replay_recorder_writes_jsonl() -> void:
 	var idle_cmd := DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 	for t in range(ticks):
 		# Deterministic input payload for recorder (DriftInput), but sim uses DriftInputCmd.
-		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false, false)
 		if t % 5 == 0:
-			di = DriftInput.new(0, 0, false, false, false, false)
-		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+			di = DriftInput.new(0, 0, false, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner), false, false, false, false, bool(di.mine))
 		var t_before: int = int(world.tick)
 		world.step_tick({1: cmd}, false, 0)
 		recorder.record_tick(t_before, {1: di}, int(world.compute_world_hash()))
@@ -1760,10 +2138,10 @@ func _test_replay_verifier_replays_and_hashes() -> void:
 
 	var ticks: int = 120
 	for t in range(ticks):
-		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false, false)
 		if t % 5 == 0:
-			di = DriftInput.new(0, 0, false, false, false, false)
-		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+			di = DriftInput.new(0, 0, false, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner), false, false, false, false, bool(di.mine))
 		var t_before: int = int(wrec.tick)
 		wrec.step_tick({1: cmd}, false, 0)
 		recorder.record_tick(t_before, {1: di}, int(wrec.compute_world_hash()))
@@ -1819,10 +2197,10 @@ func _test_replay_verifier_detects_mismatch() -> void:
 
 	var ticks: int = 30
 	for t in range(ticks):
-		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false)
+		var di := DriftInput.new(1 if (t % 10) < 5 else 0, 0, (t % 15) == 0, false, false, false, false)
 		if t % 5 == 0:
-			di = DriftInput.new(0, 0, false, false, false, false)
-		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner))
+			di = DriftInput.new(0, 0, false, false, false, false, false)
+		var cmd := DriftTypes.DriftInputCmd.new(float(di.thrust), float(di.turn), bool(di.fire), bool(di.bomb), bool(di.afterburner), false, false, false, false, bool(di.mine))
 		var t_before: int = int(wrec.tick)
 		wrec.step_tick({1: cmd}, false, 0)
 		recorder.record_tick(t_before, {1: di}, int(wrec.compute_world_hash()))
@@ -1902,6 +2280,7 @@ func _run_replay_hash_stable_test(ticks: int, label: String) -> void:
 			-1 if (t % 40) < 20 else 1,
 			(t % 15) == 0,
 			(t % 90) == 10,
+			false,
 			(t % 20) < 5,
 			(t % 120) == 7
 		)
@@ -1910,6 +2289,7 @@ func _run_replay_hash_stable_test(ticks: int, label: String) -> void:
 			1 if (t % 30) < 15 else -1,
 			(t % 17) == 0,
 			(t % 80) == 3,
+			false,
 			(t % 25) < 8,
 			(t % 100) == 9
 		)
@@ -1924,7 +2304,8 @@ func _run_replay_hash_stable_test(ticks: int, label: String) -> void:
 			bool(di1.ability1),
 			false,
 			false,
-			false
+			false,
+			bool(di1.mine)
 		)
 		var cmd2 := DriftTypes.DriftInputCmd.new(
 			float(di2.thrust),
@@ -1935,7 +2316,8 @@ func _run_replay_hash_stable_test(ticks: int, label: String) -> void:
 			bool(di2.ability1),
 			false,
 			false,
-			false
+			false,
+			bool(di2.mine)
 		)
 		var t_before: int = int(wrec.tick)
 		wrec.step_tick({1: cmd1, 2: cmd2}, false, 0)
@@ -3408,7 +3790,9 @@ func _test_no_hardcoded_keys_in_gameplay() -> void:
 		"res://shared",
 		"res://server",
 	]
-	var allowlist := {}
+	var allowlist := {
+		"res://client/client_main.gd": true,  # F1-F8 ship selection (non-rebindable, matches SubSpace)
+	}
 	var needles := [
 		"Input.is_key_pressed(",
 		"KEY_",
@@ -3707,6 +4091,644 @@ func _test_prizes_spawn_walkable() -> void:
 			_fail("prizes_spawn_walkable (prize spawned in blocked position)")
 			return
 	_pass("prizes_spawn_walkable")
+
+
+func _test_all_eight_ship_specs_load() -> void:
+	_ran += 1
+	var registry := DriftShipRegistry.new()
+	if not registry.load_all_specs():
+		_fail("all_eight_ship_specs_load (load_all_specs returned false)")
+		return
+	if registry.specs.size() != 8:
+		_fail("all_eight_ship_specs_load (expected 8 specs, got %d)" % registry.specs.size())
+		return
+	for i in range(8):
+		var spec: Dictionary = registry.get_spec(i)
+		if spec.is_empty():
+			_fail("all_eight_ship_specs_load (spec %d (%s) is empty)" % [i, DriftShipRegistry.ship_name(i)])
+			return
+		# Each spec must have at minimum an energy and weapons section.
+		if not spec.has("energy"):
+			_fail("all_eight_ship_specs_load (spec %d missing 'energy')" % i)
+			return
+		if not spec.has("weapons"):
+			_fail("all_eight_ship_specs_load (spec %d missing 'weapons')" % i)
+			return
+	# Verify name lookup roundtrip.
+	for i in range(8):
+		var name: String = DriftShipRegistry.ship_name(i)
+		var idx: int = DriftShipRegistry.ship_type_from_name(name)
+		if idx != i:
+			_fail("all_eight_ship_specs_load (name roundtrip failed for %d/%s -> %d)" % [i, name, idx])
+			return
+	_pass("all_eight_ship_specs_load")
+
+
+func _test_ship_type_change_respawns_with_correct_spec() -> void:
+	_ran += 1
+	var rules_res: Dictionary = DriftRuleset.load_ruleset("res://rulesets/base.json")
+	if not bool(rules_res.get("ok", false)):
+		_fail("ship_type_change (failed to load base ruleset)")
+		return
+	var rs: Dictionary = rules_res.get("ruleset", {})
+	rs["team"] = {"max_freq": 2, "force_even": false}
+	var valid := DriftValidate.validate_ruleset_dict(rs)
+	if not bool(valid.get("ok", false)):
+		_fail("ship_type_change (validate failed)")
+		return
+	var canonical: Dictionary = valid.get("ruleset", rs)
+
+	var registry := DriftShipRegistry.new()
+	if not registry.load_all_specs():
+		_fail("ship_type_change (registry load failed)")
+		return
+
+	var world := DriftWorld.new()
+	world.apply_ruleset(canonical)
+	world.set_solid_tiles([])
+	world.set_door_tiles([])
+	world.add_boundary_tiles(64, 64)
+	world.set_map_dimensions(64, 64)
+	world.set_all_ship_specs(registry.specs)
+
+	world.add_ship(1, Vector2(512, 512))
+	var s: DriftTypes.DriftShipState = world.ships.get(1)
+	if s == null:
+		_fail("ship_type_change (ship null after add)")
+		return
+	# Default ship type should be 0 (Warbird).
+	if int(s.ship_type) != 0:
+		_fail("ship_type_change (default ship_type should be 0, got %d)" % int(s.ship_type))
+		return
+
+	# Change to Javelin (type 1).
+	var ok := world.change_ship_type(1, 1)
+	if not ok:
+		_fail("ship_type_change (change_ship_type returned false)")
+		return
+	s = world.ships.get(1)
+	if int(s.ship_type) != 1:
+		_fail("ship_type_change (expected ship_type 1 after change, got %d)" % int(s.ship_type))
+		return
+	# Weapons/upgrades should be reset.
+	if int(s.gun_level) != 1 or int(s.bomb_level) != 1:
+		_fail("ship_type_change (weapon levels not reset)")
+		return
+	if bool(s.multi_fire_enabled):
+		_fail("ship_type_change (multi_fire should be off after change)")
+		return
+
+	# Invalid type should fail.
+	if world.change_ship_type(1, -1):
+		_fail("ship_type_change (should reject type -1)")
+		return
+	if world.change_ship_type(1, 8):
+		_fail("ship_type_change (should reject type 8)")
+		return
+	if world.change_ship_type(999, 0):
+		_fail("ship_type_change (should reject nonexistent ship)")
+		return
+
+	_pass("ship_type_change_respawns_with_correct_spec")
+
+
+func _test_ship_type_persists_across_snapshot_roundtrip() -> void:
+	_ran += 1
+	# Create ships with different ship types, pack a snapshot, unpack, verify types survive.
+	var s0 := DriftTypes.DriftShipState.new(1, Vector2(100, 200))
+	s0.ship_type = 0
+
+	var s1 := DriftTypes.DriftShipState.new(2, Vector2(300, 400))
+	s1.rotation = 1.5
+	s1.ship_type = 5  # Weasel
+
+	var s2 := DriftTypes.DriftShipState.new(3, Vector2(500, 600))
+	s2.rotation = 3.0
+	s2.ship_type = 7  # Shark
+
+	var ships_arr: Array = [s0, s1, s2]
+	var packed: PackedByteArray = DriftNet.pack_snapshot_packet(42, ships_arr)
+	if packed.size() == 0:
+		_fail("ship_type_snapshot_roundtrip (pack returned empty)")
+		return
+
+	var unpacked: Dictionary = DriftNet.unpack_snapshot_packet(packed)
+	if unpacked.is_empty():
+		_fail("ship_type_snapshot_roundtrip (unpack returned empty)")
+		return
+	var out_ships: Array = unpacked.get("ships", [])
+	if out_ships.size() != 3:
+		_fail("ship_type_snapshot_roundtrip (expected 3 ships, got %d)" % out_ships.size())
+		return
+
+	# Build id -> ship_type map from unpacked.
+	var type_by_id: Dictionary = {}
+	for ss in out_ships:
+		type_by_id[int(ss.id)] = int(ss.ship_type)
+
+	if type_by_id.get(1, -1) != 0:
+		_fail("ship_type_snapshot_roundtrip (ship 1 expected type 0, got %d)" % type_by_id.get(1, -1))
+		return
+	if type_by_id.get(2, -1) != 5:
+		_fail("ship_type_snapshot_roundtrip (ship 2 expected type 5, got %d)" % type_by_id.get(2, -1))
+		return
+	if type_by_id.get(3, -1) != 7:
+		_fail("ship_type_snapshot_roundtrip (ship 3 expected type 7, got %d)" % type_by_id.get(3, -1))
+		return
+
+	_pass("ship_type_persists_across_snapshot_roundtrip")
+
+
+func _test_repel_pushes_nearby_ships() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	world.add_ship(2, Vector2(600, 500))  # 100px away (within 512 radius)
+	world.add_ship(3, Vector2(2000, 2000))  # Far away (outside radius)
+	var s1 = world.ships.get(1)
+	var s2 = world.ships.get(2)
+	var s3 = world.ships.get(3)
+	s1.repel_count = 2
+	var old_s3_vel: Vector2 = s3.velocity
+	world._use_repel(s1)
+	if int(s1.repel_count) != 1:
+		_fail("repel_pushes (count should be 1 after use, got %d)" % int(s1.repel_count))
+		return
+	if s2.velocity.length() < 100.0:
+		_fail("repel_pushes (nearby ship should be pushed, vel=%s)" % str(s2.velocity))
+		return
+	if s3.velocity.length() > 1.0:
+		_fail("repel_pushes (far ship should not be pushed, vel=%s)" % str(s3.velocity))
+		return
+	_pass("repel_pushes_nearby_ships")
+
+
+func _test_burst_fires_shrapnel_ring() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.burst_count = 1
+	var bullets_before: int = world.bullets.size()
+	world._use_burst(s1)
+	var bullets_after: int = world.bullets.size()
+	if int(s1.burst_count) != 0:
+		_fail("burst_fires (count should be 0 after use, got %d)" % int(s1.burst_count))
+		return
+	var spawned: int = bullets_after - bullets_before
+	if spawned < 8:
+		_fail("burst_fires (expected >=8 shrapnel bullets, got %d)" % spawned)
+		return
+	_pass("burst_fires_shrapnel_ring")
+
+
+func _test_shields_absorb_damage() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	# Give shields (active for 240 ticks = 4 seconds at 60Hz)
+	s1.shields_until_tick = int(world.tick) + 240
+	s1.super_shields = false
+	var energy_before: int = int(s1.energy_current)
+	# Apply damage — should be absorbed by shield
+	world.adjust_energy(1, -100, DriftWorld.EnergyReason.DAMAGE_BULLET, 2)
+	if int(s1.energy_current) != energy_before:
+		_fail("shields_absorb (energy should be unchanged, was %d now %d)" % [energy_before, int(s1.energy_current)])
+		return
+	# Regular shield should expire after one hit
+	if int(s1.shields_until_tick) != 0:
+		_fail("shields_absorb (regular shield should expire after hit, until_tick=%d)" % int(s1.shields_until_tick))
+		return
+	# Now test super shields: absorb but don't expire
+	s1.shields_until_tick = int(world.tick) + 240
+	s1.super_shields = true
+	world.adjust_energy(1, -100, DriftWorld.EnergyReason.DAMAGE_BOMB, 2)
+	if int(s1.energy_current) != energy_before:
+		_fail("shields_absorb (super: energy changed)")
+		return
+	if int(s1.shields_until_tick) <= int(world.tick):
+		_fail("shields_absorb (super shield should persist)")
+		return
+	_pass("shields_absorb_damage")
+
+
+func _test_warp_teleports_ship() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.warp_count = 1
+	var old_pos: Vector2 = s1.position
+	world._use_warp(s1)
+	if int(s1.warp_count) != 0:
+		_fail("warp_teleports (count should be 0, got %d)" % int(s1.warp_count))
+		return
+	# Position should have changed (extremely unlikely to land on exact same spot)
+	if s1.position.distance_to(old_pos) < 1.0:
+		_fail("warp_teleports (position didn't change)")
+		return
+	_pass("warp_teleports_ship")
+
+
+func _test_antiwarp_blocks_warp() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	world.add_ship(2, Vector2(600, 500))  # 100px away
+	var s1 = world.ships.get(1)
+	var s2 = world.ships.get(2)
+	s1.warp_count = 1
+	s2.antiwarp_on = true
+	var old_pos: Vector2 = s1.position
+	world._use_warp(s1)
+	# Warp should be blocked — count should remain 1 and position unchanged
+	if int(s1.warp_count) != 1:
+		_fail("antiwarp_blocks (warp count should remain 1, got %d)" % int(s1.warp_count))
+		return
+	if s1.position.distance_to(old_pos) > 1.0:
+		_fail("antiwarp_blocks (position should not change)")
+		return
+	_pass("antiwarp_blocks_warp")
+
+
+func _test_items_persist_across_snapshot_roundtrip() -> void:
+	_ran += 1
+	var s0 := DriftTypes.DriftShipState.new(1, Vector2(100, 200))
+	s0.repel_count = 2
+	s0.burst_count = 3
+	s0.warp_count = 1
+	s0.thor_count = 2
+	s0.brick_count = 1
+	s0.portal_count = 3
+	s0.shields_until_tick = 500
+	s0.super_shields = true
+	var ships_arr: Array = [s0]
+	var packed: PackedByteArray = DriftNet.pack_snapshot_packet(100, ships_arr)
+	var unpacked: Dictionary = DriftNet.unpack_snapshot_packet(packed)
+	if unpacked.is_empty():
+		_fail("items_snapshot_roundtrip (unpack failed)")
+		return
+	var out_ships: Array = unpacked.get("ships", [])
+	if out_ships.size() != 1:
+		_fail("items_snapshot_roundtrip (expected 1 ship)")
+		return
+	var out: DriftTypes.DriftShipState = out_ships[0]
+	if int(out.repel_count) != 2 or int(out.burst_count) != 3 or int(out.warp_count) != 1:
+		_fail("items_snapshot_roundtrip (counts: repel=%d burst=%d warp=%d)" % [int(out.repel_count), int(out.burst_count), int(out.warp_count)])
+		return
+	if int(out.thor_count) != 2 or int(out.brick_count) != 1 or int(out.portal_count) != 3:
+		_fail("items_snapshot_roundtrip (counts: thor=%d brick=%d portal=%d)" % [int(out.thor_count), int(out.brick_count), int(out.portal_count)])
+		return
+	if int(out.shields_until_tick) != 500 or not bool(out.super_shields):
+		_fail("items_snapshot_roundtrip (shields: until=%d super=%s)" % [int(out.shields_until_tick), str(out.super_shields)])
+		return
+	_pass("items_persist_across_snapshot_roundtrip")
+
+
+func _test_kill_event_packet_roundtrip() -> void:
+	_ran += 1
+	var packed: PackedByteArray = DriftNet.pack_kill_event(5, 3, 1, "Alice", "Bob")
+	var unpacked: Dictionary = DriftNet.unpack_kill_event(packed)
+	if unpacked.is_empty():
+		_fail("kill_event_roundtrip (unpack failed)")
+		return
+	if int(unpacked.get("attacker_id", -1)) != 5 or int(unpacked.get("victim_id", -1)) != 3:
+		_fail("kill_event_roundtrip (ids wrong)")
+		return
+	if int(unpacked.get("weapon_type", -1)) != 1:
+		_fail("kill_event_roundtrip (weapon_type wrong)")
+		return
+	if String(unpacked.get("attacker_name", "")) != "Alice" or String(unpacked.get("victim_name", "")) != "Bob":
+		_fail("kill_event_roundtrip (names wrong)")
+		return
+	_pass("kill_event_packet_roundtrip")
+
+
+func _test_chat_message_packet_roundtrip() -> void:
+	_ran += 1
+	var packed: PackedByteArray = DriftNet.pack_chat_message(7, DriftNet.CHAT_TYPE_TEAM, "hello world", "target_player")
+	var unpacked: Dictionary = DriftNet.unpack_chat_message(packed)
+	if unpacked.is_empty():
+		_fail("chat_message_roundtrip (unpack failed)")
+		return
+	if int(unpacked.get("ship_id", -1)) != 7:
+		_fail("chat_message_roundtrip (ship_id wrong)")
+		return
+	if int(unpacked.get("chat_type", -1)) != DriftNet.CHAT_TYPE_TEAM:
+		_fail("chat_message_roundtrip (chat_type wrong)")
+		return
+	if String(unpacked.get("text", "")) != "hello world":
+		_fail("chat_message_roundtrip (text wrong: '%s')" % String(unpacked.get("text", "")))
+		return
+	if String(unpacked.get("target_name", "")) != "target_player":
+		_fail("chat_message_roundtrip (target_name wrong)")
+		return
+	_pass("chat_message_packet_roundtrip")
+
+
+func _test_chat_broadcast_packet_roundtrip() -> void:
+	_ran += 1
+	var packed: PackedByteArray = DriftNet.pack_chat_broadcast("SenderName", DriftNet.CHAT_TYPE_PRIVATE, "secret msg", 3)
+	var unpacked: Dictionary = DriftNet.unpack_chat_broadcast(packed)
+	if unpacked.is_empty():
+		_fail("chat_broadcast_roundtrip (unpack failed)")
+		return
+	if String(unpacked.get("sender_name", "")) != "SenderName":
+		_fail("chat_broadcast_roundtrip (sender_name wrong)")
+		return
+	if int(unpacked.get("chat_type", -1)) != DriftNet.CHAT_TYPE_PRIVATE:
+		_fail("chat_broadcast_roundtrip (chat_type wrong)")
+		return
+	if String(unpacked.get("text", "")) != "secret msg":
+		_fail("chat_broadcast_roundtrip (text wrong)")
+		return
+	if int(unpacked.get("sender_freq", -1)) != 3:
+		_fail("chat_broadcast_roundtrip (sender_freq wrong)")
+		return
+	_pass("chat_broadcast_packet_roundtrip")
+
+
+func _test_kill_death_stats_in_snapshot() -> void:
+	_ran += 1
+	var s0 := DriftTypes.DriftShipState.new(1, Vector2(100, 200))
+	s0.kills = 5
+	s0.deaths = 2
+	var ships_arr: Array = [s0]
+	var packed: PackedByteArray = DriftNet.pack_snapshot_packet(200, ships_arr)
+	var unpacked: Dictionary = DriftNet.unpack_snapshot_packet(packed)
+	if unpacked.is_empty():
+		_fail("kill_death_stats_snapshot (unpack failed)")
+		return
+	var out_ships: Array = unpacked.get("ships", [])
+	if out_ships.size() != 1:
+		_fail("kill_death_stats_snapshot (expected 1 ship)")
+		return
+	var out: DriftTypes.DriftShipState = out_ships[0]
+	if int(out.kills) != 5 or int(out.deaths) != 2:
+		_fail("kill_death_stats_snapshot (kills=%d deaths=%d)" % [int(out.kills), int(out.deaths)])
+		return
+	_pass("kill_death_stats_in_snapshot")
+
+
+func _test_thor_fires_ring() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.thor_count = 1
+	var before: int = world.bullets.size()
+	world._use_thor(s1)
+	if int(s1.thor_count) != 0:
+		_fail("thor_fires_ring (count should be 0)")
+		return
+	if world.bullets.size() - before != 8:
+		_fail("thor_fires_ring (expected 8 bullets, got %d)" % (world.bullets.size() - before))
+		return
+	_pass("thor_fires_ring")
+
+
+func _test_rocket_boosts_speed() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.rocket_count = 1
+	var bonus_before: int = int(s1.top_speed_bonus)
+	world._use_rocket(s1)
+	if int(s1.rocket_count) != 0:
+		_fail("rocket_boosts_speed (count should be 0)")
+		return
+	if int(s1.top_speed_bonus) <= bonus_before:
+		_fail("rocket_boosts_speed (top_speed_bonus should increase)")
+		return
+	_pass("rocket_boosts_speed")
+
+
+func _test_decoy_spawns_and_expires() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.decoy_count = 1
+	world._use_decoy(s1)
+	if int(s1.decoy_count) != 0:
+		_fail("decoy_spawns (count should be 0)")
+		return
+	if world.decoys.size() != 1:
+		_fail("decoy_spawns (expected 1 decoy, got %d)" % world.decoys.size())
+		return
+	# Step past die_tick — decoy should be reaped.
+	var d = world.decoys.values()[0]
+	var ticks_left: int = int(d.die_tick) - int(world.tick) + 1
+	for _i in range(ticks_left):
+		world._step_decoys()
+		world.tick += 1
+	if world.decoys.size() != 0:
+		_fail("decoy_spawns (decoy should expire, still %d present)" % world.decoys.size())
+		return
+	_pass("decoy_spawns_and_expires")
+
+
+func _test_shrapnel_prize_adds_bonus() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	var before: int = int(s1.shrapnel_bonus)
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Shrapnel, false, 0)
+	if int(s1.shrapnel_bonus) != before + 1:
+		_fail("shrapnel_prize (bonus should be %d, got %d)" % [before + 1, int(s1.shrapnel_bonus)])
+		return
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Shrapnel, true, 0)
+	if int(s1.shrapnel_bonus) != before:
+		_fail("shrapnel_prize (negative should restore to %d, got %d)" % [before, int(s1.shrapnel_bonus)])
+		return
+	_pass("shrapnel_prize_adds_bonus")
+
+
+func _test_rotation_prize_adds_bonus() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Rotation, false, 0)
+	if int(s1.rotation_bonus) != 1:
+		_fail("rotation_prize (bonus should be 1, got %d)" % int(s1.rotation_bonus))
+		return
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Rotation, true, 0)
+	if int(s1.rotation_bonus) != 0:
+		_fail("rotation_prize (negative should restore to 0, got %d)" % int(s1.rotation_bonus))
+		return
+	_pass("rotation_prize_adds_bonus")
+
+
+func _test_all_weapons_prize() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.AllWeapons, false, 0)
+	if int(s1.gun_level) < 2:
+		_fail("all_weapons_prize (gun_level should be >=2, got %d)" % int(s1.gun_level))
+		return
+	if int(s1.bomb_level) < 2:
+		_fail("all_weapons_prize (bomb_level should be >=2, got %d)" % int(s1.bomb_level))
+		return
+	if not bool(s1.multi_fire_enabled):
+		_fail("all_weapons_prize (multi_fire should be enabled)")
+		return
+	_pass("all_weapons_prize")
+
+
+func _test_decoy_snapshot_roundtrip() -> void:
+	_ran += 1
+	var d := DriftTypes.DriftDecoyState.new(42, 1, 0, 2, Vector2(100, 200), Vector2(50, -30), 1.5, 999)
+	var s0 := DriftTypes.DriftShipState.new(1, Vector2(0, 0))
+	var packed: PackedByteArray = DriftNet.pack_snapshot_packet(10, [s0], Vector2.ZERO, Vector2.ZERO, -1, [], [], [], [], [], {}, [d])
+	var unpacked: Dictionary = DriftNet.unpack_snapshot_packet(packed)
+	var out_decoys: Array = unpacked.get("decoys", [])
+	if out_decoys.size() != 1:
+		_fail("decoy_snapshot_roundtrip (expected 1 decoy, got %d)" % out_decoys.size())
+		return
+	var od: DriftTypes.DriftDecoyState = out_decoys[0]
+	if int(od.id) != 42 or int(od.ship_type) != 2:
+		_fail("decoy_snapshot_roundtrip (id=%d type=%d)" % [int(od.id), int(od.ship_type)])
+		return
+	if abs(od.position.x - 100.0) > 0.1 or abs(od.position.y - 200.0) > 0.1:
+		_fail("decoy_snapshot_roundtrip (position mismatch)")
+		return
+	_pass("decoy_snapshot_roundtrip")
+
+
+func _test_brick_places_and_expires() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.brick_count = 1
+	s1.velocity = Vector2(100, 0)
+	var solid_before: int = world.solid_tiles.size()
+	world._use_brick(s1)
+	if int(s1.brick_count) != 0:
+		_fail("brick_places (count should be 0 after use)")
+		return
+	if world.solid_tiles.size() <= solid_before:
+		_fail("brick_places (no new solid tiles added)")
+		return
+	if world.bricks.size() != 1:
+		_fail("brick_places (bricks array should have 1 entry)")
+		return
+	# Advance past die_tick.
+	var die_tick: int = int(world.bricks[0].die_tick)
+	world.tick = die_tick + 1
+	world._step_bricks()
+	if world.solid_tiles.size() != solid_before:
+		_fail("brick_expires (tiles should be removed after expiry, remaining=%d extra)" % (world.solid_tiles.size() - solid_before))
+		return
+	_pass("brick_places_and_expires")
+
+
+func _test_quickcharge_prize_fills_energy() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	s1.energy_current = 10
+	s1.energy_max = 1000
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.QuickCharge, false, 0)
+	if int(s1.energy_current) != 1000:
+		_fail("quickcharge_prize (energy should be 1000, got %d)" % int(s1.energy_current))
+		return
+	_pass("quickcharge_prize_fills_energy")
+
+
+func _test_stealth_prize_toggles_ability() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Stealth, false, 0)
+	if not bool(s1.stealth_on):
+		_fail("stealth_prize (should be on after positive prize)")
+		return
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Stealth, true, 0)
+	if bool(s1.stealth_on):
+		_fail("stealth_prize (should be off after negative prize)")
+		return
+	_pass("stealth_prize_toggles_ability")
+
+
+func _test_portal_prize_and_use() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	if int(s1.portal_count) != 0:
+		_fail("portal_prize (initial count should be 0, got %d)" % int(s1.portal_count))
+		return
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Portal, false, 0)
+	if int(s1.portal_count) != 1:
+		_fail("portal_prize (count should be 1 after pickup, got %d)" % int(s1.portal_count))
+		return
+	var start_pos: Vector2 = s1.position
+	world._use_portal(s1)
+	if int(s1.portal_count) != 0:
+		_fail("portal_prize (count should be 0 after use, got %d)" % int(s1.portal_count))
+		return
+	if s1.position == start_pos:
+		_fail("portal_prize (ship should have moved after portal use)")
+		return
+	_pass("portal_prize_and_use")
+
+
+func _test_king_ship_id_snapshot_roundtrip() -> void:
+	# king_ship_id should survive pack → unpack.
+	var world := DriftWorld.new()
+	world.add_ship(1, Vector2(100, 100))
+	var snap := world.step_tick({}, false, 1)
+	snap.king_ship_id = 1
+	var ships_arr := DriftNet.snapshot_ships_from_dict(snap.ships)
+	var packed := DriftNet.pack_snapshot_packet(snap.tick, ships_arr, Vector2.ZERO, Vector2.ZERO, -1,
+		[], [], [], [], [], {"king_ship_id": 1})
+	var unpacked := DriftNet.unpack_snapshot_packet(packed)
+	if int(unpacked.get("king_ship_id", -999)) != 1:
+		_fail("king_ship_id_snapshot_roundtrip: expected 1 got %d" % int(unpacked.get("king_ship_id", -999)))
+		return
+	# king_ship_id = -1 (no king) should also roundtrip.
+	var packed2 := DriftNet.pack_snapshot_packet(snap.tick, ships_arr, Vector2.ZERO, Vector2.ZERO, -1,
+		[], [], [], [], [], {"king_ship_id": -1})
+	var unpacked2 := DriftNet.unpack_snapshot_packet(packed2)
+	if int(unpacked2.get("king_ship_id", -999)) != -1:
+		_fail("king_ship_id_snapshot_roundtrip (no king): expected -1 got %d" % int(unpacked2.get("king_ship_id", -999)))
+		return
+	_pass("king_ship_id_snapshot_roundtrip")
+
+
+func _test_server_hello_sets_username() -> void:
+	# pack_hello / unpack_hello roundtrip.
+	var name_in := "TestBot_42"
+	var pkt := DriftNet.pack_hello(name_in)
+	var name_out := DriftNet.unpack_hello(pkt)
+	if name_out != name_in:
+		_fail("server_hello_sets_username: expected '%s' got '%s'" % [name_in, name_out])
+		return
+	_pass("server_hello_sets_username")
 
 
 func _pass(name: String) -> void:

@@ -23,6 +23,7 @@ var map_w_tiles: int = 0
 var map_h_tiles: int = 0
 
 var _terrain_tex: Texture2D = null
+var _goal_zones: Array = []  # Array of {pos:Vector2, team:int}
 
 var _snapshot = null
 var _local_ship_id: int = -1
@@ -32,7 +33,19 @@ var _radar_enabled: bool = true
 var _xradar_active: bool = false
 
 
+func set_goal_zones(zones: Array) -> void:
+	if _goal_zones.size() == zones.size():
+		return
+	_goal_zones = zones
+	queue_redraw()
+
+
+var _static_built: bool = false
+
 func set_static_geometry(meta: Dictionary, solid_cells: Array, safe_cells: Array) -> void:
+	if _static_built:
+		return
+	_static_built = true
 	tile_size_px = maxi(1, int(meta.get("tile_size", tile_size_px)))
 	map_w_tiles = maxi(0, int(meta.get("w", 0)))
 	map_h_tiles = maxi(0, int(meta.get("h", 0)))
@@ -147,6 +160,57 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 				continue
 			draw_circle(center + d * px_per_tile, 2.0, COLOR_PRIZE)
 
+	# Flags
+	var _snap_flags: Array = _snapshot.flags if (_snapshot is Object and "flags" in _snapshot) else (_snapshot.get("flags", []) if _snapshot is Dictionary else [])
+	if not _snap_flags.is_empty():
+		var t_now: float = float(Time.get_ticks_msec()) / 1000.0
+		for fl in _snap_flags:
+			if fl == null:
+				continue
+			var fpos: Vector2 = fl.position if (fl is Object) else fl.get("position", Vector2.ZERO)
+			var fteam: int = int(fl.team) if (fl is Object) else int(fl.get("team", 0))
+			var fat_home: bool = bool(fl.at_home) if (fl is Object) else bool(fl.get("at_home", true))
+			var fpt := Vector2(
+				(float(fpos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
+				(float(fpos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
+			)
+			var fd := fpt - player_tile
+			if absf(fd.x) > max_delta or absf(fd.y) > max_delta:
+				continue
+			# Away flags blink; home flags are steady.
+			if not fat_home and fmod(t_now, 0.5) > 0.25:
+				continue
+			var fc := Color(1.0, 0.3, 0.3) if fteam == 1 else Color(0.3, 0.6, 1.0)
+			var fp := center + fd * px_per_tile
+			# Diamond shape (4 points)
+			var fs: float = 3.5
+			draw_colored_polygon(PackedVector2Array([fp + Vector2(0, -fs), fp + Vector2(fs, 0), fp + Vector2(0, fs), fp + Vector2(-fs, 0)]), fc)
+
+	# Goal zones (Powerball scoring areas)
+	for gz in _goal_zones:
+		var gpos: Vector2 = gz.get("pos", Vector2.ZERO)
+		var gteam: int = int(gz.get("team", 0))
+		var gpt := Vector2(
+			(float(gpos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
+			(float(gpos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
+		)
+		var gd := gpt - player_tile
+		if absf(gd.x) > max_delta or absf(gd.y) > max_delta:
+			continue
+		var gc := Color(1.0, 0.3, 0.3) if gteam == 1 else Color(0.3, 0.6, 1.0)
+		draw_arc(center + gd * px_per_tile, 5.0, 0.0, TAU, 12, gc, 1.5)
+
+	# Ball (Powerball)
+	var ball_pos: Vector2 = _snapshot.ball_position if (_snapshot is Object and "ball_position" in _snapshot) else _snapshot.get("ball_position", Vector2(-1e9, -1e9)) if _snapshot is Dictionary else Vector2(-1e9, -1e9)
+	if ball_pos.x > -1e8:
+		var bpt := Vector2(
+			(float(ball_pos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
+			(float(ball_pos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
+		)
+		var bd := bpt - player_tile
+		if absf(bd.x) <= max_delta and absf(bd.y) <= max_delta:
+			draw_circle(center + bd * px_per_tile, 3.0, Color(1.0, 1.0, 1.0, 1.0))
+
 	# Ships
 	if not _radar_enabled:
 		return
@@ -160,6 +224,9 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 		if ss == null:
 			continue
 		if int(ship_id) == _local_ship_id:
+			continue
+		var dut: int = int(ss.dead_until_tick) if ("dead_until_tick" in ss) else 0
+		if dut > 0 and int(_snapshot.get("tick", 0)) < dut:
 			continue
 		var st_on: bool = bool(ss.stealth_on) if ("stealth_on" in ss) else false
 		var ck_on: bool = bool(ss.cloak_on) if ("cloak_on" in ss) else false
@@ -180,7 +247,39 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 		var c := COLOR_TEAM if is_team else COLOR_ENEMY
 		draw_circle(center + d2 * px_per_tile, 2.0, c)
 
-	# TODO: Mines/deployed walls visibility requires authoritative entity list.
+	# Radar ships: ships outside AOI sent as lightweight positional blips.
+	if "radar_ships" in _snapshot:
+		for rs in _snapshot.radar_ships:
+			if rs == null or rs.get("dead", false):
+				continue
+			var rpos: Vector2 = rs.get("position", Vector2.ZERO)
+			var rpt := Vector2(
+				(float(rpos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
+				(float(rpos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
+			)
+			var rd := rpt - player_tile
+			if absf(rd.x) > max_delta or absf(rd.y) > max_delta:
+				continue
+			var rfreq: int = int(rs.get("freq", 0))
+			var ris_team: bool = (_my_freq != 0 and rfreq == _my_freq)
+			draw_circle(center + rd * px_per_tile, 2.0, COLOR_TEAM if ris_team else COLOR_ENEMY)
+
+	# Decoys: show as dim enemy/team blips (same as ships, slightly smaller).
+	if "decoys" in _snapshot:
+		for dc in _snapshot.decoys:
+			if dc == null:
+				continue
+			var dpos: Vector2 = dc.position if dc is Object else dc.get("position", Vector2.ZERO)
+			var dfreq: int = int(dc.freq) if dc is Object else int(dc.get("freq", 0))
+			var dpt := Vector2(
+				(float(dpos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
+				(float(dpos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
+			)
+			var dd := dpt - player_tile
+			if absf(dd.x) > max_delta or absf(dd.y) > max_delta:
+				continue
+			var dis_team: bool = (_my_freq != 0 and dfreq == _my_freq)
+			draw_circle(center + dd * px_per_tile, 1.5, (COLOR_TEAM if dis_team else COLOR_ENEMY) * Color(1, 1, 1, 0.5))
 
 
 func _draw_player_dot() -> void:

@@ -130,6 +130,8 @@ static func label_for_prize_kind(kind: int) -> String:
 	match int(kind):
 		DriftTypes.PrizeKind.Rotation:
 			return "Rot"
+		DriftTypes.PrizeKind.AllWeapons:
+			return "All"
 		DriftTypes.PrizeKind.Cloak:
 			return "Cloak"
 		DriftTypes.PrizeKind.Warp:
@@ -142,8 +144,6 @@ static func label_for_prize_kind(kind: int) -> String:
 			return "Rech"
 		DriftTypes.PrizeKind.Glue:
 			return "Glue"
-		DriftTypes.PrizeKind.AllWeapons:
-			return "All"
 		DriftTypes.PrizeKind.Shields:
 			return "Shields"
 		DriftTypes.PrizeKind.MultiPrize:

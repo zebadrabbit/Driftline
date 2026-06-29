@@ -21,6 +21,10 @@ const SETTINGS_SCHEMA_VERSION: int = 1
 const DEFAULTS: Dictionary = {
 	"format": SETTINGS_FORMAT,
 	"schema_version": SETTINGS_SCHEMA_VERSION,
+	"display": {
+		# "windowed", "fullscreen_exclusive", "fullscreen_borderless"
+		"mode": "windowed",
+	},
 	"audio": {
 		"master_db": 0.0,
 		"sfx_db": 0.0,
@@ -47,6 +51,7 @@ func _ready() -> void:
 	load_settings()
 	ensure_audio_buses()
 	apply_audio()
+	apply_display()
 	reapply_bindings_from_settings()
 	if OS.is_debug_build():
 		validate_bindings_runtime()
@@ -498,6 +503,17 @@ static func deserialize_input_event(d: Dictionary) -> InputEvent:
 		return jm
 
 	return null
+
+
+func apply_display() -> void:
+	var mode: String = str(get_value("display.mode", "windowed"))
+	match mode:
+		"fullscreen_exclusive":
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN)
+		"fullscreen_borderless":
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		_: # "windowed"
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 
 
 func apply_audio() -> void:
