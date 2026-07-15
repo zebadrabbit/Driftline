@@ -889,6 +889,14 @@ static func pack_snapshot_packet(
 	# King ship trailing section: i32 king_ship_id (-1 = none).
 	buffer.put_32(int(extra_data.get("king_ship_id", -1)))
 
+	# Ship points v1 (optional trailing; append-only).
+	#   u16 count, repeated: u32 id, u32 points
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sp = ships[i]
+		buffer.put_32(int(sp.id))
+		buffer.put_u32(maxi(0, int(sp.points) if ("points" in sp) else 0))
+
 	return buffer.data_array
 
 
@@ -1686,6 +1694,16 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 	if buffer.get_available_bytes() >= 4:
 		king_ship_id = int(buffer.get_32())
 
+	# Optional ship points v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var pts_count: int = int(buffer.get_u16())
+		if buffer.get_available_bytes() >= (pts_count * 8):
+			for _pi in range(pts_count):
+				var pts_id: int = int(buffer.get_32())
+				var pts_val: int = int(buffer.get_u32())
+				if ships_by_id.has(pts_id):
+					ships_by_id[pts_id].points = pts_val
+
 	return {
 		"type": pkt_type,
 		"tick": tick,
@@ -1722,7 +1740,7 @@ static func snapshot_ships_from_dict(ships_dict: Dictionary) -> Array:
 
 # --- Kill Event (server -> client, reliable) ---
 
-static func pack_kill_event(attacker_id: int, victim_id: int, weapon_type: int, attacker_name: String, victim_name: String) -> PackedByteArray:
+static func pack_kill_event(attacker_id: int, victim_id: int, weapon_type: int, attacker_name: String, victim_name: String, reward: int = 0) -> PackedByteArray:
 	var buffer := StreamPeerBuffer.new()
 	buffer.seek(0)
 	buffer.put_u8(PKT_KILL_EVENT)
@@ -1737,6 +1755,8 @@ static func pack_kill_event(attacker_id: int, victim_id: int, weapon_type: int, 
 	buffer.put_u8(mini(vname.size(), 255))
 	if vname.size() > 0:
 		buffer.put_data(vname.slice(0, mini(vname.size(), 255)))
+	# Trailing (append-only): u32 kill reward points.
+	buffer.put_u32(maxi(0, int(reward)))
 	return buffer.data_array
 
 
@@ -1761,7 +1781,10 @@ static func unpack_kill_event(bytes: PackedByteArray) -> Dictionary:
 		var vlen: int = buffer.get_u8()
 		if vlen > 0 and buffer.get_available_bytes() >= vlen:
 			victim_name = buffer.get_data(vlen)[1].get_string_from_utf8()
-	return {"attacker_id": attacker_id, "victim_id": victim_id, "weapon_type": weapon_type, "attacker_name": attacker_name, "victim_name": victim_name}
+	var reward: int = 0
+	if buffer.get_available_bytes() >= 4:
+		reward = int(buffer.get_u32())
+	return {"attacker_id": attacker_id, "victim_id": victim_id, "weapon_type": weapon_type, "attacker_name": attacker_name, "victim_name": victim_name, "reward": reward}
 
 
 # --- Chat Message (client -> server, reliable) ---

@@ -160,6 +160,8 @@ class DriftShipState:
 	# Kill/death stats (server authoritative, replicated via snapshots).
 	var kills: int = 0
 	var deaths: int = 0
+	# Score points (SubSpace-style: kill reward = victim bounty).
+	var points: int = 0
 
 	# CTF: which team's flag this ship is carrying (-1 = none).
 	var carried_flag_team: int = -1

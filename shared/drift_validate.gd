@@ -591,6 +591,8 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				"spawn_protect_ms": true,
 				"respawn_delay_ms": true,
 				"friendly_fire": true,
+				"bounty_increase_for_kill": true,
+				"fixed_kill_reward": true,
 			}
 			for ck in combat.keys():
 				var cks := String(ck)
@@ -600,6 +602,8 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 			_validate_optional_number_range(combat, "respawn_delay_ms", "ruleset.combat.respawn_delay_ms", 0.0, 600000.0, errors)
 			if combat.has("friendly_fire") and typeof(combat.get("friendly_fire")) != TYPE_BOOL:
 				errors.append(_err("ruleset.combat.friendly_fire", "must be a boolean"))
+			_validate_optional_number_range(combat, "bounty_increase_for_kill", "ruleset.combat.bounty_increase_for_kill", 0.0, 255.0, errors)
+			_validate_optional_number_range(combat, "fixed_kill_reward", "ruleset.combat.fixed_kill_reward", -1.0, 32000.0, errors)
 
 	# Optional team section (schema v2 only).
 	var team: Dictionary = {}

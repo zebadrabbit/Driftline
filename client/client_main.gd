@@ -3373,6 +3373,9 @@ func _poll_network_packets() -> void:
 				elif wt == 2:
 					weapon_label = "mined"
 				var line: String = "%s %s %s" % [a_name, weapon_label, v_name]
+				var reward: int = int(ke.get("reward", 0))
+				if reward > 0:
+					line += " (%d)" % reward
 				var expire_tick: int = (int(latest_snapshot.tick) if latest_snapshot != null else 0) + KILL_FEED_DURATION_TICKS
 				_kill_feed_entries.append({"text": line, "color": 3, "expire_tick": expire_tick})
 				if _kill_feed_entries.size() > KILL_FEED_MAX:

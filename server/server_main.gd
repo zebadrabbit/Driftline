@@ -1013,7 +1013,7 @@ func _step_authoritative_tick() -> void:
 				a_name = String(world.ships.get(a_id).username)
 			if world.ships.has(v_id):
 				v_name = String(world.ships.get(v_id).username)
-			var pkt: PackedByteArray = DriftNet.pack_kill_event(a_id, v_id, wt, a_name, v_name)
+			var pkt: PackedByteArray = DriftNet.pack_kill_event(a_id, v_id, wt, a_name, v_name, int(ke.get("reward", 0)))
 			_broadcast_reliable(pkt)
 		world._pending_kill_events.clear()
 

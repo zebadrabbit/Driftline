@@ -118,6 +118,7 @@ func _initialize() -> void:
 	_test_kill_death_stats_in_snapshot()
 	_test_king_ship_id_snapshot_roundtrip()
 	_test_server_hello_sets_username()
+	_test_kill_scoring_awards_points()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -4474,6 +4475,44 @@ func _test_kill_death_stats_in_snapshot() -> void:
 		_fail("kill_death_stats_snapshot (kills=%d deaths=%d)" % [int(out.kills), int(out.deaths)])
 		return
 	_pass("kill_death_stats_in_snapshot")
+
+
+func _test_kill_scoring_awards_points() -> void:
+	_ran += 1
+	# Kill reward = victim bounty; killer bounty += kill_bounty_increase; victim bounty resets.
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(100, 100))
+	world.add_ship(2, Vector2(300, 100))
+	var attacker: DriftTypes.DriftShipState = world.ships[1]
+	var victim: DriftTypes.DriftShipState = world.ships[2]
+	attacker.freq = 1
+	victim.freq = 2
+	victim.bounty = 12
+	var ok := world.apply_damage(1, 2, 999999, "bullet")
+	if not ok:
+		_fail("kill_scoring (damage rejected)")
+		return
+	if int(victim.deaths) != 1:
+		_fail("kill_scoring (victim deaths=%d)" % int(victim.deaths))
+		return
+	if int(attacker.points) != 12:
+		_fail("kill_scoring (attacker points=%d, expected 12)" % int(attacker.points))
+		return
+	if int(attacker.bounty) != int(world.kill_bounty_increase):
+		_fail("kill_scoring (attacker bounty=%d, expected %d)" % [int(attacker.bounty), int(world.kill_bounty_increase)])
+		return
+	if int(victim.bounty) != 0:
+		_fail("kill_scoring (victim bounty=%d, expected reset to 0)" % int(victim.bounty))
+		return
+	# Points survive a snapshot roundtrip.
+	var packed: PackedByteArray = DriftNet.pack_snapshot_packet(1, [attacker])
+	var unpacked: Dictionary = DriftNet.unpack_snapshot_packet(packed)
+	var out_ships: Array = unpacked.get("ships", [])
+	if out_ships.size() != 1 or int(out_ships[0].points) != 12:
+		_fail("kill_scoring (points snapshot roundtrip)")
+		return
+	_pass("kill_scoring_awards_points")
 
 
 func _test_thor_fires_ring() -> void:

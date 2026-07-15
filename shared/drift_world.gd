@@ -107,6 +107,9 @@ var safe_zone_max_ticks: int = 0
 var team_max_freq: int = 2
 var team_force_even: bool = true
 var combat_friendly_fire: bool = false
+# Kill scoring (SubSpace [Kill] defaults: BountyIncreaseForKill=6, FixedKillReward=-1).
+var kill_bounty_increase: int = 6
+var kill_fixed_reward: int = -1  # -1 = reward equals victim bounty
 
 
 func _ship_is_dead(ship_state: DriftTypes.DriftShipState, tick_value: int) -> bool:
@@ -384,6 +387,8 @@ func compute_world_hash() -> int:
 	parts.append("team_max_freq=%d" % int(team_max_freq))
 	parts.append("team_force_even=%d" % _qb(team_force_even))
 	parts.append("combat_friendly_fire=%d" % _qb(combat_friendly_fire))
+	parts.append("kill_bounty_increase=%d" % int(kill_bounty_increase))
+	parts.append("kill_fixed_reward=%d" % int(kill_fixed_reward))
 
 	# Prize/bullet systems state that affects future simulation.
 	parts.append("prize_enabled=%d" % _qb(prize_enabled))
@@ -444,6 +449,7 @@ func compute_world_hash() -> int:
 		parts.append("kills=%d" % int(s.kills))
 		parts.append("deaths=%d" % int(s.deaths))
 		parts.append("bounty=%d" % int(s.bounty))
+		parts.append("points=%d" % int(s.points))
 		parts.append("sz_used=%d" % int(s.safe_zone_time_used_ticks))
 		parts.append("sz_max=%d" % int(s.safe_zone_time_max_ticks))
 		parts.append("dead_until=%d" % int(s.dead_until_tick))
@@ -814,6 +820,10 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 					respawn_delay_ticks = int((rms_i * DriftConstants.TICK_RATE + 999) / 1000)
 			if combat.has("friendly_fire"):
 				combat_friendly_fire = bool(combat.get("friendly_fire"))
+			if combat.has("bounty_increase_for_kill"):
+				kill_bounty_increase = clampi(int(combat.get("bounty_increase_for_kill")), 0, 255)
+			if combat.has("fixed_kill_reward"):
+				kill_fixed_reward = clampi(int(combat.get("fixed_kill_reward")), -1, 32000)
 
 	# Team section (schema v2, optional).
 	# Note: schema v1 has no team config; defaults apply.
@@ -2591,14 +2601,20 @@ func apply_damage(attacker_id: int, target_id: int, damage: int, source: Variant
 			_prev_fire_by_ship[target_id] = false
 			_prev_ability_buttons_by_ship[target_id] = 0
 			_prev_item_buttons_by_ship[target_id] = 0
-			# Increment kill/death counters.
+			# Increment kill/death counters and score the kill (SubSpace-style:
+			# reward = victim bounty unless FixedKillReward overrides).
 			target.deaths = int(target.deaths) + 1
+			var kill_reward: int = int(kill_fixed_reward) if int(kill_fixed_reward) >= 0 else maxi(0, int(target.bounty))
 			if ships.has(attacker_id) and attacker_id != target_id:
 				var attacker_s: DriftTypes.DriftShipState = ships.get(attacker_id)
 				if attacker_s != null:
 					attacker_s.kills = int(attacker_s.kills) + 1
+					attacker_s.points = int(attacker_s.points) + kill_reward
+					attacker_s.bounty = int(attacker_s.bounty) + int(kill_bounty_increase)
+			# Bounty resets on death (SubSpace behavior).
+			target.bounty = _ship_spec_initial_bounty(target)
 			# Record kill event for server to broadcast.
-			_pending_kill_events.append({"attacker_id": attacker_id, "victim_id": target_id, "weapon_type": reason})
+			_pending_kill_events.append({"attacker_id": attacker_id, "victim_id": target_id, "weapon_type": reason, "reward": kill_reward})
 	return ok
 
 
@@ -2628,6 +2644,13 @@ func _record_wall_bounce(ship_id: int, pos: Vector2, normal: Vector2, impact_spe
 	})
 
 
+func _ship_spec_initial_bounty(ship_state: DriftTypes.DriftShipState) -> int:
+	var economy: Variant = _get_ship_spec_for(ship_state).get("economy")
+	if typeof(economy) == TYPE_DICTIONARY:
+		return maxi(0, int((economy as Dictionary).get("InitialBounty", 0)))
+	return 0
+
+
 func _ship_spec_initial_item_count(ship_state: DriftTypes.DriftShipState, key: String) -> int:
 	var misc: Variant = _get_ship_spec_for(ship_state).get("misc")
 	if typeof(misc) == TYPE_DICTIONARY:
@@ -2642,6 +2665,7 @@ func add_ship(id: int, position: Vector2, ship_type: int = 0) -> void:
 	s.bomb_level = _ship_spec_initial_bomb_level(s)
 	s.repel_count = _ship_spec_initial_item_count(s, "InitialRepel")
 	s.burst_count = _ship_spec_initial_item_count(s, "InitialBurst")
+	s.bounty = _ship_spec_initial_bounty(s)
 	s.safe_zone_time_used_ticks = 0
 	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
 	s.energy_max = maxi(0, int(energy_max_points))
@@ -3215,7 +3239,7 @@ func change_ship_type(ship_id: int, new_type: int) -> bool:
 	s.top_speed_bonus = 0
 	s.thruster_bonus = 0
 	s.recharge_bonus = 0
-	s.bounty = 0
+	s.bounty = _ship_spec_initial_bounty(s)
 	s.repel_count = 0
 	s.burst_count = 0
 	s.warp_count = 0
@@ -4485,6 +4509,7 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 	copy.super_shields = source.super_shields
 	copy.kills = source.kills
 	copy.deaths = source.deaths
+	copy.points = source.points
 	copy.freq = source.freq
 	copy.carried_flag_team = source.carried_flag_team
 	copy.thor_count = source.thor_count
