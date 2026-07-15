@@ -78,6 +78,7 @@ def convert(path: str):
     solid, fg, bg = [], [], []
     goal_cells, wormholes = [], []
     turf_flags = 0
+    entities_turf = []
     solid_set = set()
 
     def add_solid(x, y, ax, ay):
@@ -92,6 +93,7 @@ def convert(path: str):
             add_solid(x, y, *atlas(t))
         elif t == 170:
             turf_flags += 1
+            entities_turf.append({"type": "flag", "x": x, "y": y, "team": 0})
         elif t == 171:
             fg.append([x, y, *atlas(t)])
         elif t == 172:
@@ -113,7 +115,7 @@ def convert(path: str):
         elif t == 220:
             wormholes.append((x + 2, y + 2))  # 5x5 footprint, entity at center
 
-    entities = []
+    entities = list(entities_turf)
     for wx, wy in wormholes:
         entities.append({"type": "wormhole", "x": wx, "y": wy, "team": 0})
     for group in cluster(goal_cells):
@@ -142,7 +144,7 @@ def convert(path: str):
     print(f"{name}: {len(tiles)} records -> {len(solid)} solid, {len(fg)} fg, "
           f"{len(bg)} bg, {len(entities)} entities "
           f"(wormholes={len(wormholes)}, goals={len(cluster(goal_cells)) if goal_cells else 0}, "
-          f"turf_flags_skipped={turf_flags})")
+          f"turf_flags={turf_flags})")
 
     return {
         "format": "driftline.map",

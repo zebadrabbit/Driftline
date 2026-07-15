@@ -117,6 +117,7 @@ var _spectator_ship_ids: Dictionary = {}  # ship_id -> true
 # Each entry: {pos: Vector2, radius: float, team: int}  (team = owner of this goal)
 var _goal_zones: Array = []
 var _wormholes: Array = []  # Array[Vector2] px centers
+var _turf_flags: Array = []  # Array[DriftFlagState]; team = owning freq, 0 = neutral
 # CTF flags: Array[DriftFlagState] (at most 2 entries, one per team).
 var _flags: Array = []
 # Home position per team (Vector2). Used for auto-return and capture check.
@@ -460,6 +461,7 @@ func _load_selected_map_from_config() -> bool:
 	_flags.clear()
 	_flag_homes.clear()
 	_wormholes.clear()
+	_turf_flags.clear()
 	for e in map_entities:
 		if typeof(e) != TYPE_DICTIONARY:
 			continue
@@ -475,9 +477,13 @@ func _load_selected_map_from_config() -> bool:
 			var grad: float = float(d.get("radius", 64.0))
 			_goal_zones.append({"pos": epos, "radius": grad, "team": eteam})
 		elif etype == "flag":
-			_flag_homes[eteam] = epos
-			var fl := DriftTypes.DriftFlagState.new(eteam, epos)
-			_flags.append(fl)
+			if eteam == 0:
+				# Turf flag (original tile 170): claimable by touch, never carried.
+				_turf_flags.append(DriftTypes.DriftFlagState.new(0, epos))
+			else:
+				_flag_homes[eteam] = epos
+				var fl := DriftTypes.DriftFlagState.new(eteam, epos)
+				_flags.append(fl)
 		elif etype == "wormhole":
 			_wormholes.append(epos)
 	world.set_wormholes(_wormholes)
@@ -633,6 +639,25 @@ func _reset_match() -> void:
 		_respawn_ship(ship_id)
 	print("[SERVER] Match reset.")
 	_broadcast_reliable(DriftNet.pack_score_event(0, 0, 0, false, true, 0))
+
+
+func _check_turf() -> void:
+	# Turf flags: any alive enemy ship touching a flag claims it for their freq.
+	if world == null or _turf_flags.is_empty():
+		return
+	var now_tick: int = int(world.tick)
+	for fl in _turf_flags:
+		for sid in world.ships.keys():
+			var s: DriftTypes.DriftShipState = world.ships[sid]
+			if s == null or world._ship_is_dead(s, now_tick):
+				continue
+			var steam: int = int(s.freq)
+			if steam == int(fl.team) or steam <= 0:
+				continue
+			if s.position.distance_to(fl.position) <= FLAG_PICKUP_RADIUS:
+				fl.team = steam
+				print("[SERVER] Turf flag claimed by ship %d (freq %d)." % [int(sid), steam])
+				break
 
 
 func _check_ctf() -> void:
@@ -1026,6 +1051,7 @@ func _step_authoritative_tick() -> void:
 	_check_ball_goals()
 	# CTF flag pickup / capture / auto-return.
 	_check_ctf()
+	_check_turf()
 
 	if world.tick % DriftConstants.TICK_RATE == 0 and world.tick != last_printed_tick:
 		last_printed_tick = world.tick
@@ -1122,7 +1148,7 @@ func _pack_snapshot_for_client(my_ship_id: int, snapshot: DriftTypes.DriftWorldS
 			DriftNet.snapshot_ships_from_dict(snapshot.ships),
 			snapshot.ball_position, snapshot.ball_velocity, snapshot.ball_owner_id,
 			snapshot.bullets, snapshot.bombs, snapshot.mines, snapshot.prizes,
-			_pending_prize_events, {"flags": _flags, "king_ship_id": snapshot.king_ship_id}, snapshot.decoys, snapshot.bricks, _pending_effect_events
+			_pending_prize_events, {"flags": _flags + _turf_flags, "king_ship_id": snapshot.king_ship_id}, snapshot.decoys, snapshot.bricks, _pending_effect_events
 		)
 
 	var center: Vector2 = snapshot.ships[my_ship_id].position
@@ -1160,7 +1186,7 @@ func _pack_snapshot_for_client(my_ship_id: int, snapshot: DriftTypes.DriftWorldS
 		mines_aoi,
 		prizes_aoi,
 		_pending_prize_events,
-		{"flags": _flags, "radar_ships": radar_ships, "king_ship_id": snapshot.king_ship_id},
+		{"flags": _flags + _turf_flags, "radar_ships": radar_ships, "king_ship_id": snapshot.king_ship_id},
 		snapshot.decoys.filter(func(d): return d.position.distance_to(center) <= AOI_RADIUS),
 		snapshot.bricks,
 		_pending_effect_events
