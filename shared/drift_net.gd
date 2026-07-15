@@ -708,7 +708,7 @@ static func pack_snapshot_packet(
 		buffer.put_32(int(bmb.spawn_tick))
 		buffer.put_32(int(bmb.die_tick))
 		buffer.put_u16(int(clampi(int(bmb.bounces_left), 0, 65535)))
-		buffer.put_u8(int(clampi(int(bmb.level), 1, 3)))
+		buffer.put_u8(int(clampi(int(bmb.level), 1, 4)))  # 4 = Thor
 		var bflags: int = 0
 		if bool(bmb.is_emp):
 			bflags |= 1

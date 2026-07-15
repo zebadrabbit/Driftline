@@ -304,7 +304,7 @@ class DriftBulletState:
 	) -> void:
 		id = bullet_id
 		owner_id = owner_id_value
-		level = clampi(int(level_value), 1, 3)
+		level = clampi(int(level_value), 1, 4)  # 4 = burst pellet / Thor
 		position = pos
 		velocity = vel
 		spawn_tick = spawn_tick_value
@@ -341,7 +341,7 @@ class DriftBombState:
 	) -> void:
 		id = int(bomb_id)
 		owner_id = int(owner_id_value)
-		level = clampi(int(level_value), 1, 3)
+		level = clampi(int(level_value), 1, 4)  # 4 = burst pellet / Thor
 		position = pos
 		velocity = vel
 		spawn_tick = int(spawn_tick_value)

@@ -120,6 +120,7 @@ func _initialize() -> void:
 	_test_server_hello_sets_username()
 	_test_kill_scoring_awards_points()
 	_test_classic_ship_stats()
+	_test_thor_and_burst_classic()
 	_test_wormhole_pull_and_teleport()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
@@ -4589,22 +4590,78 @@ func _test_classic_ship_stats() -> void:
 	_pass("classic_ship_stats")
 
 
+func _test_thor_and_burst_classic() -> void:
+	_ran += 1
+	# Thor: single L4 bomb that travels through walls.
+	var world = DriftWorld.new()
+	world.set_map_dimensions(100, 100)
+	var solids: Array = []
+	for ty in range(0, 100):
+		solids.append([20, ty, 0, 0])
+	world.set_solid_tiles(solids)
+	world.add_ship(1, Vector2(160, 160))
+	var s: DriftTypes.DriftShipState = world.ships[1]
+	s.rotation = 0.0
+	s.thor_count = 1
+	world._use_thor(s)
+	if world.bombs.size() != 1:
+		_fail("thor_burst (expected 1 thor bomb, got %d)" % world.bombs.size())
+		return
+	var thor: DriftTypes.DriftBombState = world.bombs.values()[0]
+	if int(thor.level) != 4:
+		_fail("thor_burst (thor level=%d, expected 4)" % int(thor.level))
+		return
+	for _i in range(400):
+		world.step_tick({})
+	if not world.bombs.has(int(thor.id)) or thor.position.x <= 20.0 * 16.0 + 16.0:
+		_fail("thor_burst (thor blocked by wall: alive=%s x=%f)" % [str(world.bombs.has(int(thor.id))), thor.position.x])
+		return
+	# Burst: pellets are level 4, unarmed until they bounce.
+	var w2 = DriftWorld.new()
+	w2.set_map_dimensions(80, 60)
+	w2.add_ship(1, Vector2(300, 300))
+	w2.add_ship(2, Vector2(340, 300))
+	w2.ships[1].freq = 1
+	w2.ships[2].freq = 2
+	w2.ships[1].burst_count = 1
+	w2._use_burst(w2.ships[1])
+	if w2.bullets.is_empty():
+		_fail("thor_burst (no burst pellets)")
+		return
+	var e0: int = int(w2.ships[2].energy_current)
+	w2.step_tick({})
+	if int(w2.ships[2].energy_current) < e0:
+		_fail("thor_burst (unarmed pellet damaged ship)")
+		return
+	# Arm one pellet (simulate a wall bounce) and aim it at the enemy.
+	var pellet: DriftTypes.DriftBulletState = w2.bullets.values()[0]
+	pellet.bounces_left = 99
+	pellet.position = Vector2(335, 300)
+	pellet.velocity = Vector2(60, 0)
+	w2.step_tick({})
+	if int(w2.ships[2].energy_current) >= e0:
+		_fail("thor_burst (armed pellet did no damage)")
+		return
+	_pass("thor_and_burst_classic")
+
+
 func _test_thor_fires_ring() -> void:
 	_ran += 1
+	# Classic Thor: consumes one charge and fires a single L4 bomb.
 	var world = DriftWorld.new()
 	world.set_map_dimensions(80, 60)
 	world.add_ship(1, Vector2(500, 500))
 	var s1 = world.ships.get(1)
 	s1.thor_count = 1
-	var before: int = world.bullets.size()
+	var before: int = world.bombs.size()
 	world._use_thor(s1)
 	if int(s1.thor_count) != 0:
 		_fail("thor_fires_ring (count should be 0)")
 		return
-	if world.bullets.size() - before != 8:
-		_fail("thor_fires_ring (expected 8 bullets, got %d)" % (world.bullets.size() - before))
+	if world.bombs.size() - before != 1:
+		_fail("thor_fires_ring (expected 1 thor bomb, got %d)" % (world.bombs.size() - before))
 		return
-	_pass("thor_fires_ring")
+	_pass("thor_single_l4_bomb")
 
 
 func _test_rocket_boosts_speed() -> void:

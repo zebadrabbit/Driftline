@@ -91,6 +91,8 @@ var bullet_damage_level: int = 200
 var bullet_damage_upgrade: int = 100
 var bomb_damage_level: int = 750
 var burst_damage_level: int = 515
+# Burst pellets spawn with this bounce budget; bounces_left < this means "armed".
+const BURST_SPAWN_BOUNCES: int = 100
 
 # Combat tuning.
 # Spawn protection blocks damage application for a short period after spawn/respawn.
@@ -1341,9 +1343,15 @@ func _step_bombs(ship_ids_sorted: Array) -> void:
 
 		var old_pos: Vector2 = b.position
 		var new_pos: Vector2 = old_pos + b.velocity * DriftConstants.TICK_DT
+		# Thor (level 4) travels through walls; despawn quietly once out of the arena.
+		if int(b.level) >= 4:
+			b.position = new_pos
+			if new_pos.x < 0.0 or new_pos.y < 0.0 or new_pos.x > float(DriftConstants.ARENA_MAX.x) or new_pos.y > float(DriftConstants.ARENA_MAX.y):
+				to_erase.append(bid)
+				continue
 		# Wall collision/bounce.
 		var sweep := {"hit": false}
-		if br > 0.0:
+		if br > 0.0 and int(b.level) < 4:
 			sweep = _sweep_circle_against_static_solids(old_pos, new_pos, br)
 		if bool(sweep.get("hit", false)):
 			var hit_pos: Vector2 = sweep.get("pos", old_pos)
@@ -1375,7 +1383,8 @@ func _step_bombs(ship_ids_sorted: Array) -> void:
 			var _owner: DriftTypes.DriftShipState = ships[int(b.owner_id)]
 			owner_has_prox = bool(_owner.bomb_proximity_enabled)
 			owner_freq = int(_owner.freq)
-		if owner_has_prox:
+		# Thor is a proximity bomb regardless of the owner's prox prize.
+		if owner_has_prox or int(b.level) >= 4:
 			for sid in ship_ids_sorted:
 				var s: DriftTypes.DriftShipState = ships.get(sid)
 				if s == null or _ship_is_dead(s, tick):
@@ -1663,6 +1672,10 @@ func _step_bullets(ship_ids_sorted: Array) -> void:
 			if _ship_is_dead(target, tick):
 				continue
 			if b.position.distance_squared_to(target.position) > hit_r2:
+				continue
+			# Burst pellets (level 4) only arm after a wall bounce; unarmed pellets
+			# pass through ships harmlessly (original burst behavior).
+			if int(b.level) >= 4 and int(b.bounces_left) >= BURST_SPAWN_BOUNCES:
 				continue
 			# Apply damage + optional knock.
 			var cfg := _resolve_bullet_combat_cfg_for_level(int(b.level))
@@ -3257,11 +3270,11 @@ func _use_burst(ship_state: DriftTypes.DriftShipState) -> void:
 		next_bullet_id += 1
 		var lifetime_ticks: int = int(bullet_lifetime_ticks)
 		var die_tick: int = int(tick) + lifetime_ticks
-		# ponytail: level 4 = burst pellet (BurstDamageLevel); original pellets only arm
-		# after a wall bounce — add an armed flag if that matters in playtests.
+		# Level 4 = burst pellet (BurstDamageLevel). Spawned with the full bounce
+		# budget; armed (able to hit ships) only once it has bounced at least once.
 		bullets[bid] = DriftTypes.DriftBulletState.new(
 			bid, int(ship_state.id), 4, center + dir * 8.0, vel,
-			int(tick), die_tick, 0
+			int(tick), die_tick, BURST_SPAWN_BOUNCES
 		)
 
 
@@ -3360,7 +3373,7 @@ func _use_decoy(ship_state: DriftTypes.DriftShipState) -> void:
 
 
 func _use_thor(ship_state: DriftTypes.DriftShipState) -> void:
-	## Consume one Thor charge. Fire bullets in 8 directions (level 1, no energy cost).
+	## Consume one Thor charge: a single L4 proximity bomb that travels through walls.
 	if int(ship_state.thor_count) <= 0:
 		return
 	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
@@ -3368,20 +3381,16 @@ func _use_thor(ship_state: DriftTypes.DriftShipState) -> void:
 		return
 	ship_state.thor_count = int(ship_state.thor_count) - 1
 	effect_events.append({"type": &"thor", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
-	var thor_bullet_count: int = 8
-	var center: Vector2 = ship_state.position
-	var speed: float = float(bullet_speed)
-	var angle_step: float = TAU / float(thor_bullet_count)
-	for i in range(thor_bullet_count):
-		var angle: float = float(i) * angle_step
-		var dir: Vector2 = Vector2(cos(angle), sin(angle))
-		var vel: Vector2 = dir * speed
-		var bid: int = int(next_bullet_id)
-		next_bullet_id += 1
-		var die_tick: int = int(tick) + int(bullet_lifetime_ticks)
-		bullets[bid] = DriftTypes.DriftBulletState.new(
-			bid, int(ship_state.id), 1, center + dir * 8.0, vel, int(tick), die_tick, 0
-		)
+	var prof := _resolve_bomb_fire_profile_for_ship(ship_state)
+	var speed: float = float(int(prof.get("speed_px_s", BOMB_DEFAULT_SPEED_PX_S)))
+	var fwd := Vector2(cos(float(ship_state.rotation)), sin(float(ship_state.rotation)))
+	var pos: Vector2 = ship_state.position + fwd * (float(DriftConstants.SHIP_RADIUS) + float(BOMB_RADIUS_PX) + 2.0)
+	var vel: Vector2 = ship_state.velocity + fwd * speed
+	var die_tick: int = int(tick) + int(BOMB_DEFAULT_LIFETIME_TICKS)
+	bombs[next_bomb_id] = DriftTypes.DriftBombState.new(
+		next_bomb_id, int(ship_state.id), 4, pos, vel, int(tick), die_tick, 0, false
+	)
+	next_bomb_id += 1
 
 
 func _use_rocket(ship_state: DriftTypes.DriftShipState) -> void:
