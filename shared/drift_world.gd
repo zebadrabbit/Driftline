@@ -1482,14 +1482,18 @@ func _wormhole_teleport(s: DriftTypes.DriftShipState, entry_index: int) -> void:
 		out_pos.x = clampf(out_pos.x, DriftConstants.ARENA_MIN.x + 32.0, DriftConstants.ARENA_MAX.x - 32.0)
 		out_pos.y = clampf(out_pos.y, DriftConstants.ARENA_MIN.y + 32.0, DriftConstants.ARENA_MAX.y - 32.0)
 		if not is_position_blocked(out_pos, DriftConstants.SHIP_RADIUS):
+			var depart := s.position
 			s.position = out_pos
-			collision_events.append({"type": "wormhole", "ship_id": int(s.id), "pos": out_pos})
+			effect_events.append({"type": &"warp", "ship_id": int(s.id), "px": depart.x, "py": depart.y})
+			effect_events.append({"type": &"warp", "ship_id": int(s.id), "px": out_pos.x, "py": out_pos.y})
 			return
 	# Single wormhole (or blocked exit): random warp, same stream as spawns.
 	var spawn = get_non_safe_spawn_point()
 	if spawn is Vector2:
+		var depart2 := s.position
 		s.position = spawn
-		collision_events.append({"type": "wormhole", "ship_id": int(s.id), "pos": spawn})
+		effect_events.append({"type": &"warp", "ship_id": int(s.id), "px": depart2.x, "py": depart2.y})
+		effect_events.append({"type": &"warp", "ship_id": int(s.id), "px": spawn.x, "py": spawn.y})
 
 
 func _step_decoys() -> void:

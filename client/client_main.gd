@@ -190,6 +190,13 @@ var _last_bounce_time_s: float = -999.0
 @onready var _thrust_audio: AudioStreamPlayer = get_node_or_null("ThrustAudio")
 
 var _prize_audio: AudioStreamPlayer = null
+var _sfx_players: Dictionary = {}  # name -> AudioStreamPlayer
+
+
+func _play_sfx(sfx_name: String) -> void:
+	var p = _sfx_players.get(sfx_name)
+	if p != null:
+		p.play()
 var _jukebox: Node = null
 
 # Client-only combat feedback (must not affect sim determinism).
@@ -441,6 +448,16 @@ func _apply_local_default_ruleset_if_available() -> void:
 	if sfx is AudioStream:
 		_prize_audio.stream = sfx
 	add_child(_prize_audio)
+
+	# Event SFX pool (original SubSpace wavs). One player per sound; fire-and-forget.
+	for sfx_name in ["warp", "goal", "flag", "repel", "thor", "burst", "explode0", "explode1", "bomb1"]:
+		var p := AudioStreamPlayer.new()
+		p.name = "Sfx_" + sfx_name
+		var st = load("res://client/audio/%s.wav" % sfx_name)
+		if st is AudioStream:
+			p.stream = st
+		add_child(p)
+		_sfx_players[sfx_name] = p
 
 	# Gun SFX (client-side). Created programmatically to avoid scene edits.
 	_gun_audio = AudioStreamPlayer.new()
@@ -1103,6 +1120,7 @@ func _consume_local_combat_events() -> void:
 			var blvl: int = int(d.get("level", 1))
 			var tier: int = 2 if blvl >= 3 else 1
 			_active_explosions.append({"pos": bpos, "start_tick": cur_tick, "tier": tier, "level": blvl})
+			_play_sfx("explode1" if blvl >= 2 else "explode0")
 
 	_prune_local_combat_fx(cur_tick)
 	queue_redraw()
@@ -2079,10 +2097,13 @@ func _consume_local_effect_events() -> void:
 		match StringName(ee.get("type", "")):
 			&"repel":
 				_active_repel_rings.append({"pos": pos, "start_tick": int(world.tick)})
+				_play_sfx("repel")
 			&"warp":
 				_active_warp_flashes.append({"pos": pos, "start_tick": int(world.tick)})
+				_play_sfx("warp")
 			&"thor":
 				_active_thor_bursts.append({"pos": pos, "start_tick": int(world.tick)})
+				_play_sfx("thor")
 
 
 const REPEL_RING_DURATION_TICKS: int = 24 # 0.4s at 60Hz
@@ -3452,6 +3473,7 @@ func _poll_network_packets() -> void:
 					_match_over = false
 					_match_winner = 0
 				if scorer > 0:
+					_play_sfx("goal")
 					var score_line: String = "Team %d scores! (%d-%d)" % [scorer, _team_scores[0], _team_scores[1]]
 					var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
 					_kill_feed_entries.append({"text": score_line, "color": 2, "expire_tick": now_tick + KILL_FEED_DURATION_TICKS})
@@ -3727,12 +3749,21 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	if latest_snapshot != null:
 		latest_snapshot.prizes = authoritative_prizes
 
-	# Authoritative flag state (CTF).
+	# Authoritative flag state (CTF + turf). Play flag.wav on ownership/carrier changes.
+	var prev_flag_sig: Array = []
+	for pf in authoritative_flags:
+		prev_flag_sig.append([int(pf.team), int(pf.carrier_ship_id)])
 	authoritative_flags.clear()
 	if snap_dict.has("flags") and (snap_dict.get("flags") is Array):
 		for fl in (snap_dict.get("flags") as Array):
 			if fl != null and fl is DriftTypes.DriftFlagState:
 				authoritative_flags.append(fl)
+	if prev_flag_sig.size() == authoritative_flags.size() and not prev_flag_sig.is_empty():
+		for fi in range(authoritative_flags.size()):
+			var nf: DriftTypes.DriftFlagState = authoritative_flags[fi]
+			if int(prev_flag_sig[fi][0]) != int(nf.team) or int(prev_flag_sig[fi][1]) != int(nf.carrier_ship_id):
+				_play_sfx("flag")
+				break
 
 	# Radar ships: lightweight out-of-AOI ship positions for minimap.
 	if latest_snapshot != null:
@@ -3750,10 +3781,13 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		match StringName(ee.get("type", "")):
 			&"repel":
 				_active_repel_rings.append({"pos": ee_pos, "start_tick": snap_tick})
+				_play_sfx("repel")
 			&"warp":
 				_active_warp_flashes.append({"pos": ee_pos, "start_tick": snap_tick})
+				_play_sfx("warp")
 			&"thor":
 				_active_thor_bursts.append({"pos": ee_pos, "start_tick": snap_tick})
+				_play_sfx("thor")
 
 	# Apply authoritative brick tiles to TileMapSolid.
 	_apply_brick_tiles(snap_dict.get("bricks", []))
