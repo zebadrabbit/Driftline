@@ -955,6 +955,22 @@ func _process(delta: float) -> void:
 					prox,
 					bb
 				)
+				# Classic status panel extras: flag counts, shield/super timers.
+				if hud.has_method("set_classic_status"):
+					var pers_flags: int = 0
+					var team_flags: int = 0
+					var my_freq0: int = int(ss.freq) if ("freq" in ss) else 0
+					for fl in authoritative_flags:
+						if fl == null:
+							continue
+						if int(fl.carrier_ship_id) == int(local_ship_id):
+							pers_flags += 1
+						if my_freq0 != 0 and int(fl.team) == my_freq0:
+							team_flags += 1
+					var sh_until: int = int(ss.shields_until_tick) if ("shields_until_tick" in ss) else 0
+					var sh_s: float = float(maxi(0, sh_until - now_tick)) * DriftConstants.TICK_DT
+					var sup_on: bool = bool(ss.super_shields) if ("super_shields" in ss) else false
+					hud.call("set_classic_status", pers_flags, team_flags, sh_s, sup_on)
 				# Minimap dynamic state (client-only UI; uses authoritative snapshot)
 				if hud.has_method("set_minimap_dynamic"):
 					var my_freq: int = int(ss.freq) if ("freq" in ss) else 0

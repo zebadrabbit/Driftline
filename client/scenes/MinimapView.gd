@@ -160,16 +160,23 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 				continue
 			draw_circle(center + d * px_per_tile, 2.0, COLOR_PRIZE)
 
-	# Flags
+	# Flags. Original radar semantics (Screen Items help):
+	# - enemy flag carriers show as RED ship dots (see ships loop below)
+	# - team-captured flags alternate dark yellow / red
 	var _snap_flags: Array = _snapshot.flags if (_snapshot is Object and "flags" in _snapshot) else (_snapshot.get("flags", []) if _snapshot is Dictionary else [])
+	var _enemy_carrier_ids: Dictionary = {}
 	if not _snap_flags.is_empty():
 		var t_now: float = float(Time.get_ticks_msec()) / 1000.0
+		var flash_red: bool = fmod(t_now, 0.5) > 0.25
 		for fl in _snap_flags:
 			if fl == null:
 				continue
 			var fpos: Vector2 = fl.position if (fl is Object) else fl.get("position", Vector2.ZERO)
 			var fteam: int = int(fl.team) if (fl is Object) else int(fl.get("team", 0))
 			var fat_home: bool = bool(fl.at_home) if (fl is Object) else bool(fl.get("at_home", true))
+			var fcarrier: int = int(fl.carrier_ship_id) if (fl is Object) else int(fl.get("carrier_ship_id", -1))
+			if fcarrier >= 0 and fcarrier != _local_ship_id:
+				_enemy_carrier_ids[fcarrier] = true
 			var fpt := Vector2(
 				(float(fpos.x) - float(DriftConstants.ARENA_MIN.x)) / float(tile_size_px),
 				(float(fpos.y) - float(DriftConstants.ARENA_MIN.y)) / float(tile_size_px)
@@ -178,9 +185,12 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 			if absf(fd.x) > max_delta or absf(fd.y) > max_delta:
 				continue
 			# Away flags blink; home flags are steady.
-			if not fat_home and fmod(t_now, 0.5) > 0.25:
+			if not fat_home and flash_red:
 				continue
 			var fc := Color(1.0, 0.3, 0.3) if fteam == 1 else Color(0.3, 0.6, 1.0)
+			if _my_freq != 0 and fteam == _my_freq:
+				# Team-captured flag: alternately flashing dark yellow / red.
+				fc = Color(1.0, 0.25, 0.25) if flash_red else Color(0.7, 0.6, 0.1)
 			var fp := center + fd * px_per_tile
 			# Diamond shape (4 points)
 			var fs: float = 3.5
@@ -245,6 +255,9 @@ func _draw_dynamic(dest_origin: Vector2, px_per_tile: float, span: int, player_t
 		var other_freq: int = int(ss.freq) if ("freq" in ss) else 0
 		var is_team: bool = (_my_freq != 0 and other_freq == _my_freq)
 		var c := COLOR_TEAM if is_team else COLOR_ENEMY
+		# Enemy flag carriers show red (original CTF radar rule).
+		if not is_team and _enemy_carrier_ids.has(int(ship_id)):
+			c = Color(1.0, 0.2, 0.2, 1.0)
 		draw_circle(center + d2 * px_per_tile, 2.0, c)
 
 	# Radar ships: ships outside AOI sent as lightweight positional blips.

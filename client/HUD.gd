@@ -382,6 +382,21 @@ func set_minimap_goal_zones(zones: Array) -> void:
 		_minimap.call("set_goal_zones", zones)
 
 
+## Classic SubSpace status panel extras (Screen Items help): personal/team flag
+## counts, shield countdown, super indicator.
+var flags_personal: int = 0
+var flags_team: int = 0
+var shield_seconds: float = 0.0
+var super_active: bool = false
+
+
+func set_classic_status(personal_flags: int, team_flags: int, shield_s: float, super_on: bool) -> void:
+	flags_personal = maxi(0, int(personal_flags))
+	flags_team = maxi(0, int(team_flags))
+	shield_seconds = maxf(0.0, float(shield_s))
+	super_active = bool(super_on)
+
+
 func set_minimap_dynamic(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
 	if _minimap != null and _minimap.has_method("set_dynamic_state"):
 		_minimap.call("set_dynamic_state", snapshot, local_ship_id, my_freq, player_world_pos, xradar_active)
@@ -401,6 +416,9 @@ func _process(delta: float) -> void:
 
 	var left := "%s(%d)" % [player_name, bounty]
 	var right := " | Stars: %d | Ship: %d" % [stars, ship_id]
+	if flags_personal > 0 or flags_team > 0:
+		# Personal on the left, team on the right (original status panel layout).
+		right += " | F:%d/%d" % [flags_personal, flags_team]
 	var text := left + right
 	if text != _last_text:
 		_last_text = text
@@ -437,6 +455,10 @@ func _process(delta: float) -> void:
 		var remaining_ticks: int = maxi(0, ship_safe_zone_time_max_ticks - ship_safe_zone_time_used_ticks)
 		var remaining_s: float = float(remaining_ticks) * float(DriftConstants.TICK_DT)
 		stats_suffix += "  SZ:%0.1fs" % remaining_s
+	if shield_seconds > 0.0:
+		stats_suffix += "  SH:%0.1fs" % shield_seconds
+	if super_active:
+		stats_suffix += "  SUPER"
 
 	# Prefix (always white).
 	if stats_prefix != _last_stats_text:
