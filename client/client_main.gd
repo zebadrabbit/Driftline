@@ -970,7 +970,13 @@ func _process(delta: float) -> void:
 					var sh_until: int = int(ss.shields_until_tick) if ("shields_until_tick" in ss) else 0
 					var sh_s: float = float(maxi(0, sh_until - now_tick)) * DriftConstants.TICK_DT
 					var sup_on: bool = bool(ss.super_shields) if ("super_shields" in ss) else false
-					hud.call("set_classic_status", pers_flags, team_flags, sh_s, sup_on)
+					# Portal timer from the predicted local ship (beacon is client-predictable).
+					var portal_s: float = 0.0
+					if world != null and world.ships.has(local_ship_id):
+						var ps = world.ships.get(local_ship_id)
+						if ps != null:
+							portal_s = float(maxi(0, int(ps.portal_until_tick) - int(world.tick))) * DriftConstants.TICK_DT
+					hud.call("set_classic_status", pers_flags, team_flags, sh_s, sup_on, portal_s)
 				# Minimap dynamic state (client-only UI; uses authoritative snapshot)
 				if hud.has_method("set_minimap_dynamic"):
 					var my_freq: int = int(ss.freq) if ("freq" in ss) else 0
@@ -1666,6 +1672,7 @@ func _draw() -> void:
 	_draw_bricks()
 	_draw_goal_zones()
 	_draw_wormholes()
+	_draw_portal_beacon()
 	_draw_prizes()
 	_draw_flags()
 	_draw_bombs()
@@ -2379,6 +2386,25 @@ func _draw_wormholes() -> void:
 	for wp in client_wormholes:
 		var dst := Rect2((wp as Vector2) - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
 		draw_texture_rect_region(WORMHOLE_TEX, dst, src, Color.WHITE)
+
+
+func _draw_portal_beacon() -> void:
+	# Local player's classic portal return beacon (predicted world state).
+	if world == null or not world.ships.has(local_ship_id):
+		return
+	var s = world.ships.get(local_ship_id)
+	if s == null or int(s.portal_until_tick) <= int(world.tick):
+		return
+	if WORMHOLE_TEX == null:
+		draw_circle(Vector2(s.portal_pos.x, s.portal_pos.y), 8.0, Color(0.4, 1.0, 0.6, 0.8))
+		return
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * WORMHOLE_ANIM_FPS)) % WORMHOLE_FRAME_COUNT
+	var frame_sz: float = float(WORMHOLE_FRAME_PX)
+	var draw_sz2: float = frame_sz * 2.0
+	var src2 := Rect2(float(frame) * frame_sz, 0.0, frame_sz, frame_sz)
+	var dst2 := Rect2(Vector2(s.portal_pos.x, s.portal_pos.y) - Vector2(draw_sz2, draw_sz2) * 0.5, Vector2(draw_sz2, draw_sz2))
+	draw_texture_rect_region(WORMHOLE_TEX, dst2, src2, Color(0.7, 1.0, 0.8, 0.9))
 
 
 func _draw_goal_zones() -> void:

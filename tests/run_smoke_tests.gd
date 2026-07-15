@@ -121,6 +121,7 @@ func _initialize() -> void:
 	_test_kill_scoring_awards_points()
 	_test_classic_ship_stats()
 	_test_thor_and_burst_classic()
+	_test_portal_beacon_roundtrip()
 	_test_wormhole_pull_and_teleport()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
@@ -4645,6 +4646,30 @@ func _test_thor_and_burst_classic() -> void:
 	_pass("thor_and_burst_classic")
 
 
+func _test_portal_beacon_roundtrip() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(300, 300))
+	var s: DriftTypes.DriftShipState = world.ships[1]
+	s.portal_count = 1
+	# First use: drops beacon at current position, consumes charge, no teleport.
+	world._use_portal(s)
+	if int(s.portal_count) != 0 or int(s.portal_until_tick) <= 0 or s.portal_pos != Vector2(300, 300):
+		_fail("portal (beacon not dropped: count=%d until=%d)" % [int(s.portal_count), int(s.portal_until_tick)])
+		return
+	if s.position != Vector2(300, 300):
+		_fail("portal (drop should not teleport)")
+		return
+	# Move away, use again: returns to beacon, clears it.
+	s.position = Vector2(700, 700)
+	world._use_portal(s)
+	if s.position != Vector2(300, 300) or int(s.portal_until_tick) != 0:
+		_fail("portal (return failed: pos=%s until=%d)" % [str(s.position), int(s.portal_until_tick)])
+		return
+	_pass("portal_beacon_roundtrip")
+
+
 func _test_thor_fires_ring() -> void:
 	_ran += 1
 	# Classic Thor: consumes one charge and fires a single L4 bomb.
@@ -4861,8 +4886,9 @@ func _test_portal_prize_and_use() -> void:
 	if int(s1.portal_count) != 0:
 		_fail("portal_prize (count should be 0 after use, got %d)" % int(s1.portal_count))
 		return
-	if s1.position == start_pos:
-		_fail("portal_prize (ship should have moved after portal use)")
+	# Classic portal: first use drops a return beacon instead of teleporting.
+	if s1.position != start_pos or int(s1.portal_until_tick) <= 0:
+		_fail("portal_prize (expected beacon drop without teleport)")
 		return
 	_pass("portal_prize_and_use")
 

@@ -153,6 +153,9 @@ class DriftShipState:
 	var decoy_count: int = 0
 	var brick_count: int = 0
 	var portal_count: int = 0
+	# Portal return beacon (classic): position + expiry tick; 0 = no active beacon.
+	var portal_pos: Vector2 = Vector2.ZERO
+	var portal_until_tick: int = 0
 	# Shields: tick-based timer. Active when world.tick < shields_until_tick.
 	var shields_until_tick: int = 0
 	# Super shields absorb all damage; regular shields absorb one hit.

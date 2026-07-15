@@ -487,6 +487,7 @@ func compute_world_hash() -> int:
 		parts.append("burst=%d" % int(s.burst_count))
 		parts.append("warp=%d" % int(s.warp_count))
 		parts.append("shields_until=%d" % int(s.shields_until_tick))
+		parts.append("portal=%d,%d,%d" % [_q(float(s.portal_pos.x), Q_POS), _q(float(s.portal_pos.y), Q_POS), int(s.portal_until_tick)])
 		parts.append("super_s=%d" % (1 if bool(s.super_shields) else 0))
 		parts.append("kills=%d" % int(s.kills))
 		parts.append("deaths=%d" % int(s.deaths))
@@ -1915,7 +1916,7 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		_use_decoy(ship_state)
 	if (pressed_item_bits & 64) != 0 and int(ship_state.brick_count) > 0:
 		_use_brick(ship_state)
-	if (pressed_item_bits & 128) != 0 and int(ship_state.portal_count) > 0:
+	if (pressed_item_bits & 128) != 0 and (int(ship_state.portal_count) > 0 or int(ship_state.portal_until_tick) > int(tick)):
 		_use_portal(ship_state)
 
 	# Optional continuous drains: afterburner (hold) + toggled abilities.
@@ -2924,6 +2925,8 @@ func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
 	s.antiwarp_on = false
 	# Shields cleared on death (SubSpace behavior — shields don't persist across lives).
 	s.shields_until_tick = 0
+	# Portal beacon dies with the ship.
+	s.portal_until_tick = 0
 	s.super_shields = false
 	# Engine shutdown cleared.
 	s.engine_shutdown_until_tick = 0
@@ -3315,17 +3318,27 @@ func _use_warp(ship_state: DriftTypes.DriftShipState) -> void:
 	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
 
 
+# Portal beacon lifetime: server.cfg [Misc] WarpPointDelay=6000 cs = 60 s.
+const PORTAL_ACTIVE_TICKS: int = 3600
+
+
 func _use_portal(ship_state: DriftTypes.DriftShipState) -> void:
-	## Consume one portal charge. Teleport to random valid position (bypasses antiwarp).
+	## Classic portal: first press drops a 60 s return beacon (consumes a charge);
+	## pressing again while the beacon is live warps back to it (bypasses antiwarp).
+	if int(ship_state.portal_until_tick) > int(tick):
+		var depart_pos: Vector2 = ship_state.position
+		var dest: Vector2 = ship_state.portal_pos
+		ship_state.position = dest
+		ship_state.velocity = Vector2.ZERO
+		ship_state.portal_until_tick = 0
+		effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
+		effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+		return
 	if int(ship_state.portal_count) <= 0:
 		return
 	ship_state.portal_count = int(ship_state.portal_count) - 1
-	var depart_pos: Vector2 = ship_state.position
-	var dest: Vector2 = get_random_valid_spawn_point()
-	ship_state.position = dest
-	ship_state.velocity = Vector2.ZERO
-	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
-	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+	ship_state.portal_pos = ship_state.position
+	ship_state.portal_until_tick = int(tick) + PORTAL_ACTIVE_TICKS
 
 
 func _use_brick(ship_state: DriftTypes.DriftShipState) -> void:
@@ -3454,6 +3467,7 @@ func change_ship_type(ship_id: int, new_type: int) -> bool:
 	# Ship change drops any prize-raised energy max; respawn re-derives from the new spec.
 	s.energy_max = 0
 	s.shields_until_tick = 0
+	s.portal_until_tick = 0
 	s.super_shields = false
 	# Respawn at safe zone.
 	respawn_ship(ship_id)

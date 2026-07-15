@@ -388,13 +388,15 @@ var flags_personal: int = 0
 var flags_team: int = 0
 var shield_seconds: float = 0.0
 var super_active: bool = false
+var portal_seconds: float = 0.0
 
 
-func set_classic_status(personal_flags: int, team_flags: int, shield_s: float, super_on: bool) -> void:
+func set_classic_status(personal_flags: int, team_flags: int, shield_s: float, super_on: bool, portal_s: float = 0.0) -> void:
 	flags_personal = maxi(0, int(personal_flags))
 	flags_team = maxi(0, int(team_flags))
 	shield_seconds = maxf(0.0, float(shield_s))
 	super_active = bool(super_on)
+	portal_seconds = maxf(0.0, float(portal_s))
 
 
 func set_minimap_dynamic(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
@@ -457,6 +459,8 @@ func _process(delta: float) -> void:
 		stats_suffix += "  SZ:%0.1fs" % remaining_s
 	if shield_seconds > 0.0:
 		stats_suffix += "  SH:%0.1fs" % shield_seconds
+	if portal_seconds > 0.0:
+		stats_suffix += "  PT:%0.1fs" % portal_seconds
 	if super_active:
 		stats_suffix += "  SUPER"
 
