@@ -234,6 +234,28 @@ func _get_ship_spec_for(ship_state: DriftTypes.DriftShipState) -> Dictionary:
 	return ship_spec
 
 
+# Classic SubSpace unit conversions (per TEMPLATE.SSS annotations):
+# speeds are px per 10 s; rotation 400 = one full turn/s; ability energies are
+# thousandths per centisecond (value/10 = energy per second); thrust is a 0-24 scale.
+const CLASSIC_SPEED_DIV: float = 10.0
+const CLASSIC_ROT_RAD_PER_UNIT: float = TAU / 400.0
+const CLASSIC_THRUST_PX_S2: float = 12.0  # ponytail: feel calibration knob for the 0-24 scale
+const CLASSIC_PER_10: int = 10
+
+
+func _classic_stat(ship_state: DriftTypes.DriftShipState, section: String, stat: String, bonus: int) -> int:
+	## SubSpace ship stat: Initial + bonus*Upgrade, clamped to Maximum (cfg units).
+	## Returns -1 when the spec doesn't define the stat (caller uses ruleset fallback).
+	var sec: Variant = _get_ship_spec_for(ship_state).get(section)
+	if typeof(sec) != TYPE_DICTIONARY:
+		return -1
+	var d: Dictionary = sec
+	if not d.has("Initial" + stat):
+		return -1
+	var v: int = int(d.get("Initial" + stat)) + maxi(0, int(bonus)) * int(d.get("Upgrade" + stat, 0))
+	return mini(v, int(d.get("Maximum" + stat, v)))
+
+
 func set_debug_combat(enabled: bool, verbose: bool = false) -> void:
 	debug_combat = bool(enabled)
 	debug_combat_verbose = bool(verbose)
@@ -397,6 +419,8 @@ func compute_world_hash() -> int:
 	parts.append("combat_friendly_fire=%d" % _qb(combat_friendly_fire))
 	parts.append("kill_bounty_increase=%d" % int(kill_bounty_increase))
 	parts.append("kill_fixed_reward=%d" % int(kill_fixed_reward))
+	# Ship specs now drive per-ship movement/energy tuning; include content hash.
+	parts.append("ship_specs=%d" % (str(ship_specs).hash() if not ship_specs.is_empty() else str(ship_spec).hash()))
 
 	# Prize/bullet systems state that affects future simulation.
 	parts.append("prize_enabled=%d" % _qb(prize_enabled))
@@ -1851,26 +1875,43 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 	# Optional continuous drains: afterburner (hold) + toggled abilities.
 	# Note: while any sustained drain is active, recharge must be blocked deterministically.
 	var wants_afterburner: bool = bool(input_cmd.modifier) and float(input_cmd.thrust) > 0.0
-	ship_state.afterburner_on = wants_afterburner and int(ship_state.energy_current) > 0 and int(energy_afterburner_drain_per_sec) > 0
+	# Per-ship classic drains (SubSpace *Energy values are e/s * 10); ruleset fallback.
+	var drain_stealth: int = int(ability_stealth_drain_per_sec)
+	var drain_cloak: int = int(ability_cloak_drain_per_sec)
+	var drain_xradar: int = int(ability_xradar_drain_per_sec)
+	var drain_antiwarp: int = int(ability_antiwarp_drain_per_sec)
+	var drain_ab: int = int(energy_afterburner_drain_per_sec)
+	if _spec_ab.has("StealthEnergy"):
+		drain_stealth = maxi(0, int(_spec_ab.get("StealthEnergy"))) / CLASSIC_PER_10
+	if _spec_ab.has("CloakEnergy"):
+		drain_cloak = maxi(0, int(_spec_ab.get("CloakEnergy"))) / CLASSIC_PER_10
+	if _spec_ab.has("XRadarEnergy"):
+		drain_xradar = maxi(0, int(_spec_ab.get("XRadarEnergy"))) / CLASSIC_PER_10
+	if _spec_ab.has("AntiWarpEnergy"):
+		drain_antiwarp = maxi(0, int(_spec_ab.get("AntiWarpEnergy"))) / CLASSIC_PER_10
+	var _spec_en_ab: Variant = _get_ship_spec_for(ship_state).get("energy")
+	if typeof(_spec_en_ab) == TYPE_DICTIONARY and (_spec_en_ab as Dictionary).has("AfterburnerEnergy"):
+		drain_ab = maxi(0, int((_spec_en_ab as Dictionary).get("AfterburnerEnergy"))) / CLASSIC_PER_10
+	ship_state.afterburner_on = wants_afterburner and int(ship_state.energy_current) > 0 and drain_ab > 0
 	# If an ability has no configured drain, treat it as unavailable.
-	if bool(ship_state.stealth_on) and int(ability_stealth_drain_per_sec) <= 0:
+	if bool(ship_state.stealth_on) and drain_stealth <= 0:
 		ship_state.stealth_on = false
-	if bool(ship_state.cloak_on) and int(ability_cloak_drain_per_sec) <= 0:
+	if bool(ship_state.cloak_on) and drain_cloak <= 0:
 		ship_state.cloak_on = false
-	if bool(ship_state.xradar_on) and int(ability_xradar_drain_per_sec) <= 0:
+	if bool(ship_state.xradar_on) and drain_xradar <= 0:
 		ship_state.xradar_on = false
-	if bool(ship_state.antiwarp_on) and int(ability_antiwarp_drain_per_sec) <= 0:
+	if bool(ship_state.antiwarp_on) and drain_antiwarp <= 0:
 		ship_state.antiwarp_on = false
 
 	var total_drain_per_sec: int = 0
 	if bool(ship_state.afterburner_on):
 		# Afterburner base drain.
-		total_drain_per_sec += int(energy_afterburner_drain_per_sec)
+		total_drain_per_sec += drain_ab
 		# Afterburner strain: as we approach effective top speed, scale drain up.
 		# This makes sustained max speed a tactical commitment (energy starvation + forced cooldown),
 		# while keeping short bursts and the overall "fast ship" feel intact.
 		var max_sp: float = _ship_effective_max_speed(ship_state)
-		if max_sp > 0.001 and int(energy_afterburner_drain_per_sec) > 0:
+		if max_sp > 0.001 and drain_ab > 0:
 			var sp: float = ship_state.velocity.length()
 			var frac: float = clampf(sp / max_sp, 0.0, 2.0)
 			if frac > afterburner_strain_start_frac:
@@ -1879,17 +1920,17 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 				# Ease-in so only near-top-speed cruising gets punished hard.
 				t = t * t
 				var mult: float = lerpf(1.0, afterburner_strain_max_mult, t)
-				var base_d: int = int(energy_afterburner_drain_per_sec)
+				var base_d: int = drain_ab
 				var strained: int = maxi(0, int(round(float(base_d) * mult)))
 				total_drain_per_sec += maxi(0, strained - base_d)
 	if bool(ship_state.stealth_on) and int(_spec_ab.get("StealthStatus", 1)) != 2:
-		total_drain_per_sec += int(ability_stealth_drain_per_sec)
+		total_drain_per_sec += drain_stealth
 	if bool(ship_state.cloak_on) and int(_spec_ab.get("CloakStatus", 1)) != 2:
-		total_drain_per_sec += int(ability_cloak_drain_per_sec)
+		total_drain_per_sec += drain_cloak
 	if bool(ship_state.xradar_on) and int(_spec_ab.get("XRadarStatus", 1)) != 2:
-		total_drain_per_sec += int(ability_xradar_drain_per_sec)
+		total_drain_per_sec += drain_xradar
 	if bool(ship_state.antiwarp_on) and int(_spec_ab.get("AntiWarpStatus", 1)) != 2:
-		total_drain_per_sec += int(ability_antiwarp_drain_per_sec)
+		total_drain_per_sec += drain_antiwarp
 
 	if total_drain_per_sec > 0 and int(ship_state.energy_current) <= 0:
 		# Auto-disable abilities when energy is depleted.
@@ -1931,6 +1972,9 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		var eff_rate: int = base_rate
 		if bonus > 0 and base_rate > 0:
 			eff_rate = base_rate + int((base_rate * RECHARGE_BONUS_PCT_NUM * bonus) / RECHARGE_BONUS_PCT_DEN)
+		var classic_rr: int = _classic_stat(ship_state, "energy", "Recharge", bonus)
+		if classic_rr >= 0:
+			eff_rate = classic_rr / CLASSIC_PER_10
 		# Distribute per-second recharge across ticks deterministically.
 		ship_state.energy_recharge_fp_accum += eff_rate
 		var add_this_tick: int = int(ship_state.energy_recharge_fp_accum) / DriftConstants.TICK_RATE
@@ -2198,12 +2242,26 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				adjust_energy(int(ship_state.id), int(ship_state.energy_max), EnergyReason.PRIZE_POSITIVE, -1)
 		DriftTypes.PrizeKind.Energy:
 			applied_effect = true
-			var amt: int = 25
-			if is_negative:
-				# Negative prize drains energy (clamped) and resets recharge delay.
-				adjust_energy(int(ship_state.id), -amt, EnergyReason.PRIZE_NEGATIVE, -1)
+			var en_spec: Variant = _get_ship_spec_for(ship_state).get("energy")
+			if typeof(en_spec) == TYPE_DICTIONARY and (en_spec as Dictionary).has("InitialEnergy"):
+				# Classic: Energy Upgrade raises max energy toward MaximumEnergy.
+				var ed: Dictionary = en_spec
+				var init_e: int = int(ed.get("InitialEnergy"))
+				var upg_e: int = maxi(0, int(ed.get("UpgradeEnergy", 0)))
+				var emax_e: int = int(ed.get("MaximumEnergy", init_e))
+				if is_negative:
+					ship_state.energy_max = maxi(init_e, int(ship_state.energy_max) - upg_e)
+					ship_state.energy_current = mini(int(ship_state.energy_current), int(ship_state.energy_max))
+					ship_state.energy = int(ship_state.energy_current)
+				else:
+					ship_state.energy_max = mini(emax_e, int(ship_state.energy_max) + upg_e)
 			else:
-				adjust_energy(int(ship_state.id), amt, EnergyReason.PRIZE_POSITIVE, -1)
+				var amt: int = 25
+				if is_negative:
+					# Negative prize drains energy (clamped) and resets recharge delay.
+					adjust_energy(int(ship_state.id), -amt, EnergyReason.PRIZE_NEGATIVE, -1)
+				else:
+					adjust_energy(int(ship_state.id), amt, EnergyReason.PRIZE_POSITIVE, -1)
 		DriftTypes.PrizeKind.Recharge:
 			applied_effect = true
 			if is_negative:
@@ -2754,13 +2812,20 @@ func add_ship(id: int, position: Vector2, ship_type: int = 0) -> void:
 	s.bomb_level = _ship_spec_initial_bomb_level(s)
 	s.repel_count = _ship_spec_initial_item_count(s, "InitialRepel")
 	s.burst_count = _ship_spec_initial_item_count(s, "InitialBurst")
+	s.decoy_count = _ship_spec_initial_item_count(s, "InitialDecoy")
+	s.thor_count = _ship_spec_initial_item_count(s, "InitialThor")
+	s.brick_count = _ship_spec_initial_item_count(s, "InitialBrick")
+	s.rocket_count = _ship_spec_initial_item_count(s, "InitialRocket")
+	s.portal_count = _ship_spec_initial_item_count(s, "InitialPortal")
 	s.bounty = _ship_spec_initial_bounty(s)
 	s.safe_zone_time_used_ticks = 0
 	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
-	s.energy_max = maxi(0, int(energy_max_points))
 	var init_e: int = _ship_spec_initial_energy_points(s)
+	# Classic: ships start with InitialEnergy as their max; Energy prizes raise it.
+	s.energy_max = init_e if _classic_stat(s, "energy", "Energy", 0) >= 0 else maxi(0, int(energy_max_points))
 	s.energy_current = clampi(init_e, 0, int(s.energy_max))
-	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
+	var classic_rr0: int = _classic_stat(s, "energy", "Recharge", 0)
+	s.energy_recharge_rate_per_sec = (classic_rr0 / CLASSIC_PER_10) if classic_rr0 >= 0 else maxi(0, int(energy_recharge_rate_per_sec))
 	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
 	s.energy_recharge_wait_ticks = 0
 	s.energy_recharge_fp_accum = 0
@@ -2787,10 +2852,16 @@ func reset_ship_for_spawn(ship_id: int, position: Vector2) -> void:
 	s.velocity = Vector2.ZERO
 	s.rotation = 0.0
 	# Energy reset.
-	s.energy_max = maxi(0, int(energy_max_points))
 	var init_e: int = _ship_spec_initial_energy_points(s)
-	s.energy_current = clampi(init_e, 0, int(s.energy_max))
-	s.energy_recharge_rate_per_sec = maxi(0, int(energy_recharge_rate_per_sec))
+	if _classic_stat(s, "energy", "Energy", 0) >= 0:
+		# Classic: keep any prize-raised max across respawn; refill to full.
+		s.energy_max = maxi(init_e, int(s.energy_max))
+		s.energy_current = int(s.energy_max)
+	else:
+		s.energy_max = maxi(0, int(energy_max_points))
+		s.energy_current = clampi(init_e, 0, int(s.energy_max))
+	var classic_rr1: int = _classic_stat(s, "energy", "Recharge", 0)
+	s.energy_recharge_rate_per_sec = (classic_rr1 / CLASSIC_PER_10) if classic_rr1 >= 0 else maxi(0, int(energy_recharge_rate_per_sec))
 	s.energy_recharge_delay_ticks = maxi(0, int(energy_recharge_delay_ticks))
 	s.energy_recharge_wait_ticks = 0
 	s.energy_recharge_fp_accum = 0
@@ -3167,7 +3238,7 @@ func _use_warp(ship_state: DriftTypes.DriftShipState) -> void:
 	if not bool(gate.get("ok", true)):
 		return
 	# Antiwarp check: if any alive enemy with antiwarp_on is within range, block warp.
-	var antiwarp_radius: float = 512.0
+	var antiwarp_radius: float = float(ability_antiwarp_radius_px) if int(ability_antiwarp_radius_px) > 0 else 512.0
 	var center: Vector2 = ship_state.position
 	var my_freq: int = int(ship_state.freq)
 	for other in ships.values():
@@ -3329,14 +3400,14 @@ func change_ship_type(ship_id: int, new_type: int) -> bool:
 	s.thruster_bonus = 0
 	s.recharge_bonus = 0
 	s.bounty = _ship_spec_initial_bounty(s)
-	s.repel_count = 0
-	s.burst_count = 0
 	s.warp_count = 0
-	s.thor_count = 0
-	s.rocket_count = 0
-	s.decoy_count = 0
-	s.brick_count = 0
-	s.portal_count = 0
+	s.thor_count = _ship_spec_initial_item_count(s, "InitialThor")
+	s.rocket_count = _ship_spec_initial_item_count(s, "InitialRocket")
+	s.decoy_count = _ship_spec_initial_item_count(s, "InitialDecoy")
+	s.brick_count = _ship_spec_initial_item_count(s, "InitialBrick")
+	s.portal_count = _ship_spec_initial_item_count(s, "InitialPortal")
+	# Ship change drops any prize-raised energy max; respawn re-derives from the new spec.
+	s.energy_max = 0
 	s.shields_until_tick = 0
 	s.super_shields = false
 	# Respawn at safe zone.
@@ -3993,10 +4064,15 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# High speed reduces control authority (turn + reverse) to make full-speed travel
 		# a tactical commitment rather than a free, always-on disengage.
 		var spec_mv_turn: Variant = _get_ship_spec_for(ship_state).get("movement")
-		var base_turn: float = ship_turn_rate
+		var rot_bonus: int = maxi(0, int(ship_state.rotation_bonus))
+		var base_turn: float = ship_turn_rate * (1.0 + ROTATION_BONUS_PCT * float(rot_bonus))
 		if typeof(spec_mv_turn) == TYPE_DICTIONARY and (spec_mv_turn as Dictionary).has("turn_rate_override"):
-			base_turn = clampf(float((spec_mv_turn as Dictionary).get("turn_rate_override")), 0.01, 100.0)
-		var eff_turn_rate: float = base_turn * (1.0 + ROTATION_BONUS_PCT * float(maxi(0, int(ship_state.rotation_bonus)))) * _ship_high_speed_turn_mult(ship_state, eff_max_speed)
+			base_turn = clampf(float((spec_mv_turn as Dictionary).get("turn_rate_override")), 0.01, 100.0) * (1.0 + ROTATION_BONUS_PCT * float(rot_bonus))
+		else:
+			var classic_rot: int = _classic_stat(ship_state, "movement", "Rotation", rot_bonus)
+			if classic_rot >= 0:
+				base_turn = float(classic_rot) * CLASSIC_ROT_RAD_PER_UNIT
+		var eff_turn_rate: float = base_turn * _ship_high_speed_turn_mult(ship_state, eff_max_speed)
 		var eff_rev_accel: float = _ship_effective_reverse_accel(ship_state) * _ship_high_speed_reverse_mult(ship_state, eff_max_speed)
 		DriftShip.apply_input(
 			ship_state,
@@ -4528,9 +4604,16 @@ func _ship_effective_max_speed(ship_state: DriftTypes.DriftShipState) -> float:
 	var bonus: int = int(ship_state.top_speed_bonus)
 	var spec_mv: Variant = _get_ship_spec_for(ship_state).get("movement")
 	var base_max: float = ship_max_speed
+	var base: float
+	var classic_speed: int = _classic_stat(ship_state, "movement", "Speed", bonus)
 	if typeof(spec_mv) == TYPE_DICTIONARY and (spec_mv as Dictionary).has("max_speed_override"):
 		base_max = clampf(float((spec_mv as Dictionary).get("max_speed_override")), 10.0, 9999.0)
-	var base: float = base_max * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+		base = base_max * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
+	elif classic_speed >= 0:
+		# Classic path: upgrade bonus already applied in cfg units.
+		base = float(classic_speed) / CLASSIC_SPEED_DIV
+	else:
+		base = base_max * (1.0 + TOP_SPEED_BONUS_PCT * float(bonus))
 	if int(ship_state.rocket_boost_until_tick) > int(tick):
 		base *= 1.5
 	if bool(ship_state.afterburner_on):
@@ -4546,6 +4629,9 @@ func _ship_effective_reverse_accel(_ship_state: DriftTypes.DriftShipState) -> fl
 func _ship_effective_thrust_accel(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTypes.DriftInputCmd) -> float:
 	var thrust_bonus: int = int(ship_state.thruster_bonus)
 	var base: float = ship_thrust_accel * (1.0 + THRUSTER_BONUS_PCT * float(thrust_bonus))
+	var classic_thrust: int = _classic_stat(ship_state, "movement", "Thrust", thrust_bonus)
+	if classic_thrust >= 0:
+		base = float(classic_thrust) * CLASSIC_THRUST_PX_S2
 	if bool(ship_state.afterburner_on):
 		return base * energy_afterburner_multiplier
 	return base

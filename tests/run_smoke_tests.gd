@@ -119,6 +119,7 @@ func _initialize() -> void:
 	_test_king_ship_id_snapshot_roundtrip()
 	_test_server_hello_sets_username()
 	_test_kill_scoring_awards_points()
+	_test_classic_ship_stats()
 	_test_wormhole_pull_and_teleport()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
@@ -4538,6 +4539,49 @@ func _test_wormhole_pull_and_teleport() -> void:
 		_fail("wormhole (no teleport: dist=%f)" % s.position.distance_to(wh_a))
 		return
 	_pass("wormhole_pull_and_teleport")
+
+
+func _test_classic_ship_stats() -> void:
+	_ran += 1
+	# Per-ship classic stats: Javelin (type 1) is faster than Warbird (type 0);
+	# energy starts at InitialEnergy and recharges at InitialRecharge/10 per sec;
+	# Spider (type 2) spawns with its decoy.
+	var registry := DriftShipRegistry.new()
+	if not registry.load_all_specs():
+		_fail("classic_ship_stats (registry load failed)")
+		return
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.set_all_ship_specs(registry.specs)
+	world.add_ship(1, Vector2(100, 100), 0) # Warbird
+	world.add_ship(2, Vector2(300, 100), 1) # Javelin
+	world.add_ship(3, Vector2(500, 100), 2) # Spider
+	var wb: DriftTypes.DriftShipState = world.ships[1]
+	var jav: DriftTypes.DriftShipState = world.ships[2]
+	var spi: DriftTypes.DriftShipState = world.ships[3]
+	var wb_speed: float = world._ship_effective_max_speed(wb)
+	var jav_speed: float = world._ship_effective_max_speed(jav)
+	# cfg: Warbird InitialSpeed=2010 -> 201 px/s; Javelin 2200 -> 220 px/s.
+	if absf(wb_speed - 201.0) > 0.5 or absf(jav_speed - 220.0) > 0.5:
+		_fail("classic_ship_stats (speeds wb=%f jav=%f)" % [wb_speed, jav_speed])
+		return
+	# InitialEnergy=1000 is both spawn energy and starting max.
+	if int(wb.energy_max) != 1000 or int(wb.energy_current) != 1000:
+		_fail("classic_ship_stats (energy %d/%d, expected 1000/1000)" % [int(wb.energy_current), int(wb.energy_max)])
+		return
+	# InitialRecharge=400 -> 40 e/s.
+	if int(wb.energy_recharge_rate_per_sec) != 40:
+		_fail("classic_ship_stats (recharge %d, expected 40)" % int(wb.energy_recharge_rate_per_sec))
+		return
+	if int(spi.decoy_count) != 1:
+		_fail("classic_ship_stats (spider decoy_count=%d, expected 1)" % int(spi.decoy_count))
+		return
+	# TopSpeed prize raises speed by UpgradeSpeed (250 -> +25 px/s).
+	wb.top_speed_bonus = 1
+	if absf(world._ship_effective_max_speed(wb) - 226.0) > 0.5:
+		_fail("classic_ship_stats (upgraded speed %f, expected 226)" % world._ship_effective_max_speed(wb))
+		return
+	_pass("classic_ship_stats")
 
 
 func _test_thor_fires_ring() -> void:
