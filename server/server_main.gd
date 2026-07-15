@@ -31,7 +31,7 @@ var debug_net: bool = false
 var debug_sim: bool = false
 var debug_combat: bool = false
 var debug_combat_verbose: bool = false
-var ship_spec_weapons: bool = false
+var ship_spec_weapons: bool = true
 
 var alive_timer := 0.0
 var last_printed_tick := -1

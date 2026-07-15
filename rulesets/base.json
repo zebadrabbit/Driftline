@@ -20,10 +20,10 @@
   "ball_stick_offset": 18.0,
   "ball_steal_padding": 4.0,
   "bullet": {
-   "speed": 320.0,
+   "speed": 200.0,
    "damage": 50,
    "knock_impulse": 120.0,
-   "lifetime_s": 1.8,
+   "lifetime_s": 5.5,
    "muzzle_offset": 30.0,
    "bounces": 0,
    "bounce_restitution": 1.0,
@@ -82,8 +82,8 @@
   "max": 1200,
   "recharge_rate_per_sec": 150,
   "recharge_delay_ms": 300,
-  "bullet_energy_cost": 30,
-  "multifire_energy_cost": 90,
-  "bomb_energy_cost": 150
+  "bullet_energy_cost": 20,
+  "multifire_energy_cost": 30,
+  "bomb_energy_cost": 300
  }
 }

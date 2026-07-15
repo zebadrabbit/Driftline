@@ -85,6 +85,12 @@ var energy_afterburner_speed_multiplier: float = 1.0
 # Bullet combat tuning.
 var bullet_damage: int = 10
 var bullet_knock_impulse: float = 0.0
+# Classic damage economy (server.cfg [Bullet]/[Bomb]/[Burst] defaults):
+# bullet L(n) = BulletDamageLevel + (n-1)*BulletDamageUpgrade; bombs at center; burst pellets.
+var bullet_damage_level: int = 200
+var bullet_damage_upgrade: int = 100
+var bomb_damage_level: int = 750
+var burst_damage_level: int = 515
 
 # Combat tuning.
 # Spawn protection blocks damage application for a short period after spawn/respawn.
@@ -187,7 +193,9 @@ var debug_combat_verbose: bool = false
 # ship_spec is a non-versioned server.cfg-derived config.
 # IMPORTANT: do not let non-versioned data override versioned ruleset tuning by default,
 # otherwise clients and replays can diverge from the authoritative sim.
-var ship_spec_overrides_weapons: bool = false
+# Classic parity: server.cfg-derived ship weapon tuning applies by default.
+# Specs are replicated to clients in the welcome packet, so both sides agree.
+var ship_spec_overrides_weapons: bool = true
 
 var _dbg_bullets_spawned_this_second: int = 0
 var _dbg_bullet_fires_this_second: int = 0
@@ -206,12 +214,8 @@ var ship_specs: Array[Dictionary] = []
 
 func set_ship_spec(ship_spec_value: Dictionary) -> void:
 	ship_spec = ship_spec_value if typeof(ship_spec_value) == TYPE_DICTIONARY else {}
-	# Classic ship spec may provide bullet damage via movement.DamageFactor.
-	# Apply once at configuration time (no per-tick/per-fire side effects).
-	if typeof(ship_spec) == TYPE_DICTIONARY and not ship_spec.is_empty():
-		var mv: Variant = ship_spec.get("movement")
-		if typeof(mv) == TYPE_DICTIONARY and (mv as Dictionary).has("DamageFactor"):
-			bullet_damage = clampi(maxi(0, int((mv as Dictionary).get("DamageFactor"))), 0, 10000)
+	# Note: movement.DamageFactor is the SubSpace wall-bounce damage factor,
+	# NOT bullet damage — bullet damage comes from bullet_damage_level.
 	if debug_combat:
 		_debug_print_bullet_tuning("set_ship_spec")
 
@@ -407,6 +411,10 @@ func compute_world_hash() -> int:
 	parts.append("bullet_multifire_energy_cost=%d" % int(bullet_multifire_energy_cost))
 	parts.append("bomb_energy_cost=%d" % int(bomb_energy_cost))
 	parts.append("bullet_damage=%d" % int(bullet_damage))
+	parts.append("bullet_damage_level=%d" % int(bullet_damage_level))
+	parts.append("bullet_damage_upgrade=%d" % int(bullet_damage_upgrade))
+	parts.append("bomb_damage_level=%d" % int(bomb_damage_level))
+	parts.append("burst_damage_level=%d" % int(burst_damage_level))
 	parts.append("bullet_knock_impulse=%d" % _q(bullet_knock_impulse, Q_TUNE))
 	parts.append("energy_afterburner_multiplier=%d" % _q(energy_afterburner_multiplier, Q_TUNE))
 	parts.append("energy_afterburner_speed_multiplier=%d" % _q(energy_afterburner_speed_multiplier, Q_TUNE))
@@ -861,6 +869,14 @@ func apply_ruleset(canonical_ruleset: Dictionary) -> void:
 				kill_bounty_increase = clampi(int(combat.get("bounty_increase_for_kill")), 0, 255)
 			if combat.has("fixed_kill_reward"):
 				kill_fixed_reward = clampi(int(combat.get("fixed_kill_reward")), -1, 32000)
+			if combat.has("bullet_damage_level"):
+				bullet_damage_level = clampi(int(combat.get("bullet_damage_level")), 0, 32000)
+			if combat.has("bullet_damage_upgrade"):
+				bullet_damage_upgrade = clampi(int(combat.get("bullet_damage_upgrade")), 0, 32000)
+			if combat.has("bomb_damage_level"):
+				bomb_damage_level = clampi(int(combat.get("bomb_damage_level")), 0, 32000)
+			if combat.has("burst_damage_level"):
+				burst_damage_level = clampi(int(combat.get("burst_damage_level")), 0, 5000)
 
 	# Team section (schema v2, optional).
 	# Note: schema v1 has no team config; defaults apply.
@@ -916,11 +932,17 @@ func _resolve_bullet_shrapnel_cfg_for_level(level: int) -> Dictionary:
 func _resolve_bullet_combat_cfg_for_level(level: int) -> Dictionary:
 	# Returns per-projectile combat tuning derived from the ruleset.
 	# IMPORTANT: use bullet.level (snapshot-stable) so mid-flight upgrades don't change damage/knock.
+	# Burst pellets are tagged level 4+ and use the classic burst damage.
+	if int(level) >= 4:
+		return {
+			"damage": int(burst_damage_level),
+			"knock_impulse": float(bullet_knock_impulse),
+		}
+	var lvl: int = clampi(int(level), 1, 3)
 	var out := {
-		"damage": int(bullet_damage),
+		"damage": int(bullet_damage_level) + (lvl - 1) * int(bullet_damage_upgrade),
 		"knock_impulse": float(bullet_knock_impulse),
 	}
-	var lvl: int = clampi(int(level), 1, 3)
 	var rs_weapons: Dictionary = ruleset.get("weapons", {})
 	if typeof(rs_weapons) != TYPE_DICTIONARY:
 		return out
@@ -992,23 +1014,26 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 	if ship_spec_overrides_weapons and typeof(resolved_spec) == TYPE_DICTIONARY and not resolved_spec.is_empty():
 		var e: Variant = resolved_spec.get("energy")
 		if typeof(e) == TYPE_DICTIONARY:
-			cost = maxi(0, int((e as Dictionary).get("BulletFireEnergy", cost)))
+			# Classic: cost is per-L1; higher gun levels cost proportionally more.
+			cost = maxi(0, int((e as Dictionary).get("BulletFireEnergy", cost))) * level
 			cost_src = "ship_spec.energy.BulletFireEnergy"
 			if bool(ship_state.multi_fire_enabled):
-				cost = maxi(0, int((e as Dictionary).get("MultiFireEnergy", cost)))
+				cost = maxi(0, int((e as Dictionary).get("MultiFireEnergy", cost))) * level
 				cost_src = "ship_spec.energy.MultiFireEnergy"
 		var w: Variant = resolved_spec.get("weapons")
 		if typeof(w) == TYPE_DICTIONARY:
-			delay = maxi(0, int((w as Dictionary).get("BulletFireDelay", delay)))
-			delay_src = "ship_spec.weapons.BulletFireDelay (ticks)"
-			speed_px_s = maxi(0, int((w as Dictionary).get("BulletSpeed", speed_px_s)))
+			if (w as Dictionary).has("BulletFireDelay"):
+				# Classic delays are centiseconds.
+				delay = maxi(0, int((w as Dictionary).get("BulletFireDelay"))) * DriftConstants.TICK_RATE / 100
+				delay_src = "ship_spec.weapons.BulletFireDelay (cs->ticks)"
+			if (w as Dictionary).has("BulletSpeed"):
+				# Classic speeds are px per 10 s.
+				speed_px_s = maxi(0, int((w as Dictionary).get("BulletSpeed"))) / 10
 			if bool(ship_state.multi_fire_enabled):
-				# Classic MultiFireDelay is in ms; convert to ticks (ceil).
 				var misc: Variant = resolved_spec.get("misc")
 				if typeof(misc) == TYPE_DICTIONARY and (misc as Dictionary).has("MultiFireDelay"):
-					var ms_i: int = maxi(0, int((misc as Dictionary).get("MultiFireDelay")))
-					delay = int((ms_i * DriftConstants.TICK_RATE + 999) / 1000)
-					delay_src = "ship_spec.misc.MultiFireDelay (ms->ticks)"
+					delay = maxi(0, int((misc as Dictionary).get("MultiFireDelay"))) * DriftConstants.TICK_RATE / 100
+					delay_src = "ship_spec.misc.MultiFireDelay (cs->ticks)"
 	# DoubleBarrel: Terrier fires 2 parallel bullets from offset barrel positions.
 	var _db_spec: Variant = _get_ship_spec_for(ship_state).get("misc")
 	if typeof(_db_spec) == TYPE_DICTIONARY and int((_db_spec as Dictionary).get("DoubleBarrel", 0)) != 0:
@@ -1039,17 +1064,17 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 
 const BOMB_RADIUS_PX: float = 6.0
 const BOMB_EXPLOSION_RADIUS_PX: float = 96.0
-const BOMB_DEFAULT_SPEED_PX_S: int = 260
+const BOMB_DEFAULT_SPEED_PX_S: int = 200
 const BOMB_DEFAULT_DELAY_TICKS: int = 90
 const BOMB_DEFAULT_MAX_ACTIVE: int = 2
-const BOMB_DEFAULT_LIFETIME_TICKS: int = 420
+const BOMB_DEFAULT_LIFETIME_TICKS: int = 3600  # BombAliveTime=6000 cs
 const EMP_DEFAULT_TICKS: int = 90
 
 const MINE_TRIGGER_RADIUS_PX: float = 72.0
 const MINE_EXPLOSION_RADIUS_PX: float = 96.0
 const MINE_DEFAULT_DELAY_TICKS: int = 90
 const MINE_DEFAULT_MAX_ACTIVE: int = 5
-const MINE_DEFAULT_LIFETIME_TICKS: int = -1
+const MINE_DEFAULT_LIFETIME_TICKS: int = 7200  # MineAliveTime=12000 cs
 const MINE_FUSE_TICKS: int = 30
 
 
@@ -1097,8 +1122,11 @@ func _resolve_bomb_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState) 
 			cost = base_cost + upg * maxi(0, level - 1)
 		var w: Variant = resolved_bomb_spec.get("weapons")
 		if typeof(w) == TYPE_DICTIONARY:
-			delay = maxi(0, int((w as Dictionary).get("BombFireDelay", delay)))
-			speed_px_s = maxi(0, int((w as Dictionary).get("BombSpeed", speed_px_s)))
+			if (w as Dictionary).has("BombFireDelay"):
+				# Classic delays are centiseconds; speeds are px per 10 s.
+				delay = maxi(0, int((w as Dictionary).get("BombFireDelay"))) * DriftConstants.TICK_RATE / 100
+			if (w as Dictionary).has("BombSpeed"):
+				speed_px_s = maxi(0, int((w as Dictionary).get("BombSpeed"))) / 10
 			bounces = maxi(0, int((w as Dictionary).get("BombBounceCount", bounces)))
 			max_active = maxi(0, int((w as Dictionary).get("MaxBombs", max_active)))
 			is_emp = int((w as Dictionary).get("EmpBomb", 0)) != 0
@@ -1139,7 +1167,9 @@ func _resolve_mine_lay_profile_for_ship(ship_state: DriftTypes.DriftShipState) -
 			cost = base_cost + upg * maxi(0, level - 1)
 		var w: Variant = resolved_mine_spec.get("weapons")
 		if typeof(w) == TYPE_DICTIONARY:
-			delay = maxi(0, int((w as Dictionary).get("LandmineFireDelay", delay)))
+			if (w as Dictionary).has("LandmineFireDelay"):
+				# Classic delays are centiseconds.
+				delay = maxi(0, int((w as Dictionary).get("LandmineFireDelay"))) * DriftConstants.TICK_RATE / 100
 			max_active = maxi(0, int((w as Dictionary).get("MaxMines", max_active)))
 
 	cost = clampi(cost, 0, 100000)
@@ -1196,9 +1226,7 @@ func _apply_explosion_effects(owner_id: int, origin: Vector2, radius: float, max
 
 func _resolve_bomb_explosion_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
 	var prof := _resolve_bomb_fire_profile_for_ship(ship_state)
-	var dmg: int = int(prof.get("cost", 0))
-	if dmg <= 0:
-		dmg = maxi(0, int(bullet_damage) * 10)
+	var dmg: int = maxi(0, int(bomb_damage_level))
 	var knock: float = 0.0
 	var resolved_bexp_spec: Dictionary = _get_ship_spec_for(ship_state)
 	if ship_spec_overrides_weapons and typeof(resolved_bexp_spec) == TYPE_DICTIONARY and not resolved_bexp_spec.is_empty():
@@ -1214,10 +1242,7 @@ func _resolve_bomb_explosion_profile_for_ship(ship_state: DriftTypes.DriftShipSt
 
 
 func _resolve_mine_explosion_profile_for_ship(ship_state: DriftTypes.DriftShipState) -> Dictionary:
-	var prof := _resolve_mine_lay_profile_for_ship(ship_state)
-	var dmg: int = int(prof.get("cost", 0))
-	if dmg <= 0:
-		dmg = maxi(0, int(bullet_damage) * 10)
+	var dmg: int = maxi(0, int(bomb_damage_level))
 	var knock: float = 0.0
 	var resolved_mexp_spec: Dictionary = _get_ship_spec_for(ship_state)
 	if ship_spec_overrides_weapons and typeof(resolved_mexp_spec) == TYPE_DICTIONARY and not resolved_mexp_spec.is_empty():
@@ -1257,7 +1282,7 @@ func _explode_bomb(b: DriftTypes.DriftBombState) -> void:
 	if owner != null:
 		profile = _resolve_bomb_explosion_profile_for_ship(owner)
 	else:
-		profile = {"radius": float(BOMB_EXPLOSION_RADIUS_PX), "max_damage": int(bullet_damage) * 10, "knock": 0.0, "is_emp": bool(b.is_emp)}
+		profile = {"radius": float(BOMB_EXPLOSION_RADIUS_PX), "max_damage": int(bomb_damage_level), "knock": 0.0, "is_emp": bool(b.is_emp)}
 	_apply_explosion_effects(int(b.owner_id), b.position, float(profile.get("radius", BOMB_EXPLOSION_RADIUS_PX)), int(profile.get("max_damage", 0)), float(profile.get("knock", 0.0)), bool(profile.get("is_emp", false)), "bomb")
 	collision_events.append({
 		"type": "bomb_explode",
@@ -1277,7 +1302,7 @@ func _explode_mine(m: DriftTypes.DriftMineState) -> void:
 	if owner != null:
 		profile = _resolve_mine_explosion_profile_for_ship(owner)
 	else:
-		profile = {"radius": float(MINE_EXPLOSION_RADIUS_PX), "max_damage": int(bullet_damage) * 10, "knock": 0.0}
+		profile = {"radius": float(MINE_EXPLOSION_RADIUS_PX), "max_damage": int(bomb_damage_level), "knock": 0.0}
 	_apply_explosion_effects(int(m.owner_id), m.position, float(profile.get("radius", MINE_EXPLOSION_RADIUS_PX)), int(profile.get("max_damage", 0)), float(profile.get("knock", 0.0)), false, "mine")
 	collision_events.append({
 		"type": "mine_explode",
@@ -3206,13 +3231,14 @@ func _use_burst(ship_state: DriftTypes.DriftShipState) -> void:
 	ship_state.burst_count = int(ship_state.burst_count) - 1
 	var spec: Dictionary = _get_ship_spec_for(ship_state)
 	var shrapnel_count: int = 24
-	var burst_speed: int = 900
+	var burst_speed: int = 300
 	var wpn: Variant = spec.get("weapons")
 	if typeof(wpn) == TYPE_DICTIONARY:
 		shrapnel_count = maxi(4, int((wpn as Dictionary).get("BurstShrapnel", 24)))
 	var mvt: Variant = spec.get("movement")
 	if typeof(mvt) == TYPE_DICTIONARY:
-		burst_speed = maxi(100, int((mvt as Dictionary).get("BurstSpeed", 900)))
+		# Classic BurstSpeed is px per 10 s (3000 -> 300 px/s).
+		burst_speed = maxi(10, int((mvt as Dictionary).get("BurstSpeed", 3000)) / 10)
 	var center: Vector2 = ship_state.position
 	var angle_step: float = TAU / float(shrapnel_count)
 	for i in range(shrapnel_count):
@@ -3223,8 +3249,10 @@ func _use_burst(ship_state: DriftTypes.DriftShipState) -> void:
 		next_bullet_id += 1
 		var lifetime_ticks: int = int(bullet_lifetime_ticks)
 		var die_tick: int = int(tick) + lifetime_ticks
+		# ponytail: level 4 = burst pellet (BurstDamageLevel); original pellets only arm
+		# after a wall bounce — add an armed flag if that matters in playtests.
 		bullets[bid] = DriftTypes.DriftBulletState.new(
-			bid, int(ship_state.id), 1, center + dir * 8.0, vel,
+			bid, int(ship_state.id), 4, center + dir * 8.0, vel,
 			int(tick), die_tick, 0
 		)
 

@@ -3594,11 +3594,12 @@ func _test_classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend() -> void
 	var wb_spawn_ticks := _simulate_hold_fire_for_ticks(wb_world, 1, SIM_TICKS)
 	var tr_spawn_ticks := _simulate_hold_fire_for_ticks(tr_world, 1, SIM_TICKS)
 
-	if wb_spawn_ticks != [0, 25]:
-		_fail("classic_wb_vs_tr (expected Warbird spawn ticks [0,25], got %s)" % [str(wb_spawn_ticks)])
+	# Classic delays are centiseconds: 25 cs -> 15 ticks, 30 cs -> 18 ticks @60Hz.
+	if wb_spawn_ticks != [0, 15]:
+		_fail("classic_wb_vs_tr (expected Warbird spawn ticks [0,15], got %s)" % [str(wb_spawn_ticks)])
 		return
-	if tr_spawn_ticks != [0]:
-		_fail("classic_wb_vs_tr (expected Terrier spawn ticks [0], got %s)" % [str(tr_spawn_ticks)])
+	if tr_spawn_ticks != [0, 18]:
+		_fail("classic_wb_vs_tr (expected Terrier spawn ticks [0,18], got %s)" % [str(tr_spawn_ticks)])
 		return
 
 	if int(wb_world.bullets.size()) != wb_spawn_ticks.size() or int(tr_world.bullets.size()) != tr_spawn_ticks.size():
@@ -3606,24 +3607,21 @@ func _test_classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend() -> void
 		return
 
 	# next_bullet_tick should reflect the last fire.
-	if int(wb_ship.next_bullet_tick) != 50:
-		_fail("classic_wb_vs_tr (expected Warbird next_bullet_tick=50, got %d)" % [int(wb_ship.next_bullet_tick)])
+	if int(wb_ship.next_bullet_tick) != 30:
+		_fail("classic_wb_vs_tr (expected Warbird next_bullet_tick=30, got %d)" % [int(wb_ship.next_bullet_tick)])
 		return
-	if int(tr_ship.next_bullet_tick) != 30:
-		_fail("classic_wb_vs_tr (expected Terrier next_bullet_tick=30, got %d)" % [int(tr_ship.next_bullet_tick)])
+	if int(tr_ship.next_bullet_tick) != 36:
+		_fail("classic_wb_vs_tr (expected Terrier next_bullet_tick=36, got %d)" % [int(tr_ship.next_bullet_tick)])
 		return
 
-	# Total energy spent differs due to cooldown (recharge disabled above).
+	# Cost scales with gun level (Terrier starts at L2: InitialGuns=2).
 	var wb_spent := wb_init - int(wb_ship.energy_current)
 	var tr_spent := tr_init - int(tr_ship.energy_current)
 	if wb_spent != wb_cost * wb_spawn_ticks.size():
 		_fail("classic_wb_vs_tr (Warbird spent %d, expected %d)" % [wb_spent, wb_cost * wb_spawn_ticks.size()])
 		return
-	if tr_spent != tr_cost * tr_spawn_ticks.size():
-		_fail("classic_wb_vs_tr (Terrier spent %d, expected %d)" % [tr_spent, tr_cost * tr_spawn_ticks.size()])
-		return
-	if wb_spent <= tr_spent:
-		_fail("classic_wb_vs_tr (expected Warbird to spend more energy over %d ticks)" % [SIM_TICKS])
+	if tr_spent != tr_cost * 2 * tr_spawn_ticks.size():
+		_fail("classic_wb_vs_tr (Terrier spent %d, expected %d)" % [tr_spent, tr_cost * 2 * tr_spawn_ticks.size()])
 		return
 
 	_pass("classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend")
@@ -4580,6 +4578,13 @@ func _test_classic_ship_stats() -> void:
 	wb.top_speed_bonus = 1
 	if absf(world._ship_effective_max_speed(wb) - 226.0) > 0.5:
 		_fail("classic_ship_stats (upgraded speed %f, expected 226)" % world._ship_effective_max_speed(wb))
+		return
+	# Classic damage economy: bullets 200/300/400 by level, burst pellets 515, bombs 750.
+	var d1: int = int(world._resolve_bullet_combat_cfg_for_level(1).get("damage", 0))
+	var d3: int = int(world._resolve_bullet_combat_cfg_for_level(3).get("damage", 0))
+	var d4: int = int(world._resolve_bullet_combat_cfg_for_level(4).get("damage", 0))
+	if d1 != 200 or d3 != 400 or d4 != 515 or int(world.bomb_damage_level) != 750:
+		_fail("classic_ship_stats (damage L1=%d L3=%d burst=%d bomb=%d)" % [d1, d3, d4, int(world.bomb_damage_level)])
 		return
 	_pass("classic_ship_stats")
 

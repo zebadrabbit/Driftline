@@ -537,7 +537,7 @@ static func pack_snapshot_packet(
 	for i in range(bullet_count):
 		var b2 = bullets[i]
 		buffer.put_32(int(b2.id))
-		buffer.put_u8(int(clampi(int(b2.level), 1, 3)))
+		buffer.put_u8(int(clampi(int(b2.level), 1, 4)))  # 4 = burst pellet
 
 	# Ship extras section (optional trailing).
 	var ship_count: int = ships.size()
@@ -1183,7 +1183,7 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 					var ebid2: int = int(buffer.get_32())
 					var level: int = int(buffer.get_u8())
 					if by_id.has(ebid2):
-						(by_id[ebid2] as DriftTypes.DriftBulletState).level = clampi(level, 1, 3)
+						(by_id[ebid2] as DriftTypes.DriftBulletState).level = clampi(level, 1, 4)
 
 	# Optional ship extras section.
 	if buffer.get_available_bytes() >= 2:

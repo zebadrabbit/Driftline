@@ -593,6 +593,10 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				"friendly_fire": true,
 				"bounty_increase_for_kill": true,
 				"fixed_kill_reward": true,
+				"bullet_damage_level": true,
+				"bullet_damage_upgrade": true,
+				"bomb_damage_level": true,
+				"burst_damage_level": true,
 			}
 			for ck in combat.keys():
 				var cks := String(ck)
@@ -604,6 +608,10 @@ static func validate_ruleset(root: Dictionary) -> Dictionary:
 				errors.append(_err("ruleset.combat.friendly_fire", "must be a boolean"))
 			_validate_optional_number_range(combat, "bounty_increase_for_kill", "ruleset.combat.bounty_increase_for_kill", 0.0, 255.0, errors)
 			_validate_optional_number_range(combat, "fixed_kill_reward", "ruleset.combat.fixed_kill_reward", -1.0, 32000.0, errors)
+			_validate_optional_number_range(combat, "bullet_damage_level", "ruleset.combat.bullet_damage_level", 0.0, 32000.0, errors)
+			_validate_optional_number_range(combat, "bullet_damage_upgrade", "ruleset.combat.bullet_damage_upgrade", 0.0, 32000.0, errors)
+			_validate_optional_number_range(combat, "bomb_damage_level", "ruleset.combat.bomb_damage_level", 0.0, 32000.0, errors)
+			_validate_optional_number_range(combat, "burst_damage_level", "ruleset.combat.burst_damage_level", 0.0, 5000.0, errors)
 
 	# Optional team section (schema v2 only).
 	var team: Dictionary = {}
