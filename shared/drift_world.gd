@@ -1038,6 +1038,14 @@ func _resolve_bullet_fire_profile_for_ship(ship_state: DriftTypes.DriftShipState
 	var _db_spec: Variant = _get_ship_spec_for(ship_state).get("misc")
 	if typeof(_db_spec) == TYPE_DICTIONARY and int((_db_spec as Dictionary).get("DoubleBarrel", 0)) != 0:
 		guns *= 2
+	# Classic MultiFire: toggled 3-shot spread; MultiFireAngle is 111 units per degree.
+	# Gun level itself never adds barrels (it only raises damage and cost).
+	if bool(ship_state.multi_fire_enabled):
+		guns = 3
+		var mf_angle_deg: float = 4.5
+		if typeof(_db_spec) == TYPE_DICTIONARY and (_db_spec as Dictionary).has("MultiFireAngle"):
+			mf_angle_deg = float(int((_db_spec as Dictionary).get("MultiFireAngle"))) / 111.0
+		spread = mf_angle_deg * 2.0
 	# Clamp.
 	guns = clampi(guns, 1, 8)
 	spread = clampf(spread, 0.0, 45.0)
