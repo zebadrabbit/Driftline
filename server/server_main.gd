@@ -116,6 +116,7 @@ var _spectator_ship_ids: Dictionary = {}  # ship_id -> true
 
 # Each entry: {pos: Vector2, radius: float, team: int}  (team = owner of this goal)
 var _goal_zones: Array = []
+var _wormholes: Array = []  # Array[Vector2] px centers
 # CTF flags: Array[DriftFlagState] (at most 2 entries, one per team).
 var _flags: Array = []
 # Home position per team (Vector2). Used for auto-return and capture check.
@@ -458,6 +459,7 @@ func _load_selected_map_from_config() -> bool:
 	_goal_zones.clear()
 	_flags.clear()
 	_flag_homes.clear()
+	_wormholes.clear()
 	for e in map_entities:
 		if typeof(e) != TYPE_DICTIONARY:
 			continue
@@ -476,7 +478,10 @@ func _load_selected_map_from_config() -> bool:
 			_flag_homes[eteam] = epos
 			var fl := DriftTypes.DriftFlagState.new(eteam, epos)
 			_flags.append(fl)
-	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ", goals=", _goal_zones.size(), ", flags=", _flags.size(), ")")
+		elif etype == "wormhole":
+			_wormholes.append(epos)
+	world.set_wormholes(_wormholes)
+	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ", goals=", _goal_zones.size(), ", flags=", _flags.size(), ", wormholes=", _wormholes.size(), ")")
 
 	# Static map hash for replay headers (computed once).
 	_replay_map_hash = 0

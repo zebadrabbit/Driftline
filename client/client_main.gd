@@ -61,6 +61,11 @@ const FLAG_FRAME_COUNT: int = 10
 const FLAG_ANIM_FPS: float = 10.0
 const FLAG_DRAW_SCALE: float = 2.0
 const GOAL_TEX: Texture2D = preload("res://client/graphics/entities/goal.png")
+const WORMHOLE_TEX: Texture2D = preload("res://client/graphics/entities/warppnt.png")
+const WORMHOLE_FRAME_PX: int = 16
+const WORMHOLE_FRAME_COUNT: int = 10
+const WORMHOLE_ANIM_FPS: float = 10.0
+const WORMHOLE_DRAW_SCALE: float = 5.0  # 5x5 tile footprint in the original
 const GOAL_FRAME_PX: int = 16
 const GOAL_FRAME_COUNT: int = 9
 const GOAL_ANIM_FPS: float = 8.0
@@ -197,6 +202,8 @@ var _hit_confirm_until_tick: int = -1
 var world: DriftWorld
 
 var client_map_checksum: PackedByteArray = PackedByteArray()
+# Active map path; switches to the server-announced path on welcome.
+var client_map_path: String = CLIENT_MAP_PATH
 var client_map_version: int = 0
 var accumulator_seconds: float = 0.0
 
@@ -205,6 +212,7 @@ var client_map_meta: Dictionary = {}
 var client_map_solid_cells: Array = []
 var client_map_safe_cells: Array = []
 var client_goal_zones: Array = []  # Array of {pos:Vector2, team:int}
+var client_wormholes: Array = []  # Array[Vector2] px centers
 
 # Camera2D reference
 var cam: Camera2D = null
@@ -595,8 +603,9 @@ func _ensure_ui_escape_menu_action_has_escape_binding() -> void:
 	InputMap.action_add_event(action, esc)
 
 
-func _load_client_map() -> void:
+func _load_client_map(path: String = CLIENT_MAP_PATH) -> void:
 	"""Load map for client-side rendering and collision detection."""
+	client_map_path = path
 	var tilemaps := {
 		"bg": get_node_or_null("TileMapBG"),
 		"solid": get_node_or_null("TileMapSolid"),
@@ -605,13 +614,13 @@ func _load_client_map() -> void:
 	_tilemap_solid = tilemaps.get("solid", null)
 
 	# Apply tiles to the TileMaps.
-	var meta_applied := LevelIO.load_map_from_json(CLIENT_MAP_PATH, tilemaps)
+	var meta_applied := LevelIO.load_map_from_json(client_map_path, tilemaps)
 	if meta_applied.is_empty():
 		push_error("Failed to load client map")
 		return
 
 	# Cache validated map meta + derived solid/safe cells for UI consumers (e.g., minimap).
-	var raw_map: Dictionary = LevelIO.read_map_data(CLIENT_MAP_PATH)
+	var raw_map: Dictionary = LevelIO.read_map_data(client_map_path)
 	if not raw_map.is_empty():
 		var validated := DriftMap.validate_and_canonicalize(raw_map)
 		if bool(validated.get("ok", false)):
@@ -625,14 +634,20 @@ func _load_client_map() -> void:
 			else:
 				client_map_solid_cells = []
 				client_map_safe_cells = []
-			# Read goal zones for minimap display.
+			# Read goal zones for minimap display + wormholes for prediction/rendering.
 			client_goal_zones.clear()
+			client_wormholes.clear()
 			var t_sz_c: int = int(DriftConstants.TILE_SIZE)
 			for ent_c in canonical.get("entities", []):
-				if typeof(ent_c) == TYPE_DICTIONARY and String(ent_c.get("type", "")) == "goal":
-					var gx: int = int(ent_c.get("x", 0))
-					var gy: int = int(ent_c.get("y", 0))
-					client_goal_zones.append({"pos": Vector2(gx * t_sz_c + t_sz_c / 2, gy * t_sz_c + t_sz_c / 2), "team": int(ent_c.get("team", 1))})
+				if typeof(ent_c) != TYPE_DICTIONARY:
+					continue
+				var ent_type_c: String = String(ent_c.get("type", ""))
+				var ent_pos_c := Vector2(int(ent_c.get("x", 0)) * t_sz_c + t_sz_c / 2, int(ent_c.get("y", 0)) * t_sz_c + t_sz_c / 2)
+				if ent_type_c == "goal":
+					client_goal_zones.append({"pos": ent_pos_c, "team": int(ent_c.get("team", 1))})
+				elif ent_type_c == "wormhole":
+					client_wormholes.append(ent_pos_c)
+			world.set_wormholes(client_wormholes)
 		else:
 			client_map_meta = {}
 			client_map_solid_cells = []
@@ -640,10 +655,10 @@ func _load_client_map() -> void:
 			client_goal_zones.clear()
 
 	# Also read raw map for checksum/manifest verification and canonical layers for collision.
-	var raw := LevelIO.read_map_data(CLIENT_MAP_PATH)
+	var raw := LevelIO.read_map_data(client_map_path)
 	var validated := DriftMap.validate_and_canonicalize(raw)
 	if not bool(validated.get("ok", false)):
-		push_error("Failed to validate client map: " + CLIENT_MAP_PATH)
+		push_error("Failed to validate client map: " + client_map_path)
 		for e in (validated.get("errors", []) as Array):
 			push_error(" - " + String(e))
 		return
@@ -651,7 +666,7 @@ func _load_client_map() -> void:
 	client_map_version = int(canonical.get("schema_version", 0))
 	client_map_checksum = DriftMap.checksum_sha256_canonical(canonical)
 	print("Client map checksum (sha256): ", DriftMap.bytes_to_hex(client_map_checksum))
-	print("Client map path: ", CLIENT_MAP_PATH)
+	print("Client map path: ", client_map_path)
 	print("Client map version: ", client_map_version)
 
 	# Deterministic RNG seeds for client-side prediction.
@@ -1423,7 +1438,7 @@ func _build_bugreport_net_state() -> Dictionary:
 
 	return {
 		"server_addr": "%s:%d" % [server_address, int(SERVER_PORT)],
-		"map_path": String(CLIENT_MAP_PATH),
+		"map_path": String(client_map_path),
 		"map_version": int(client_map_version),
 		"map_checksum": DriftMap.bytes_to_hex(client_map_checksum) if client_map_checksum.size() > 0 else "",
 		"ruleset_path": "",
@@ -1616,6 +1631,7 @@ func _draw() -> void:
 	_draw_portal_points()
 	_draw_bricks()
 	_draw_goal_zones()
+	_draw_wormholes()
 	_draw_prizes()
 	_draw_flags()
 	_draw_bombs()
@@ -2313,6 +2329,19 @@ func _draw_bricks() -> void:
 			var world_pos := Vector2(float(tile.x) * tile_px + tile_px * 0.5, float(tile.y) * tile_px + tile_px * 0.5)
 			var dst := Rect2(world_pos - Vector2(tile_px, tile_px) * 0.5, Vector2(tile_px, tile_px))
 			draw_texture_rect_region(WALL_TEX, dst, src)
+
+
+func _draw_wormholes() -> void:
+	if client_wormholes.is_empty() or WORMHOLE_TEX == null:
+		return
+	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
+	var frame: int = int(floor(t_s * WORMHOLE_ANIM_FPS)) % WORMHOLE_FRAME_COUNT
+	var frame_sz: float = float(WORMHOLE_FRAME_PX)
+	var draw_sz: float = frame_sz * WORMHOLE_DRAW_SCALE
+	var src := Rect2(float(frame) * frame_sz, 0.0, frame_sz, frame_sz)
+	for wp in client_wormholes:
+		var dst := Rect2((wp as Vector2) - Vector2(draw_sz, draw_sz) * 0.5, Vector2(draw_sz, draw_sz))
+		draw_texture_rect_region(WORMHOLE_TEX, dst, src, Color.WHITE)
 
 
 func _draw_goal_zones() -> void:
@@ -3193,13 +3222,18 @@ func _poll_network_packets() -> void:
 				var server_map_path: String = String(w.get("map_path", ""))
 				var server_map_version: int = int(w.get("map_version", 0))
 				var server_checksum: PackedByteArray = w.get("map_checksum", PackedByteArray())
-				if server_map_path != "" and server_map_path != CLIENT_MAP_PATH:
+				if server_map_path != "" and server_map_path != client_map_path:
+					# Follow the server's map when we have it locally (maps ship with the game).
+					if FileAccess.file_exists(server_map_path):
+						print("[NET] Switching to server map: ", server_map_path)
+						_load_client_map(server_map_path)
+				if server_map_path != "" and server_map_path != client_map_path:
 					on_desync_detected("handshake_map_path_mismatch", {
 						"server_map_path": server_map_path,
-						"client_map_path": String(CLIENT_MAP_PATH),
+						"client_map_path": String(client_map_path),
 					})
-					push_error("Map path mismatch. server='" + server_map_path + "' client='" + CLIENT_MAP_PATH + "'")
-					connection_status_message = "Map mismatch with server. Load the same map path." 
+					push_error("Map path mismatch. server='" + server_map_path + "' client='" + client_map_path + "'")
+					connection_status_message = "Server map not found locally: " + server_map_path
 					show_connect_ui = true
 					allow_offline_mode = false
 					is_connected = false

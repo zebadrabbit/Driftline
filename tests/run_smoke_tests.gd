@@ -119,6 +119,7 @@ func _initialize() -> void:
 	_test_king_ship_id_snapshot_roundtrip()
 	_test_server_hello_sets_username()
 	_test_kill_scoring_awards_points()
+	_test_wormhole_pull_and_teleport()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -4513,6 +4514,30 @@ func _test_kill_scoring_awards_points() -> void:
 		_fail("kill_scoring (points snapshot roundtrip)")
 		return
 	_pass("kill_scoring_awards_points")
+
+
+func _test_wormhole_pull_and_teleport() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(200, 200)
+	var wh_a := Vector2(800.0, 800.0)
+	var wh_b := Vector2(2400.0, 800.0)
+	world.set_wormholes([wh_a, wh_b])
+	# Ship inside pull radius drifts toward the wormhole.
+	world.add_ship(1, wh_a + Vector2(300.0, 0.0))
+	var s: DriftTypes.DriftShipState = world.ships[1]
+	world.step_tick({})
+	if s.velocity.x >= 0.0:
+		_fail("wormhole (no pull: vel.x=%f)" % s.velocity.x)
+		return
+	# Ship at the core teleports away.
+	s.position = wh_a
+	s.velocity = Vector2.ZERO
+	world.step_tick({})
+	if s.position.distance_to(wh_a) < world.WORMHOLE_PULL_RADIUS_PX:
+		_fail("wormhole (no teleport: dist=%f)" % s.position.distance_to(wh_a))
+		return
+	_pass("wormhole_pull_and_teleport")
 
 
 func _test_thor_fires_ring() -> void:

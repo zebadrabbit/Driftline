@@ -172,6 +172,14 @@ var decoys: Dictionary = {} # Dictionary[int, DriftTypes.DriftDecoyState]
 var next_decoy_id: int = 1
 var bricks: Array = [] # Array[{tiles: Array[Vector2i], die_tick: int}]
 
+# Wormholes (map-defined, static; deterministic gravity + teleport).
+# ponytail: fixed tuning constants; move to ruleset if maps need custom wormholes.
+var wormholes: Array = [] # Array[Vector2] centers in px
+const WORMHOLE_PULL_RADIUS_PX: float = 480.0
+const WORMHOLE_ACCEL_PX_S2: float = 1400.0
+const WORMHOLE_CORE_RADIUS_PX: float = 20.0
+const WORMHOLE_SWITCH_TICKS: int = 600  # destination rotates every 10s (SwitchTime)
+
 # Dev-only diagnostics. These must never affect simulation state.
 var debug_combat: bool = false
 var debug_combat_verbose: bool = false
@@ -548,6 +556,11 @@ func compute_world_hash() -> int:
 		parts.append("pk=%d" % int(p.kind))
 		parts.append("pn=%d" % _qb(p.is_negative))
 		parts.append("pdd=%d" % _qb(p.is_death_drop))
+
+	# Wormholes (static map state; affects trajectories).
+	for wh_i in range(wormholes.size()):
+		var whp: Vector2 = wormholes[wh_i]
+		parts.append("wh%d=%d,%d" % [wh_i, _q(float(whp.x), Q_POS), _q(float(whp.y), Q_POS)])
 
 	# Ball.
 	parts.append("ball_owner=%d" % int(ball.owner_id))
@@ -1405,6 +1418,78 @@ func _step_mines(ship_ids_sorted: Array) -> void:
 
 	for mid2 in to_erase:
 		mines.erase(int(mid2))
+
+
+func set_wormholes(centers: Array) -> void:
+	wormholes = []
+	for c in centers:
+		if c is Vector2:
+			wormholes.append(c)
+
+
+func _step_wormholes(ship_ids_sorted: Array) -> void:
+	if wormholes.is_empty():
+		return
+	var t: int = int(tick)
+	var dt: float = DriftConstants.TICK_DT
+	for ship_id in ship_ids_sorted:
+		var s: DriftTypes.DriftShipState = ships.get(ship_id)
+		if s == null or _ship_is_dead(s, t) or bool(s.in_safe_zone):
+			continue
+		for wi in range(wormholes.size()):
+			var wh: Vector2 = wormholes[wi]
+			var delta: Vector2 = wh - s.position
+			var dist: float = delta.length()
+			if dist >= WORMHOLE_PULL_RADIUS_PX:
+				continue
+			if dist <= WORMHOLE_CORE_RADIUS_PX:
+				_wormhole_teleport(s, wi)
+				break
+			if dist <= 0.001:
+				continue
+			# Linear falloff pull toward the center.
+			var accel: float = WORMHOLE_ACCEL_PX_S2 * (1.0 - dist / WORMHOLE_PULL_RADIUS_PX)
+			s.velocity += (delta / dist) * accel * dt
+	# Optional bomb gravity (original Wormhole:GravityBombs=1); core swallows bombs.
+	var dead_bombs: Array = []
+	for bid in bombs.keys():
+		var b = bombs[bid]
+		for wh2 in wormholes:
+			var delta2: Vector2 = wh2 - b.position
+			var dist2: float = delta2.length()
+			if dist2 >= WORMHOLE_PULL_RADIUS_PX:
+				continue
+			if dist2 <= WORMHOLE_CORE_RADIUS_PX:
+				dead_bombs.append(bid)
+				break
+			if dist2 <= 0.001:
+				continue
+			var accel2: float = WORMHOLE_ACCEL_PX_S2 * (1.0 - dist2 / WORMHOLE_PULL_RADIUS_PX)
+			b.velocity += (delta2 / dist2) * accel2 * dt
+	for bid2 in dead_bombs:
+		bombs.erase(bid2)
+
+
+func _wormhole_teleport(s: DriftTypes.DriftShipState, entry_index: int) -> void:
+	var t: int = int(tick)
+	if wormholes.size() > 1:
+		# Destination rotates among the other wormholes every WORMHOLE_SWITCH_TICKS.
+		var hop: int = 1 + ((t / WORMHOLE_SWITCH_TICKS) % (wormholes.size() - 1))
+		var exit_wh: Vector2 = wormholes[(entry_index + hop) % wormholes.size()]
+		# Deterministic ejection angle; land outside the exit's pull radius.
+		var ang: float = float((t * 7 + int(s.id) * 131) % 628) / 100.0
+		var out_pos: Vector2 = exit_wh + Vector2.from_angle(ang) * (WORMHOLE_PULL_RADIUS_PX + 48.0)
+		out_pos.x = clampf(out_pos.x, DriftConstants.ARENA_MIN.x + 32.0, DriftConstants.ARENA_MAX.x - 32.0)
+		out_pos.y = clampf(out_pos.y, DriftConstants.ARENA_MIN.y + 32.0, DriftConstants.ARENA_MAX.y - 32.0)
+		if not is_position_blocked(out_pos, DriftConstants.SHIP_RADIUS):
+			s.position = out_pos
+			collision_events.append({"type": "wormhole", "ship_id": int(s.id), "pos": out_pos})
+			return
+	# Single wormhole (or blocked exit): random warp, same stream as spawns.
+	var spawn = get_non_safe_spawn_point()
+	if spawn is Vector2:
+		s.position = spawn
+		collision_events.append({"type": "wormhole", "ship_id": int(s.id), "pos": spawn})
 
 
 func _step_decoys() -> void:
@@ -4349,6 +4434,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	_step_mines(ship_ids)
 	_step_decoys()
 	_step_bricks()
+	_step_wormholes(ship_ids)
 
 	# Step bullets (deterministic collision + damage).
 	_step_bullets(ship_ids)
