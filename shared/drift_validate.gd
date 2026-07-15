@@ -380,7 +380,7 @@ static func validate_map(map_root: Dictionary) -> Dictionary:
 		out_layers[layer_name] = cells_out
 
 	# Entities
-	var allowed := {"spawn": true, "flag": true, "base": true, "goal": true}
+	var allowed := {"spawn": true, "flag": true, "base": true, "goal": true, "wormhole": true}
 	var entities_seen: Dictionary = {}
 	var entities_out: Array = []
 	for i in range(entities.size()):
