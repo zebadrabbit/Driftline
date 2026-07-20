@@ -10,6 +10,7 @@ A small Godot 4 project with an authoritative server tick, a client with predict
 - `shared/`: deterministic shared simulation + network packet types
 - `tools/`: one-off utility scripts
 - `assets/tilesets/`: runtime tileset packages (image + defs + manifest)
+- `original_content/`: reference material from original SubSpace (server.cfg, TEMPLATE.SSS, main.c) used for 1:1 parity work — see `plans/subspace-parity.md`
 
 ## Versioning
 

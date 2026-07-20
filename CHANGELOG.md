@@ -136,6 +136,32 @@ This project didn’t previously have a formal changelog. The entries below were
 - Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).
 - Baseline bullet firing cadence no longer defaults to every tick (cooldown now enforced via ruleset `cooldown_ticks`).
 
+## 0.6.0 - 2026-07-20
+
+### Added
+
+- SubSpace 1:1 parity effort (`plans/subspace-parity.md`), using reference material in `original_content/` (server.cfg, TEMPLATE.SSS, main.c, original .lvl maps, graphics, sounds).
+- Original SubSpace sprite wiring (flags/goals/crown/wall/warp/shield/powerball/bullets/mines/bombs/Thor) and 8192x8192 map with minimap prize display.
+- Bounty and kill scoring matching original reward/bounty-increase rules.
+- `tools/gen_map.py`: procedural 1024x1024 arena generator.
+- `tools/lvl_import.py`: original `.lvl` map importer (atlas ⇔ original tile id mapping) plus 8 converted maps in `maps/imported/` (castle, soccer, romp, alpha, jollyr, spiral, nivag, melted).
+- Wormhole simulation (gravity well + teleport, warp effect events); client now loads the server-announced map instead of hard-failing.
+- Turf flags (`FlagMode 2`): tile 170 claimable by touch, team ownership.
+- Original event sounds wired (warp/goal/flag/repel/thor/explode).
+- Per-ship classic movement/energy stats read directly from `TEMPLATE.SSS` units (speed/rotation/thrust, energy max/recharge, per-ship ability drains, item counts).
+- Classic damage economy: bullet/bomb/mine damage by level, burst pellets, level-scaled costs and delays.
+- Thor implemented as a wall-piercing level-4 proximity bomb; burst pellets arm only after a wall bounce.
+- Classic radar parity: red enemy-flag-carrier dots, flashing team-captured flag colors; HUD shows personal/team frags, shield countdown, and super status.
+- Classic portal return beacon: drop a 60s return point, second press warps back and clears it; HUD `PT:` timer.
+
+### Changed
+
+- Gun level now controls damage only; `MultiFire`/`DoubleBarrel` control barrel count/spread separately (previously conflated).
+
+### Fixed
+
+- Ruleset unit misreads discovered during the original `server.cfg` parity audit (e.g. `DamageFactor` is wall-bounce damage, not a weapon damage multiplier).
+
 ## 0.5.8 - 2026-01-11
 
 ### Added
