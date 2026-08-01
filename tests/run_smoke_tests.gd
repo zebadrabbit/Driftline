@@ -1864,7 +1864,9 @@ func _test_determinism_checksum_fixed_input() -> void:
 
 	# If this changes unexpectedly, determinism likely broke.
 	# Update only when you intentionally change sim semantics.
-	const EXPECTED := "935345939f2555efdc0aa7cbe4fd3b0adb101a7da23dddb85cec787cd1d92340"
+	# Re-baselined 2026-08-01: the classic weapon/damage rework and the move of
+	# arena bounds off DriftConstants statics both change sim state legitimately.
+	const EXPECTED := "182a8192221041c4b1ecd9d5ac31d63153607e33e6d3685a2ac68faed17ce5c9"
 	if got != EXPECTED:
 		_fail("determinism_checksum (got %s expected %s)" % [got, EXPECTED])
 		return
@@ -3525,7 +3527,9 @@ func _make_world_for_classic_ship_spec(spec: Dictionary) -> DriftWorld:
 	world.energy_recharge_delay_ticks = 999999
 	# Keep bullets around so this test can count spawns deterministically.
 	world.bullet_lifetime_ticks = 0
-	world.add_ship(1, Vector2(2048, 2048))
+	# Off arena center (2048,2048): the powerball sits there and fire = kick, which
+	# would eat the first shot and shift every spawn tick by one.
+	world.add_ship(1, Vector2(1600, 1600))
 	return world
 
 
@@ -3605,8 +3609,12 @@ func _test_classic_warbird_vs_terrier_bullet_cooldown_and_energy_spend() -> void
 		_fail("classic_wb_vs_tr (expected Terrier spawn ticks [0,18], got %s)" % [str(tr_spawn_ticks)])
 		return
 
-	if int(wb_world.bullets.size()) != wb_spawn_ticks.size() or int(tr_world.bullets.size()) != tr_spawn_ticks.size():
-		_fail("classic_wb_vs_tr (bullet count mismatch with spawn ticks)")
+	# Terrier is DoubleBarrel, so each fire event spawns two bullets; Warbird spawns one.
+	if int(wb_world.bullets.size()) != wb_spawn_ticks.size():
+		_fail("classic_wb_vs_tr (Warbird %d bullets for %d fires)" % [int(wb_world.bullets.size()), wb_spawn_ticks.size()])
+		return
+	if int(tr_world.bullets.size()) != tr_spawn_ticks.size() * 2:
+		_fail("classic_wb_vs_tr (Terrier %d bullets for %d double-barrel fires)" % [int(tr_world.bullets.size()), tr_spawn_ticks.size()])
 		return
 
 	# next_bullet_tick should reflect the last fire.
@@ -3796,6 +3804,7 @@ func _test_no_hardcoded_keys_in_gameplay() -> void:
 	]
 	var allowlist := {
 		"res://client/client_main.gd": true,  # F1-F8 ship selection (non-rebindable, matches SubSpace)
+		"res://client/input/actions.gd": true,  # the rebinding table itself: DEFAULT_BINDINGS names keycodes
 	}
 	var needles := [
 		"Input.is_key_pressed(",
@@ -4174,9 +4183,12 @@ func _test_ship_type_change_respawns_with_correct_spec() -> void:
 	if int(s.ship_type) != 1:
 		_fail("ship_type_change (expected ship_type 1 after change, got %d)" % int(s.ship_type))
 		return
-	# Weapons/upgrades should be reset.
-	if int(s.gun_level) != 1 or int(s.bomb_level) != 1:
-		_fail("ship_type_change (weapon levels not reset)")
+	# Weapons/upgrades reset to the NEW ship's spec defaults, which are per-ship:
+	# Javelin is InitialGuns=1, InitialBombs=0 in the original server.cfg.
+	var want_gun: int = world._ship_spec_initial_gun_level(s)
+	var want_bomb: int = world._ship_spec_initial_bomb_level(s)
+	if int(s.gun_level) != want_gun or int(s.bomb_level) != want_bomb:
+		_fail("ship_type_change (levels not reset to spec: gun %d want %d, bomb %d want %d)" % [int(s.gun_level), want_gun, int(s.bomb_level), want_bomb])
 		return
 	if bool(s.multi_fire_enabled):
 		_fail("ship_type_change (multi_fire should be off after change)")
@@ -4697,13 +4709,18 @@ func _test_rocket_boosts_speed() -> void:
 	world.add_ship(1, Vector2(500, 500))
 	var s1 = world.ships.get(1)
 	s1.rocket_count = 1
-	var bonus_before: int = int(s1.top_speed_bonus)
+	# Rocket is a timed thrust boost (rocket_boost_until_tick), not a permanent
+	# top_speed_bonus — that is what the TopSpeed prize grants.
+	var boost_before: int = int(s1.rocket_boost_until_tick)
 	world._use_rocket(s1)
 	if int(s1.rocket_count) != 0:
 		_fail("rocket_boosts_speed (count should be 0)")
 		return
-	if int(s1.top_speed_bonus) <= bonus_before:
-		_fail("rocket_boosts_speed (top_speed_bonus should increase)")
+	if int(s1.rocket_boost_until_tick) <= boost_before:
+		_fail("rocket_boosts_speed (boost should extend past tick %d, got %d)" % [boost_before, int(s1.rocket_boost_until_tick)])
+		return
+	if int(s1.rocket_boost_until_tick) <= int(world.tick):
+		_fail("rocket_boosts_speed (boost should end in the future, got %d at tick %d)" % [int(s1.rocket_boost_until_tick), int(world.tick)])
 		return
 	_pass("rocket_boosts_speed")
 
