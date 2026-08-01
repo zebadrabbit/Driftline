@@ -123,6 +123,7 @@ func _initialize() -> void:
 	_test_thor_and_burst_classic()
 	_test_portal_beacon_roundtrip()
 	_test_wormhole_pull_and_teleport()
+	_test_two_worlds_do_not_share_arena()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -233,7 +234,7 @@ func _test_projectile_velocity_inheritance_sanity() -> void:
 	w1.set_door_tiles([])
 	w1.add_boundary_tiles(64, 64)
 	w1.set_map_dimensions(64, 64)
-	w1.add_ship(1, Vector2(512, 512))
+	w1.add_ship(1, Vector2(400, 400))  # off arena center: the powerball spawns there and fire = kick
 	var s1: DriftTypes.DriftShipState = w1.ships.get(1)
 	s1.rotation = 0.0
 	s1.velocity = Vector2(650.0, 0.0)
@@ -260,7 +261,7 @@ func _test_projectile_velocity_inheritance_sanity() -> void:
 	w2.set_door_tiles([])
 	w2.add_boundary_tiles(64, 64)
 	w2.set_map_dimensions(64, 64)
-	w2.add_ship(1, Vector2(512, 512))
+	w2.add_ship(1, Vector2(400, 400))  # off arena center: the powerball spawns there and fire = kick
 	var s2: DriftTypes.DriftShipState = w2.ships.get(1)
 	s2.rotation = PI # face -X
 	s2.velocity = Vector2(650.0, 0.0) # still moving +X
@@ -288,7 +289,7 @@ func _test_projectile_velocity_inheritance_sanity() -> void:
 	w3.set_door_tiles([])
 	w3.add_boundary_tiles(64, 64)
 	w3.set_map_dimensions(64, 64)
-	w3.add_ship(1, Vector2(512, 512))
+	w3.add_ship(1, Vector2(400, 400))  # off arena center: the powerball spawns there and fire = kick
 	var s3: DriftTypes.DriftShipState = w3.ships.get(1)
 	s3.rotation = 0.0
 	s3.velocity = Vector2.ZERO
@@ -4925,6 +4926,40 @@ func _test_server_hello_sets_username() -> void:
 		_fail("server_hello_sets_username: expected '%s' got '%s'" % [name_in, name_out])
 		return
 	_pass("server_hello_sets_username")
+
+
+func _test_two_worlds_do_not_share_arena() -> void:
+	_ran += 1
+	# Regression: arena bounds used to live in DriftConstants static vars, so the
+	# last world constructed silently redefined the arena for every other world in
+	# the process — construction order changed simulation results.
+	var small := DriftWorld.new()
+	small.set_map_dimensions(64, 64)
+	var large := DriftWorld.new()
+	large.set_map_dimensions(256, 256)
+
+	if small.arena_max != Vector2(1024, 1024):
+		_fail("two_worlds_arena (small world bounds clobbered: %s)" % str(small.arena_max))
+		return
+	if large.arena_max != Vector2(4096, 4096):
+		_fail("two_worlds_arena (large world bounds wrong: %s)" % str(large.arena_max))
+		return
+	if small.arena_center != Vector2(512, 512) or large.arena_center != Vector2(2048, 2048):
+		_fail("two_worlds_arena (centers wrong: %s / %s)" % [str(small.arena_center), str(large.arena_center)])
+		return
+
+	# Order must not decide who can shoot. Both worlds get identical setup; both
+	# must spawn a bullet. (Off arena center so neither ship starts on the ball.)
+	var fire := DriftTypes.DriftInputCmd.new(0.0, 0.0, true, false, false)
+	for w in [small, large]:
+		w.set_solid_tiles([])
+		w.set_door_tiles([])
+		w.add_ship(1, w.arena_center + Vector2(200.0, 200.0))
+		w.step_tick({1: fire}, false, 0)
+		if w.bullets.size() != 1:
+			_fail("two_worlds_arena (expected 1 bullet, got %d)" % w.bullets.size())
+			return
+	_pass("two_worlds_do_not_share_arena")
 
 
 func _pass(name: String) -> void:

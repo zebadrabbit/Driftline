@@ -85,8 +85,9 @@ static func unpack_hello(bytes: PackedByteArray) -> String:
 	if pkt_type != PKT_HELLO:
 		return ""
 	var length = buffer.get_u16()
+	# get_data() returns [error, PackedByteArray] — index [1] for the bytes.
 	var data = buffer.get_data(length)
-	return data.get_string_from_utf8()
+	return (data[1] as PackedByteArray).get_string_from_utf8()
 
 
 static func pack_set_freq_request(ship_id: int, desired_freq: int) -> PackedByteArray:

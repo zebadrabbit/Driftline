@@ -17,10 +17,18 @@ var map_h_tiles: int = 0
 var _main_walkable_tiles: Array = [] # Array[Vector2i]
 var _main_walkable_set: Dictionary = {} # Dictionary[Vector2i, bool]
 
+# Arena bounds. These are per-world state, NOT globals: two DriftWorlds in one
+# process (client prediction + editor test puck, host mode, the test suite) must
+# not see each other's map. set_map_dimensions() is the only writer.
+var arena_min: Vector2 = Vector2.ZERO
+var arena_max: Vector2 = Vector2(8192, 8192)
+var arena_center: Vector2 = Vector2(4096, 4096)
+var hill_center: Vector2 = Vector2(4096, 4096)
+
 
 var tick: int = 0
 var ships: Dictionary = {} # Dictionary[int, DriftTypes.DriftShipState]
-var ball: DriftTypes.DriftBallState = DriftTypes.DriftBallState.new(DriftConstants.ARENA_CENTER, Vector2.ZERO)
+var ball: DriftTypes.DriftBallState = DriftTypes.DriftBallState.new(Vector2(4096, 4096), Vector2.ZERO)
 var solid_tiles: Dictionary = {} # Dictionary[Vector2i, bool] - tile coordinates that are solid
 
 # Ruleset (authoritative + prediction must match)
@@ -1347,7 +1355,7 @@ func _step_bombs(ship_ids_sorted: Array) -> void:
 		# Thor (level 4) travels through walls; despawn quietly once out of the arena.
 		if int(b.level) >= 4:
 			b.position = new_pos
-			if new_pos.x < 0.0 or new_pos.y < 0.0 or new_pos.x > float(DriftConstants.ARENA_MAX.x) or new_pos.y > float(DriftConstants.ARENA_MAX.y):
+			if new_pos.x < 0.0 or new_pos.y < 0.0 or new_pos.x > float(arena_max.x) or new_pos.y > float(arena_max.y):
 				to_erase.append(bid)
 				continue
 		# Wall collision/bounce.
@@ -1546,8 +1554,8 @@ func _wormhole_teleport(s: DriftTypes.DriftShipState, entry_index: int) -> void:
 		# Deterministic ejection angle; land outside the exit's pull radius.
 		var ang: float = float((t * 7 + int(s.id) * 131) % 628) / 100.0
 		var out_pos: Vector2 = exit_wh + Vector2.from_angle(ang) * (WORMHOLE_PULL_RADIUS_PX + 48.0)
-		out_pos.x = clampf(out_pos.x, DriftConstants.ARENA_MIN.x + 32.0, DriftConstants.ARENA_MAX.x - 32.0)
-		out_pos.y = clampf(out_pos.y, DriftConstants.ARENA_MIN.y + 32.0, DriftConstants.ARENA_MAX.y - 32.0)
+		out_pos.x = clampf(out_pos.x, arena_min.x + 32.0, arena_max.x - 32.0)
+		out_pos.y = clampf(out_pos.y, arena_min.y + 32.0, arena_max.y - 32.0)
 		if not is_position_blocked(out_pos, DriftConstants.SHIP_RADIUS):
 			var depart := s.position
 			s.position = out_pos
@@ -1758,10 +1766,23 @@ func set_map_dimensions(w_tiles: int, h_tiles: int) -> void:
 	map_h_tiles = maxi(0, int(h_tiles))
 	# Keep arena bounds in sync with map so clamping/spawning are correct.
 	if map_w_tiles > 0 and map_h_tiles > 0:
-		DriftConstants.ARENA_MAX = Vector2(float(map_w_tiles) * float(TILE_SIZE), float(map_h_tiles) * float(TILE_SIZE))
-		DriftConstants.ARENA_MIN = Vector2.ZERO
-		DriftConstants.ARENA_CENTER = DriftConstants.ARENA_MAX * 0.5
-		DriftConstants.HILL_CENTER = DriftConstants.ARENA_CENTER
+		arena_max = Vector2(float(map_w_tiles) * float(TILE_SIZE), float(map_h_tiles) * float(TILE_SIZE))
+		arena_min = Vector2.ZERO
+		arena_center = arena_max * 0.5
+		hill_center = arena_center
+		# The ball's constructor default belongs to the old map; recenter it here,
+		# same as the server does on match start and after every goal.
+		ball.position = arena_center
+		ball.velocity = Vector2.ZERO
+		ball.owner_id = -1
+		# ponytail: DriftConstants.ARENA_* is a presentation mirror for the client's
+		# minimap/ball drawing, which only ever has one map loaded. Sim code must read
+		# the instance fields above. Push the mirror down into the client if a process
+		# ever needs to render two maps at once.
+		DriftConstants.ARENA_MAX = arena_max
+		DriftConstants.ARENA_MIN = arena_min
+		DriftConstants.ARENA_CENTER = arena_center
+		DriftConstants.HILL_CENTER = hill_center
 	_recompute_main_walkable_component()
 	# Reset spawn schedule when map changes.
 	next_prize_spawn_tick = maxi(0, tick + prize_delay_ticks)
@@ -2075,7 +2096,7 @@ func _world_pos_for_tile(t: Vector2i) -> Vector2:
 func _center_tile() -> Vector2i:
 	if map_w_tiles > 0 and map_h_tiles > 0:
 		return Vector2i(int(floor(map_w_tiles * 0.5)), int(floor(map_h_tiles * 0.5)))
-	return _tile_for_world_pos(DriftConstants.ARENA_CENTER)
+	return _tile_for_world_pos(arena_center)
 
 
 func _recompute_main_walkable_component() -> void:
@@ -2962,7 +2983,7 @@ func add_energy(ship: DriftTypes.DriftShipState, amount: int) -> void:
 
 func get_spawn_position(ship_id: int) -> Vector2:
 	# Example: spread ships horizontally from center
-	return DriftConstants.ARENA_CENTER + Vector2((ship_id-1) * 30, 0)
+	return arena_center + Vector2((ship_id-1) * 30, 0)
 
 
 func set_solid_tiles(tiles: Array) -> void:
@@ -3115,7 +3136,7 @@ func get_random_valid_spawn_point() -> Vector2:
 				var p4 := _world_pos_for_tile(t)
 				if is_valid_spawn_point(p4):
 					return p4
-	return DriftConstants.ARENA_CENTER
+	return arena_center
 
 
 func get_spawn_point() -> Vector2:
@@ -4237,10 +4258,10 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Clamp ship position to arena bounds and bounce
 		var old_x = ship_state.position.x
 		var old_y = ship_state.position.y
-		var min_x = DriftConstants.ARENA_MIN.x + DriftConstants.SHIP_RADIUS
-		var max_x = DriftConstants.ARENA_MAX.x - DriftConstants.SHIP_RADIUS
-		var min_y = DriftConstants.ARENA_MIN.y + DriftConstants.SHIP_RADIUS
-		var max_y = DriftConstants.ARENA_MAX.y - DriftConstants.SHIP_RADIUS
+		var min_x = arena_min.x + DriftConstants.SHIP_RADIUS
+		var max_x = arena_max.x - DriftConstants.SHIP_RADIUS
+		var min_y = arena_min.y + DriftConstants.SHIP_RADIUS
+		var max_y = arena_max.y - DriftConstants.SHIP_RADIUS
 		ship_state.position.x = clamp(ship_state.position.x, min_x, max_x)
 		ship_state.position.y = clamp(ship_state.position.y, min_y, max_y)
 		# Bounce on arena bounds
@@ -4282,10 +4303,10 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Clamp ball position to arena bounds
 		var ball_old_x = ball.position.x
 		var ball_old_y = ball.position.y
-		var ball_min_x = DriftConstants.ARENA_MIN.x + DriftConstants.BALL_RADIUS
-		var ball_max_x = DriftConstants.ARENA_MAX.x - DriftConstants.BALL_RADIUS
-		var ball_min_y = DriftConstants.ARENA_MIN.y + DriftConstants.BALL_RADIUS
-		var ball_max_y = DriftConstants.ARENA_MAX.y - DriftConstants.BALL_RADIUS
+		var ball_min_x = arena_min.x + DriftConstants.BALL_RADIUS
+		var ball_max_x = arena_max.x - DriftConstants.BALL_RADIUS
+		var ball_min_y = arena_min.y + DriftConstants.BALL_RADIUS
+		var ball_max_y = arena_max.y - DriftConstants.BALL_RADIUS
 		ball.position.x = clamp(ball.position.x, ball_min_x, ball_max_x)
 		ball.position.y = clamp(ball.position.y, ball_min_y, ball_max_y)
 		if ball.position.x != ball_old_x:
@@ -4550,8 +4571,8 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Drop behind the ship.
 		var pos3 := ship_state3.position - fwd3 * (float(DriftConstants.SHIP_RADIUS) + 4.0)
 		# Clamp within arena bounds.
-		pos3.x = clamp(pos3.x, DriftConstants.ARENA_MIN.x + 1.0, DriftConstants.ARENA_MAX.x - 1.0)
-		pos3.y = clamp(pos3.y, DriftConstants.ARENA_MIN.y + 1.0, DriftConstants.ARENA_MAX.y - 1.0)
+		pos3.x = clamp(pos3.x, arena_min.x + 1.0, arena_max.x - 1.0)
+		pos3.y = clamp(pos3.y, arena_min.y + 1.0, arena_max.y - 1.0)
 		if is_position_blocked(pos3, float(BOMB_RADIUS_PX)):
 			pos3 = ship_state3.position
 		var die_tick3: int = -1

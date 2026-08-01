@@ -603,7 +603,7 @@ func _check_ball_goals() -> void:
 		var s2: int = int(_team_scores.get(2, 0))
 		print("[SERVER] GOAL! Team %d scores. Score: %d-%d" % [scorer, s1, s2])
 		# Reset ball to arena center.
-		world.ball.position = DriftConstants.ARENA_CENTER
+		world.ball.position = world.arena_center
 		world.ball.velocity = Vector2.ZERO
 		world.ball.owner_id = -1
 		var over: bool = (s1 >= SCORE_LIMIT or s2 >= SCORE_LIMIT)
@@ -623,7 +623,7 @@ func _reset_match() -> void:
 	_match_winner = 0
 	_match_reset_tick = -1
 	_team_scores = {1: 0, 2: 0}
-	world.ball.position = DriftConstants.ARENA_CENTER
+	world.ball.position = world.arena_center
 	world.ball.velocity = Vector2.ZERO
 	world.ball.owner_id = -1
 	# Reset all flags to home positions.
