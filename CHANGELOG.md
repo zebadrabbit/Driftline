@@ -136,6 +136,19 @@ This project didn’t previously have a formal changelog. The entries below were
 - Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).
 - Baseline bullet firing cadence no longer defaults to every tick (cooldown now enforced via ruleset `cooldown_ticks`).
 
+## Unreleased
+
+### Fixed
+
+- Clean checkouts could not load the client at all: `tools/tilemap_editor/` was never committed despite being `preload()`ed by `client/client_main.gd`.
+- Arena bounds (`ARENA_MIN`/`MAX`/`CENTER`, `HILL_CENTER`) were process-global `static var`s, so every `DriftWorld` in a process shared one arena and construction order changed simulation results. They are now per-world instance state; the `DriftConstants` statics remain only as a mirror for client presentation code.
+- Player usernames arrived empty: `unpack_hello()` did not index `get_data()`'s `[error, PackedByteArray]` return.
+- `set_map_dimensions()` now recenters the powerball, matching what the server already does on match start and after each goal.
+
+### Changed
+
+- Smoke suite restored to green (87 checks) after six weeks red; six stale test expectations re-baselined and the determinism golden hash regenerated.
+
 ## 0.6.0 - 2026-07-20
 
 ### Added

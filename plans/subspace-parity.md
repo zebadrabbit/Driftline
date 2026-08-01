@@ -61,9 +61,19 @@ is a direct id→atlas mapping, no remapping table needed.
 
 - **Sounds**: wire remaining originals — flag.wav, goal.wav, wormhole/warp,
   bong chat sounds, ship engine loops (wbroll/jvroll/…), prize/bong on green.
-- **Ruleset audit**: reconcile classic/*.json against original server.cfg
-  values with original units (speed = px/10s? verify in main.c; times in
-  centiseconds; energy raw).
+- **Ruleset audit**: ✅ DONE — `rulesets/classic/*.json` is a byte-for-byte value
+  match to the original `server.cfg` for all 8 ships, 84/84 keys each.
+  What remains is *wiring*, not data. These keys are parsed but never read by
+  the sim, and each is a concrete parity gap:
+  - `RocketTime` — `_use_rocket()` hardcodes a 5 s boost; cfg says 1000 cs = 10 s.
+  - `ShrapnelRate` / `ShrapnelMax` — each Shrapnel prize adds a flat +1 capped at
+    16, ignoring the per-ship rate and max.
+  - `SoccerBallSpeed` / `SoccerBallFriction` / `SoccerBallProximity` /
+    `SoccerThrowTime` — powerball uses hardcoded constants.
+  - `GravityTopSpeed` — wormhole gravity has no speed cap.
+  - `SeeBombLevel`, `PrizeShareLimit`.
+  - `AttachBounty`, `TurretLimit`, `TurretSpeedPenalty`, `TurretThrustPenalty` —
+    deferred with turrets, see Phase 5.
 - **Energy viewing**: `SeeEnergy` — show teammate energy bars (Terrier/spec).
 - **Radar**: `FlaggerOnRadar` red flaggers, X-radar cloak reveal rules.
 - **Kill messages**: original green-text style + bong.
@@ -76,7 +86,18 @@ is a direct id→atlas mapping, no remapping table needed.
 - Persistent scores between sessions; squads/banners.
 - Jackpot game (`JackpotBountyPercent`).
 
+## Known bug, not yet scheduled
+
+The powerball is live in every world with no game-mode gate: `DriftWorld` always
+has a ball, `set_map_dimensions()` puts it at map center, and any ship touching
+it picks it up — after which fire = kick, so your guns stop working. On a WAR map
+like `castle` that is an invisible gun-disabling trap at map center. Gate the
+ball on the map actually being a soccer map (goal entities present, or an
+explicit mode) before doing more flag/mode work.
+
 ## Commit discipline
 
-One commit per completed slice, tests green (modulo the 8 known pre-existing
-Godot 4.6.1 failures documented in memory).
+One commit per completed slice, tests green — the suite is green as of
+2026-08-01 (87 smoke + 76 contract). It had been red since the June graphics
+merge; those 8 failures were regressions from that merge, not Godot version
+drift (CI's 4.5.1 and local 4.6.1 failed identically), and are now fixed.
