@@ -1,0 +1,188 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://tools/tilemap_editor/TilemapEditor.gd" id="1"]
+[ext_resource type="Script" path="res://tools/tilemap_editor/TilemapView.gd" id="2"]
+[ext_resource type="Script" path="res://tools/tilemap_editor/TileInspector.gd" id="3"]
+
+[node name="TilemapEditor" type="Control"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Root" type="VBoxContainer" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="TopBar" type="HBoxContainer" parent="Root"]
+size_flags_horizontal = 3
+
+[node name="ImportButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "New / Import PNG"
+
+[node name="OpenButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "Open Tileset"
+
+[node name="SaveButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "Save"
+
+[node name="SaveAsButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "Save As"
+
+[node name="VSep1" type="VSeparator" parent="Root/TopBar"]
+
+[node name="TileSizeOption" type="OptionButton" parent="Root/TopBar"]
+unique_name_in_owner = true
+
+[node name="VSep2" type="VSeparator" parent="Root/TopBar"]
+
+[node name="ZoomOutButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "-"
+
+[node name="ZoomInButton" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "+"
+
+[node name="Zoom100Button" type="Button" parent="Root/TopBar"]
+unique_name_in_owner = true
+text = "100%"
+
+[node name="ZoomSlider" type="HSlider" parent="Root/TopBar"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+custom_minimum_size = Vector2(160, 0)
+
+[node name="VSep3" type="VSeparator" parent="Root/TopBar"]
+
+[node name="StatusLabel" type="Label" parent="Root/TopBar"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+text = ""
+autowrap_mode = 2
+
+[node name="Main" type="HSplitContainer" parent="Root"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Left" type="VBoxContainer" parent="Root/Main"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Scroll" type="ScrollContainer" parent="Root/Main/Left"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="TilemapView" type="Control" parent="Root/Main/Left/Scroll"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+size_flags_vertical = 3
+script = ExtResource("2")
+
+[node name="Right" type="PanelContainer" parent="Root/Main"]
+custom_minimum_size = Vector2(360, 0)
+size_flags_vertical = 3
+
+[node name="TileInspector" type="VBoxContainer" parent="Root/Main/Right"]
+unique_name_in_owner = true
+script = ExtResource("3")
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="Preview" type="TextureRect" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(128, 128)
+stretch_mode = 5
+
+[node name="ReservedLabel" type="Label" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+visible = false
+
+[node name="AtlasLabel" type="Label" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+text = "atlas: -"
+
+[node name="KeyLabel" type="Label" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+text = "key: -"
+
+[node name="RectLabel" type="Label" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+text = "rect: -"
+
+[node name="EffectiveLabel" type="Label" parent="Root/Main/Right/TileInspector"]
+unique_name_in_owner = true
+text = "effective: -"
+autowrap_mode = 2
+
+[node name="Form" type="GridContainer" parent="Root/Main/Right/TileInspector"]
+columns = 2
+
+[node name="LayerLabel" type="Label" parent="Root/Main/Right/TileInspector/Form"]
+text = "layer"
+
+[node name="LayerOption" type="OptionButton" parent="Root/Main/Right/TileInspector/Form"]
+unique_name_in_owner = true
+
+[node name="SolidLabel" type="Label" parent="Root/Main/Right/TileInspector/Form"]
+text = "solid"
+
+[node name="SolidCheck" type="CheckBox" parent="Root/Main/Right/TileInspector/Form"]
+unique_name_in_owner = true
+text = ""
+
+[node name="NameLabel" type="Label" parent="Root/Main/Right/TileInspector/Form"]
+text = "name"
+
+[node name="NameEdit" type="LineEdit" parent="Root/Main/Right/TileInspector/Form"]
+unique_name_in_owner = true
+placeholder_text = "(optional)"
+
+[node name="TagsLabel" type="Label" parent="Root/Main/Right/TileInspector/Form"]
+text = "tags"
+
+[node name="TagsEdit" type="LineEdit" parent="Root/Main/Right/TileInspector/Form"]
+unique_name_in_owner = true
+placeholder_text = "(optional, comma separated)"
+
+[node name="Buttons" type="HBoxContainer" parent="Root/Main/Right/TileInspector"]
+
+[node name="ApplyButton" type="Button" parent="Root/Main/Right/TileInspector/Buttons"]
+unique_name_in_owner = true
+text = "Apply"
+
+[node name="RevertButton" type="Button" parent="Root/Main/Right/TileInspector/Buttons"]
+unique_name_in_owner = true
+text = "Revert"
+
+[node name="CopyButton" type="Button" parent="Root/Main/Right/TileInspector/Buttons"]
+unique_name_in_owner = true
+text = "Copy metadata"
+
+[node name="PasteButton" type="Button" parent="Root/Main/Right/TileInspector/Buttons"]
+unique_name_in_owner = true
+text = "Paste metadata"
+
+[node name="ImportPngDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+file_mode = 0
+access = 2
+filters = PackedStringArray("*.png ; PNG")
+
+[node name="OpenTilesetDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+file_mode = 2
+access = 2
+
+[node name="SaveAsDirDialog" type="FileDialog" parent="."]
+unique_name_in_owner = true
+file_mode = 2
+access = 2
