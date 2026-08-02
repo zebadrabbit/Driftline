@@ -59,7 +59,10 @@ var perception_range_mult: float = 2.2
 const LOW_ENERGY_FRAC: float = 0.18
 const REENGAGE_ENERGY_FRAC: float = 0.35
 
-const DEBUG_BOT: bool = false
+# --debug_bot=1 prints a periodic status line per bot. Useful for answering
+# "are the bots actually doing anything" without attaching a client.
+var debug_bot: bool = false
+var _debug_bot_accum: float = 0.0
 
 
 enum BotState {
@@ -74,7 +77,7 @@ enum BotState {
 
 class BotBrain:
 	var state: int = BotState.SPAWN_RECOVER
-	var state_ticks_left: int = 0
+	var state_ticks_left: int = 24  # SPAWN_SETTLE_TICKS
 	var target_id: int = -1
 	var target_lock_ticks_left: int = 0
 	var reaction_ticks_left: int = 0
@@ -122,10 +125,14 @@ class BotBrain:
 	var bomb_cooldown_ticks: int = 0
 	# Mine lay cooldown.
 	var mine_cooldown_ticks: int = 0
+	var decoy_cooldown_ticks: int = 0
+
+	# Short settle after spawning before the bot starts roaming.
+	const SPAWN_SETTLE_TICKS: int = 24  # 0.4 s at 60 Hz
 
 	func _reset_for_spawn() -> void:
 		state = BotState.SPAWN_RECOVER
-		state_ticks_left = 0
+		state_ticks_left = SPAWN_SETTLE_TICKS
 		target_id = -1
 		target_lock_ticks_left = 0
 		reaction_ticks_left = 0
@@ -612,6 +619,8 @@ func _parse_user_args() -> void:
 			SERVER_PORT = maxi(1, int(value))
 		elif key == "username":
 			bot_username = value
+		elif key == "debug_bot":
+			debug_bot = value != "0"
 		elif key == "freq":
 			bot_freq = clampi(int(value), 0, 8)
 		elif key == "ship_type":
@@ -723,14 +732,17 @@ func _step_one_tick() -> void:
 
 	# State transitions.
 	if brain.state == BotState.SPAWN_RECOVER and world.tick > 0:
-		if brain.state_ticks_left <= 0:
-			brain.state_ticks_left = int(round(rng.randf_range(0.25, 0.55) / DriftConstants.TICK_DT))
+		# Count the spawn settle timer down, then get moving.
+		#
+		# This used to re-arm the timer inside the same block whenever it reached zero,
+		# so the transition to ROAM was unreachable and every bot spent its entire life
+		# in SPAWN_RECOVER: drifting forward at 35% thrust, never roaming, never
+		# engaging, never using an item. Six bots scored zero kills in a 60 s match.
 		if brain.state_ticks_left > 0:
 			brain.state_ticks_left -= 1
-			# gentle orienting
-			pass
 		else:
 			brain.state = BotState.ROAM
+			brain.state_ticks_left = int(round(rng.randf_range(0.8, 1.8) / DriftConstants.TICK_DT))
 	elif low_energy and brain.state != BotState.RESET:
 		brain.state = BotState.RESET
 		brain.state_ticks_left = int(round(rng.randf_range(0.8, 1.4) / DriftConstants.TICK_DT))
@@ -874,7 +886,7 @@ func _step_one_tick() -> void:
 					# Brake-fire should also stop intentional thrust/turn in the same tick.
 					brain.thrust_cmd_smoothed = 0.0
 					brain.turn_cmd_smoothed = 0.0
-					if DEBUG_BOT and (brain.debug_brake_fire_count % 10) == 0:
+					if debug_bot and (brain.debug_brake_fire_count % 10) == 0:
 						print("[BOT] brake-fire count=", brain.debug_brake_fire_count)
 				else:
 					# Otherwise: do NOT fire (stay safe-zone compliant). Stop thrusting and let
@@ -965,10 +977,44 @@ func _step_one_tick() -> void:
 				use_mine = true
 				brain.mine_cooldown_ticks = int(round(lerpf(20.0, 8.0, skill) / DriftConstants.TICK_DT))
 
-	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(brain.thrust_cmd_smoothed, brain.turn_cmd_smoothed, fire_primary, fire_secondary, false,
-		false, false, false, false, use_mine, use_repel, use_burst_item, false, use_thor, use_rocket, false, false, use_portal)
+	# Afterburner: burn energy to close distance or break off, but never when already
+	# low. Bots previously hardcoded `modifier` to false and so never used it at all.
+	var ab_energy_frac: float = float(s.energy_current) / maxf(1.0, float(s.energy_max))
+	var use_afterburner: bool = (
+		brain.thrust_cmd_smoothed > 0.5
+		and ab_energy_frac > 0.45
+		and (brain.state == BotState.ENGAGE or brain.state == BotState.EVADE or brain.state == BotState.REPOSITION)
+	)
+	# Decoy on the way out of a fight -- the Spider spawns with one and bots never
+	# spent it. Cheap to fire and it is what the item is for.
+	var use_decoy: bool = brain.state == BotState.EVADE and int(s.decoy_count) > 0 and brain.decoy_cooldown_ticks <= 0
+	if use_decoy:
+		brain.decoy_cooldown_ticks = int(round(3.0 / DriftConstants.TICK_DT))
+	elif brain.decoy_cooldown_ticks > 0:
+		brain.decoy_cooldown_ticks -= 1
+
+	var cmd: DriftTypes.DriftInputCmd = DriftTypes.DriftInputCmd.new(brain.thrust_cmd_smoothed, brain.turn_cmd_smoothed, fire_primary, fire_secondary, use_afterburner,
+		false, false, false, false, use_mine, use_repel, use_burst_item, false, use_thor, use_rocket, use_decoy, false, use_portal)
 	var next_tick: int = world.tick + 1
 
+	if debug_bot:
+		_debug_bot_accum += DriftConstants.TICK_DT
+		if _debug_bot_accum >= 2.0:
+			_debug_bot_accum = 0.0
+			var near_d: float = -1.0
+			var dbg_team: int = int(s.freq)
+			for oid in world.ships.keys():
+				if int(oid) == int(local_ship_id):
+					continue
+				var oo = world.ships.get(oid)
+				if oo == null or (dbg_team != 0 and int(oo.freq) == dbg_team):
+					continue
+				var dd: float = oo.position.distance_to(s.position)
+				if near_d < 0.0 or dd < near_d:
+					near_d = dd
+			print("[BOT %d] state=%d freq=%d pos=(%d,%d) energy=%d/%d target=%d nearest_enemy=%.0f ships_known=%d" % [
+				local_ship_id, brain.state, int(s.freq), int(s.position.x), int(s.position.y),
+				int(s.energy_current), int(s.energy_max), brain.target_id, near_d, world.ships.size()])
 	input_history[next_tick] = cmd
 	_send_input(next_tick, cmd)
 
@@ -1140,6 +1186,30 @@ func _compute_decision(self_ship: DriftTypes.DriftShipState) -> Dictionary:
 				# Head toward ball.
 				ctf_target = _ball_pos
 
+		# No flag/ball objective? Then head for the nearest enemy's general area.
+		# This is navigation only -- aiming and the decision to engage still go through
+		# the perception layer below, so bots keep their imperfect-information feel.
+		# Without it they random-walk an 8192px map with ~750px of vision and never
+		# find each other: six bots produced zero kills in a 60 s match.
+		if ctf_target.x <= -1e8:
+			var nearest_d: float = 1e20
+			var enemy_ids: Array = world.ships.keys()
+			enemy_ids.sort()
+			for eid in enemy_ids:
+				if int(eid) == int(local_ship_id):
+					continue
+				var eo: DriftTypes.DriftShipState = world.ships.get(eid)
+				if eo == null:
+					continue
+				if int(eo.dead_until_tick) > 0 and world.tick < int(eo.dead_until_tick):
+					continue
+				if my_team != 0 and int(eo.freq) == my_team:
+					continue
+				var ed: float = eo.position.distance_squared_to(self_ship.position)
+				if ed < nearest_d:
+					nearest_d = ed
+					ctf_target = eo.position
+
 		# ROAM: keep speed in a band, gentle turns, avoid walls.
 		var speed2 := self_ship.velocity.length()
 		var want_speed := rng.randf_range(160.0, 360.0)
@@ -1302,7 +1372,7 @@ func _poll_network_packets() -> void:
 					acc = 1
 				bot_seed = acc
 				rng.seed = int(bot_seed)
-				if DEBUG_BOT:
+				if debug_bot:
 					print("[BOT] seed=", bot_seed, " map_path=", map_path)
 
 				# Send identity to server.
@@ -1531,6 +1601,10 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.position = auth_state.position
 	local_state.velocity = auth_state.velocity
 	local_state.rotation = auth_state.rotation
+	# Without these the predicted ship sat on freq 0 forever: the bot treated its own
+	# teammates as enemies and the CTF objective block (which requires freq > 0) never ran.
+	local_state.freq = int(auth_state.freq)
+	local_state.ship_type = int(auth_state.ship_type)
 	# Deterministic energy state (v3 snapshot extras).
 	if "energy_current" in auth_state:
 		local_state.energy_current = int(auth_state.energy_current)

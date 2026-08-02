@@ -37,6 +37,9 @@ var ruleset: Dictionary = {}
 
 # Effective tuning values used by the deterministic sim.
 var wall_restitution: float = DriftConstants.SHIP_WALL_RESTITUTION
+# Speed lost along the wall per contact tick. The original applies none -- you keep
+# sliding -- so this defaults off. Note it is applied per axis per tick, so even
+# small values bleed speed fast while you stay in contact.
 var tangent_damping: float = 0.0
 var ship_turn_rate: float = DriftConstants.SHIP_TURN_RATE
 var ship_thrust_accel: float = DriftConstants.SHIP_THRUST_ACCEL
@@ -44,7 +47,11 @@ var ship_reverse_accel: float = DriftConstants.SHIP_REVERSE_ACCEL
 var ship_max_speed: float = DriftConstants.SHIP_MAX_SPEED
 var ship_base_drag: float = DriftConstants.SHIP_BASE_DRAG
 var ship_overspeed_drag: float = DriftConstants.SHIP_OVERSPEED_DRAG
-var ship_bounce_min_normal_speed: float = 160.0
+# Below this inward normal speed a contact is treated as resting, not a bounce.
+# Keep it small: it is a jitter guard for a ship settled against geometry, not a
+# gameplay threshold. At 160 it swallowed most real impacts and dead-stopped the
+# ship instead of bouncing, which is what made walls feel sticky.
+var ship_bounce_min_normal_speed: float = 5.0
 
 # High-speed handling tuning.
 # Rationale: ships should feel fast, but sustained near-max speed should be a tactical
@@ -2113,8 +2120,13 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		_use_repel(ship_state)
 	if (pressed_item_bits & 2) != 0 and int(ship_state.burst_count) > 0:
 		_use_burst(ship_state)
-	if (pressed_item_bits & 4) != 0 and int(ship_state.warp_count) > 0:
-		_use_warp(ship_state)
+	if (pressed_item_bits & 4) != 0:
+		# Insert: spend a Warp charge if you have one, otherwise fall back to the
+		# full-energy jump home (no-op when a portal beacon is already down).
+		if int(ship_state.warp_count) > 0:
+			_use_warp(ship_state)
+		else:
+			_use_spawn_warp(ship_state)
 	if (pressed_item_bits & 8) != 0 and int(ship_state.thor_count) > 0:
 		_use_thor(ship_state)
 	if (pressed_item_bits & 16) != 0 and int(ship_state.rocket_count) > 0:
@@ -3508,7 +3520,21 @@ func _use_warp(ship_state: DriftTypes.DriftShipState) -> void:
 	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
 	if not bool(gate.get("ok", true)):
 		return
-	# Antiwarp check: if any alive enemy with antiwarp_on is within range, block warp.
+	if _is_antiwarped(ship_state):
+		return
+	ship_state.warp_count = int(ship_state.warp_count) - 1
+	var depart_pos: Vector2 = ship_state.position
+	# Teleport to random non-safe spawn point.
+	var dest: Vector2 = get_random_valid_spawn_point()
+	ship_state.position = dest
+	ship_state.velocity = Vector2.ZERO
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+
+
+func _is_antiwarped(ship_state: DriftTypes.DriftShipState) -> bool:
+	## True when an alive enemy has antiwarp on within range. Shared by every teleport
+	## that is supposed to respect it (the portal return deliberately does not).
 	var antiwarp_radius: float = float(ability_antiwarp_radius_px) if int(ability_antiwarp_radius_px) > 0 else 512.0
 	var center: Vector2 = ship_state.position
 	var my_freq: int = int(ship_state.freq)
@@ -3526,15 +3552,34 @@ func _use_warp(ship_state: DriftTypes.DriftShipState) -> void:
 		if not is_enemy:
 			continue
 		if center.distance_to(other.position) <= antiwarp_radius:
-			return  # Blocked by antiwarp
-	ship_state.warp_count = int(ship_state.warp_count) - 1
+			return true
+	return false
+
+
+func _use_spawn_warp(ship_state: DriftTypes.DriftShipState) -> bool:
+	## Insert with no Warp charge and no portal beacon down: jump back to a spawn point.
+	## controls.txt: "INSERT = Activate Portal or random warp ONLY if you have maximum
+	## energy." So this costs a full energy bar -- you escape, but arrive defenceless.
+	## The original has no cfg key for the cost, so it is a constant here.
+	if int(ship_state.portal_until_tick) > int(tick):
+		return false  # a beacon is down; Shift+Insert owns that
+	if int(ship_state.energy_max) <= 0 or int(ship_state.energy_current) < int(ship_state.energy_max):
+		return false
+	var gate := can_perform_action(ship_state, ActionType.ABILITY, {"tick": tick, "ship_id": int(ship_state.id)})
+	if not bool(gate.get("ok", true)):
+		return false
+	if _is_antiwarped(ship_state):
+		return false
+	var spawn = get_spawn_point()
+	if not (spawn is Vector2):
+		return false
 	var depart_pos: Vector2 = ship_state.position
-	# Teleport to random non-safe spawn point.
-	var dest: Vector2 = get_random_valid_spawn_point()
-	ship_state.position = dest
+	ship_state.position = spawn
 	ship_state.velocity = Vector2.ZERO
+	adjust_energy(int(ship_state.id), -int(ship_state.energy_current), EnergyReason.COST_ABILITY, -1)
 	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": depart_pos.x, "py": depart_pos.y})
-	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": dest.x, "py": dest.y})
+	effect_events.append({"type": &"warp", "ship_id": int(ship_state.id), "px": spawn.x, "py": spawn.y})
+	return true
 
 
 # Portal beacon lifetime: server.cfg [Misc] WarpPointDelay=6000 cs = 60 s.
@@ -3740,19 +3785,22 @@ func _choose_balanced_freq_for_ship(ship_id: int) -> int:
 		if _ship_is_dead(other, tick):
 			continue
 		var f: int = int(other.freq)
-		if f < 0 or f >= maxf:
+		# Player freqs are 1..maxf. Freq 0 is reserved for neutral/unowned things --
+		# turf flags use team 0 -- and flags, goals and _team_scores are all keyed 1..N.
+		# Handing a player freq 0 left them with no flag, no goal and no way to score.
+		if f < 1 or f > maxf:
 			continue
-		counts[f] += 1
+		counts[f - 1] += 1
 
 	# Choose the freq with the fewest active non-dead ships (tie-break lowest freq).
-	var best_freq: int = 0
+	var best_index: int = 0
 	var best_count: int = counts[0]
 	for f2 in range(1, maxf):
 		var c: int = int(counts[f2])
 		if c < best_count:
 			best_count = c
-			best_freq = f2
-	return best_freq
+			best_index = f2
+	return best_index + 1
 
 
 func can_set_ship_freq(ship_id: int, desired_freq: int) -> Dictionary:
@@ -3772,7 +3820,8 @@ func can_set_ship_freq(ship_id: int, desired_freq: int) -> Dictionary:
 		if df != 0:
 			return {"ok": false, "error": "FFA mode only allows freq 0", "reason": 1}
 		return {"ok": true, "reason": 0}
-	if df < 0 or df >= maxf:
+	# Player freqs are 1..maxf; 0 is the neutral/unowned team.
+	if df < 1 or df > maxf:
 		return {"ok": false, "error": "desired_freq out of bounds", "reason": 1}
 	if int(s.freq) == df:
 		return {"ok": true, "reason": 0}
@@ -4386,10 +4435,11 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		# Resolve X-axis
 		var target_x := Vector2(next_pos.x, ship_state.position.y)
 		if is_position_blocked(target_x, DriftConstants.SHIP_RADIUS):
-			# If we're already in a bad state, don't make things worse.
+			# Already overlapping geometry (spawned in it, a brick landed on us, a
+			# repel shoved us in). Hold position on this axis but keep the velocity:
+			# zeroing it used to strand the ship with no way to thrust back out.
 			if is_position_blocked(ship_state.position, DriftConstants.SHIP_RADIUS):
 				ship_state.position = old_position
-				ship_state.velocity.x = 0.0
 			else:
 				var t_lo := 0.0
 				var t_hi := 1.0
@@ -4429,7 +4479,6 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 		if is_position_blocked(target_y, DriftConstants.SHIP_RADIUS):
 			if is_position_blocked(ship_state.position, DriftConstants.SHIP_RADIUS):
 				ship_state.position = old_position
-				ship_state.velocity.y = 0.0
 			else:
 				var t_lo := 0.0
 				var t_hi := 1.0

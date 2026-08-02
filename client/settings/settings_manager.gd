@@ -16,7 +16,7 @@ const SETTINGS_PATH: String = "user://settings.json"
 const SETTINGS_TMP_PATH: String = "user://settings.json.tmp"
 
 const SETTINGS_FORMAT: String = "driftline.client_settings"
-const SETTINGS_SCHEMA_VERSION: int = 1
+const SETTINGS_SCHEMA_VERSION: int = 2
 
 const DEFAULTS: Dictionary = {
 	"format": SETTINGS_FORMAT,
@@ -116,6 +116,25 @@ func load_settings() -> void:
 		)
 		_settings = merged
 		_dirty = false
+		emit_signal("settings_loaded")
+		return
+	# v1 -> v2 migration. v2 exists because the default keymap moved to the original
+	# SubSpace layout (arrows/Ctrl/Tab/Home/End/Del/Ins). A v1 file's controls.bindings
+	# were recorded against the old WASD defaults, and any entry there wins over the new
+	# default forever -- a single stale drift_thrust_forward=W entry silently kept the
+	# arrow keys dead. Drop the bindings, keep everything else the player configured.
+	if schema_version == 1:
+		var migrated: Dictionary = _normalize_loaded_settings(loaded_raw)
+		if migrated.has("controls"):
+			var ctrls: Dictionary = migrated.get("controls", {})
+			if typeof(ctrls) == TYPE_DICTIONARY and not (ctrls.get("bindings", {}) as Dictionary).is_empty():
+				print("[SettingsManager] Migrating settings v1 -> v2: clearing keybinds recorded against the old default layout.")
+			ctrls["bindings"] = {}
+			migrated["controls"] = ctrls
+		migrated["schema_version"] = SETTINGS_SCHEMA_VERSION
+		_settings = _deep_merge_preserve_unknown(merged, migrated)
+		_dirty = true
+		save_settings()
 		emit_signal("settings_loaded")
 		return
 	if schema_version != SETTINGS_SCHEMA_VERSION:

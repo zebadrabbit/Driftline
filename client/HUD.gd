@@ -23,6 +23,12 @@ extends CanvasLayer
 @export var ship_cloak_on: bool = false
 @export var ship_xradar_on: bool = false
 @export var ship_antiwarp_on: bool = false
+# Ownership, from the per-ship *Status keys. The right-edge slots show what you are
+# carrying: an owned-but-idle ability sits in its "off" icon rather than sliding away,
+# so a collapsed slot means "not collected", not "switched off".
+@export var ship_has_stealth: bool = true
+@export var ship_has_xradar: bool = true
+@export var ship_has_antiwarp: bool = true
 
 @export var ship_gun_level: int = 1
 @export var ship_bomb_level: int = 1
@@ -317,7 +323,10 @@ func set_ship_stats(
 	p_bomb_level: int = 1,
 	p_multi_fire_enabled: bool = false,
 	p_bomb_proximity_enabled: bool = false,
-	p_bullet_bounce_bonus: int = 0
+	p_bullet_bounce_bonus: int = 0,
+	p_has_stealth: bool = true,
+	p_has_xradar: bool = true,
+	p_has_antiwarp: bool = true
 ) -> void:
 	ship_speed = p_speed
 	ship_heading_degrees = p_heading_degrees
@@ -340,6 +349,9 @@ func set_ship_stats(
 	ship_multi_fire_enabled = bool(p_multi_fire_enabled)
 	ship_bomb_proximity_enabled = bool(p_bomb_proximity_enabled)
 	ship_bullet_bounce_bonus = clampi(int(p_bullet_bounce_bonus), 0, 16)
+	ship_has_stealth = bool(p_has_stealth)
+	ship_has_xradar = bool(p_has_xradar)
+	ship_has_antiwarp = bool(p_has_antiwarp)
 
 	_update_right_islands()
 
@@ -461,14 +473,8 @@ func _process(delta: float) -> void:
 		var remaining_ticks: int = maxi(0, ship_safe_zone_time_max_ticks - ship_safe_zone_time_used_ticks)
 		var remaining_s: float = float(remaining_ticks) * float(DriftConstants.TICK_DT)
 		stats_suffix += "  SZ:%0.1fs" % remaining_s
-	if shield_seconds > 0.0:
-		stats_suffix += "  SH:%0.1fs" % shield_seconds
-	if portal_seconds > 0.0:
-		stats_suffix += "  PT:%0.1fs" % portal_seconds
-	if super_active:
-		stats_suffix += "  SUPER"
-	if king_seconds > 0.0:
-		stats_suffix += "  KING:%d:%02d" % [int(king_seconds) / 60, int(king_seconds) % 60]
+	# Shields / Super / Portal / King now live in the upper-right status panel, in the
+	# field order Screen Items.pdf specifies. Keeping them here too would double them up.
 
 	# Prefix (always white).
 	if stats_prefix != _last_stats_text:
@@ -889,13 +895,13 @@ func _update_right_stack_visuals() -> void:
 				show = bool(_ui_radar_on)
 				atlas = DriftUiIconAtlas.toggle_icon_coords(&"radar", bool(_ui_radar_on))
 			"stealth":
-				show = bool(ship_stealth_on)
+				show = bool(ship_has_stealth)
 				atlas = DriftUiIconAtlas.toggle_icon_coords(&"stealth", bool(ship_stealth_on))
 			"xradar":
-				show = bool(ship_xradar_on)
+				show = bool(ship_has_xradar)
 				atlas = DriftUiIconAtlas.toggle_icon_coords(&"xradar", bool(ship_xradar_on))
 			"antiwarp":
-				show = bool(ship_antiwarp_on)
+				show = bool(ship_has_antiwarp)
 				atlas = DriftUiIconAtlas.toggle_icon_coords(&"antiwarp", bool(ship_antiwarp_on))
 			_:
 				show = false

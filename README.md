@@ -185,9 +185,30 @@ Screen and session:
 | `F2` | Cycle the player stat box (off, names, points, sorted, by team, W/L, freq stats) |
 | `F11` | Toggle spectator mode |
 | `F12` | Cycle ship type (loses powerups) |
-| `Esc` + `F1`-`F8` | Change ship |
 | `Enter` or `T` | Open chat |
 | `Ctrl`+`M` | Skip music track |
+
+### Esc menu
+
+`Esc` opens the SubSpace-style menu. Options on the left, ship selection on the right,
+any other key resumes.
+
+| Key | Action | | Key | Action |
+| --- | --- | --- | --- | --- |
+| `Q` | Quit to the connect screen | | `1`-`8` | Change ship |
+| `F1` | Help ticker page | | `S` | Spectator mode |
+| `F2` | Stat box mode | | | |
+| `F3` | Name tags (name+bounty / name / off) | | | |
+| `F4` | Radar on/off | | | |
+| `F5` | Messages on/off | | | |
+| `F6` | Help ticker on/off | | | |
+| `F8` | Engine sounds on/off | | | |
+| `C` | Options | | | |
+| `R` | Save bug report | | | |
+| `PgUp`/`PgDn` | Stat box size | | | |
+
+`A` (arena list), `B` (set banner) and `I` (ignore macros) are shown dimmed: they exist
+in the original menu but the features are not implemented yet.
 
 ### Chat commands
 

@@ -70,7 +70,10 @@ const SHIP_TURN_RATE: float = 3.5
 const SHIP_MAX_SPEED: float = 720.0
 const SHIP_BASE_DRAG: float = 0.35
 const SHIP_OVERSPEED_DRAG: float = 2.0
-const SHIP_WALL_RESTITUTION: float = 0.6  # Bounce damping (1.0=perfect bounce, 0.0=no bounce)
+# Fallback when the ruleset omits physics.wall_restitution. Mirrors the original's
+# Misc:BounceFactor, where 16 = no speed loss; the shipped server.cfg uses 22, so
+# 22/16 = 1.375 and walls hand speed back. Values above 1 are intentional.
+const SHIP_WALL_RESTITUTION: float = 1.375
 
 
 ## Door (tile) animation + cycle.

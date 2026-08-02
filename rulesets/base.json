@@ -1,65 +1,65 @@
 {
- "format": "driftline.ruleset",
- "schema_version": 2,
- "physics": {
-  "wall_restitution": 0.85,
-  "tangent_damping": 0.5,
-  "ship_turn_rate": 2.8,
-  "ship_thrust_accel": 200.0,
-  "ship_reverse_accel": 150.0,
-  "ship_max_speed": 280.0,
-  "ship_base_drag": 0.5,
-  "ship_overspeed_drag": 3.0,
-  "ship_bounce_min_normal_speed": 160.0
- },
- "weapons": {
-  "ball_friction": 0.98,
-  "ball_max_speed": 600.0,
-  "ball_kick_speed": 700.0,
-  "ball_knock_impulse": 250.0,
-  "ball_stick_offset": 18.0,
-  "ball_steal_padding": 4.0,
-  "bullet": {
-   "speed": 200.0,
-   "damage": 50,
-   "knock_impulse": 120.0,
-   "lifetime_s": 5.5,
-   "muzzle_offset": 30.0,
-   "bounces": 0,
-   "bounce_restitution": 1.0,
-   "levels": {
-    "1": {},
-    "2": {},
-    "3": {}
-   }
+  "format": "driftline.ruleset",
+  "schema_version": 2,
+  "physics": {
+    "wall_restitution": 1.375,
+    "tangent_damping": 0.0,
+    "ship_turn_rate": 2.8,
+    "ship_thrust_accel": 200.0,
+    "ship_reverse_accel": 150.0,
+    "ship_max_speed": 280.0,
+    "ship_base_drag": 0.5,
+    "ship_overspeed_drag": 3.0,
+    "ship_bounce_min_normal_speed": 5.0
+  },
+  "weapons": {
+    "ball_friction": 0.98,
+    "ball_max_speed": 600.0,
+    "ball_kick_speed": 700.0,
+    "ball_knock_impulse": 250.0,
+    "ball_stick_offset": 18.0,
+    "ball_steal_padding": 4.0,
+    "bullet": {
+      "speed": 200.0,
+      "damage": 50,
+      "knock_impulse": 120.0,
+      "lifetime_s": 5.5,
+      "muzzle_offset": 30.0,
+      "bounces": 0,
+      "bounce_restitution": 1.0,
+      "levels": {
+        "1": {},
+        "2": {},
+        "3": {}
+      }
+    }
+  },
+  "abilities": {
+    "afterburner": {
+      "drain_per_sec": 120,
+      "speed_mult_pct": 100,
+      "thrust_mult_pct": 160
+    },
+    "stealth": {
+      "drain_per_sec": 33
+    },
+    "cloak": {
+      "drain_per_sec": 10
+    },
+    "xradar": {
+      "drain_per_sec": 25
+    },
+    "antiwarp": {
+      "drain_per_sec": 10,
+      "radius_px": 1500
+    }
+  },
+  "energy": {
+    "max": 1200,
+    "recharge_rate_per_sec": 150,
+    "recharge_delay_ms": 300,
+    "bullet_energy_cost": 20,
+    "multifire_energy_cost": 30,
+    "bomb_energy_cost": 300
   }
- },
- "abilities": {
-  "afterburner": {
-   "drain_per_sec": 120,
-   "speed_mult_pct": 100,
-   "thrust_mult_pct": 160
-  },
-  "stealth": {
-   "drain_per_sec": 33
-  },
-  "cloak": {
-   "drain_per_sec": 10
-  },
-  "xradar": {
-   "drain_per_sec": 25
-  },
-  "antiwarp": {
-   "drain_per_sec": 10,
-   "radius_px": 1500
-  }
- },
- "energy": {
-  "max": 1200,
-  "recharge_rate_per_sec": 150,
-  "recharge_delay_ms": 300,
-  "bullet_energy_cost": 20,
-  "multifire_energy_cost": 30,
-  "bomb_energy_cost": 300
- }
 }

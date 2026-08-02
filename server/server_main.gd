@@ -24,7 +24,8 @@ const DriftPrizeConfig = preload("res://server/prize_config.gd")
 const DriftReplayRecorder = preload("res://shared/replay/drift_replay_recorder.gd")
 const DriftShipRegistry = preload("res://shared/drift_ship_registry.gd")
 
-const SERVER_PORT: int = 5000
+# Overridable with --port=N so a test server can run alongside a live one.
+var server_port: int = 5000
 const MAX_CLIENTS: int = 8
 
 var debug_net: bool = false
@@ -139,9 +140,9 @@ func _initialize() -> void:
 
 	# Set up networking.
 	enet_peer = ENetMultiplayerPeer.new()
-	var err: int = enet_peer.create_server(SERVER_PORT, MAX_CLIENTS)
+	var err: int = enet_peer.create_server(server_port, MAX_CLIENTS)
 	if err != OK:
-		push_error("Failed to start ENet server on port %d (err=%d)" % [SERVER_PORT, err])
+		push_error("Failed to start ENet server on port %d (err=%d)" % [server_port, err])
 		# If the port is already in use (e.g., another server instance is running),
 		# SceneTree.quit() still allows one more _process() before exiting.
 		# Ensure we don't poll an inactive ENet peer in that final frame.
@@ -192,7 +193,7 @@ func _initialize() -> void:
 	else:
 		print("[PRIZE] disabled: ", str(prize_res.get("error", "failed to load server.cfg")))
 
-	print("Driftline server listening on port ", SERVER_PORT)
+	print("Driftline server listening on port ", server_port)
 	print("Soft stop: create ", quit_flag_path, " to quit")
 	print("Soft stop path (absolute): ", ProjectSettings.globalize_path(quit_flag_path))
 	if quit_after_seconds > 0.0:
@@ -301,6 +302,8 @@ func _parse_user_args() -> void:
 			replay_record_path = value
 		elif key == "replay_notes":
 			replay_notes = value
+		elif key == "port":
+			server_port = clampi(int(value), 1, 65535)
 		elif key == "debug_net":
 			if truthy.has(v_norm):
 				debug_net = true
@@ -1100,6 +1103,8 @@ func _step_authoritative_tick() -> void:
 			var a_id: int = int(ke.get("attacker_id", -1))
 			var v_id: int = int(ke.get("victim_id", -1))
 			var wt: int = int(ke.get("weapon_type", 0))
+			if debug_sim:
+				print("[SERVER] KILL attacker=", a_id, " victim=", v_id, " weapon=", wt)
 			var a_name: String = ""
 			var v_name: String = ""
 			if world.ships.has(a_id):

@@ -129,6 +129,9 @@ func _initialize() -> void:
 	_test_chat_commands()
 	_test_chat_macros()
 	_test_special_negative_prizes()
+	_test_insert_spawn_warp()
+	_test_default_keybindings_match_original_layout()
+	_test_ship_wall_bounce_feel()
 	_test_music_library_loads()
 	_test_map_editor_undo_and_tools()
 	_test_ship_starting_loadouts()
@@ -1697,7 +1700,7 @@ func _test_set_freq_rejects_when_force_even_violated() -> void:
 	world.add_boundary_tiles(16, 16)
 	world.set_map_dimensions(16, 16)
 
-	# Create an uneven-but-allowed distribution: team 0 has 2 ships, team 1 has 1 ship.
+	# Create an uneven-but-allowed distribution: team 1 has 2 ships, team 2 has 1 ship.
 	world.add_ship(1, Vector2(64, 64))
 	world.add_ship(2, Vector2(96, 64))
 	world.add_ship(3, Vector2(128, 64))
@@ -1707,12 +1710,12 @@ func _test_set_freq_rejects_when_force_even_violated() -> void:
 	if s1 == null or s2 == null or s3 == null:
 		_fail("set_freq_force_even (ship missing)")
 		return
-	s1.freq = 0
-	s2.freq = 1
-	s3.freq = 0
+	s1.freq = 1
+	s2.freq = 2
+	s3.freq = 1
 
-	# Now moving ship 2 from team 1 -> team 0 would produce 3 vs 0 (variance 3), reject.
-	var res: Dictionary = world.can_set_ship_freq(2, 0)
+	# Now moving ship 2 from team 2 -> team 1 would produce 3 vs 0 (variance 3), reject.
+	var res: Dictionary = world.can_set_ship_freq(2, 1)
 	if bool(res.get("ok", false)):
 		_fail("set_freq_force_even (expected rejection)")
 		return
@@ -3389,8 +3392,9 @@ func _test_team_auto_balance_assigns_even_teams() -> void:
 	var f2: int = int(s2.freq)
 	var f3: int = int(s3.freq)
 	var f4: int = int(s4.freq)
-	if f1 != 0 or f2 != 1 or f3 != 0 or f4 != 1:
-		_fail("team_auto_balance (expected freqs 0,1,0,1 got %d,%d,%d,%d)" % [f1, f2, f3, f4])
+	# Player freqs are 1..max_freq; 0 is the neutral team that flags/goals never match.
+	if f1 != 1 or f2 != 2 or f3 != 1 or f4 != 2:
+		_fail("team_auto_balance (expected freqs 1,2,1,2 got %d,%d,%d,%d)" % [f1, f2, f3, f4])
 		return
 
 	_pass("team_auto_balance_assigns_even_teams")
@@ -3817,7 +3821,11 @@ func _test_no_hardcoded_keys_in_gameplay() -> void:
 		"res://server",
 	]
 	var allowlist := {
-		"res://client/client_main.gd": true,  # F1-F8 ship selection (non-rebindable, matches SubSpace)
+		# Fixed, deliberately non-rebindable keys that mirror the original client:
+		# F2 stat box, F11 spectate, F12 ship cycle, Tab spectate-target, Ctrl+M music.
+		"res://client/client_main.gd": true,
+		# The Esc menu's key list is fixed by the original's menu design (Q/F1-F8/1-8/S).
+		"res://client/scenes/EscMenu.gd": true,
 		"res://client/input/actions.gd": true,  # the rebinding table itself: DEFAULT_BINDINGS names keycodes
 	}
 	var needles := [
@@ -5199,6 +5207,184 @@ func _test_special_negative_prizes() -> void:
 		_fail("negative_prizes (Full Charge should refill, got %d/%d)" % [int(s1.energy_current), int(s1.energy_max)])
 		return
 	_pass("special_negative_prizes")
+
+
+func _test_insert_spawn_warp() -> void:
+	## Insert with no Warp charge and no portal beacon jumps you back to a spawn point,
+	## but only at full energy, and it costs the whole bar.
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(900.0, 900.0))
+	var s1 = world.ships.get(1)
+	s1.warp_count = 0
+	s1.energy_max = 1000
+	s1.energy_current = 1000
+
+	# Not at full energy: refused.
+	s1.energy_current = 700
+	var away: Vector2 = s1.position
+	if world._use_spawn_warp(s1):
+		_fail("spawn_warp (should refuse below full energy)")
+		return
+	if s1.position != away:
+		_fail("spawn_warp (moved the ship despite refusing)")
+		return
+
+	# Full energy: warps and drains.
+	s1.energy_current = 1000
+	if not world._use_spawn_warp(s1):
+		_fail("spawn_warp (should warp at full energy)")
+		return
+	if s1.position == away:
+		_fail("spawn_warp (did not move the ship)")
+		return
+	if int(s1.energy_current) != 0:
+		_fail("spawn_warp (should cost the full bar, left %d)" % int(s1.energy_current))
+		return
+
+	# A live portal beacon means Shift+Insert owns the key; Insert must not jump home.
+	s1.energy_current = 1000
+	s1.portal_until_tick = world.tick + 600
+	var here: Vector2 = s1.position
+	if world._use_spawn_warp(s1):
+		_fail("spawn_warp (should defer to an active portal beacon)")
+		return
+	if s1.position != here:
+		_fail("spawn_warp (moved while a beacon was down)")
+		return
+	_pass("insert_spawn_warp")
+
+
+func _test_default_keybindings_match_original_layout() -> void:
+	## Pins the shipped defaults to the SubSpace 1.34 layout documented in the README
+	## and original_content/controls.txt. Every entry is (action, physical key, shift).
+	_ran += 1
+	var Actions = load("res://client/input/actions.gd")
+	var expected: Array = [
+		["drift_thrust_forward", KEY_UP, false],
+		["drift_thrust_reverse", KEY_DOWN, false],
+		["drift_rotate_left", KEY_LEFT, false],
+		["drift_rotate_right", KEY_RIGHT, false],
+		["drift_fire_primary", KEY_CTRL, false],
+		["drift_item_repel", KEY_CTRL, true],
+		["drift_fire_secondary", KEY_TAB, false],
+		["drift_lay_mine", KEY_TAB, true],
+		["drift_ability_stealth", KEY_HOME, false],
+		["drift_ability_cloak", KEY_HOME, true],
+		["drift_ability_xradar", KEY_END, false],
+		["drift_ability_antiwarp", KEY_END, true],
+		["drift_toggle_multifire", KEY_DELETE, false],
+		["drift_item_burst", KEY_DELETE, true],
+		["drift_item_warp", KEY_INSERT, false],
+		["drift_item_portal", KEY_INSERT, true],
+		["drift_item_rocket", KEY_F3, false],
+		["drift_item_brick", KEY_F4, false],
+		["drift_item_decoy", KEY_F5, false],
+		["drift_item_thor", KEY_F6, false],
+	]
+	for row in expected:
+		var action: String = String(row[0])
+		var want_key: int = int(row[1])
+		var want_shift: bool = bool(row[2])
+		if not Actions.REBINDABLE_ACTIONS.has(action):
+			_fail("keybindings (%s missing from REBINDABLE_ACTIONS, so it can never be rebound)" % action)
+			return
+		var evs_any: Variant = Actions.DEFAULT_BINDINGS.get(action, [])
+		if typeof(evs_any) != TYPE_ARRAY or (evs_any as Array).is_empty():
+			_fail("keybindings (%s has no default binding)" % action)
+			return
+		var ev: InputEventKey = (evs_any as Array)[0]
+		var got_key: int = int(ev.physical_keycode) if int(ev.physical_keycode) != 0 else int(ev.keycode)
+		if got_key != want_key or bool(ev.shift_pressed) != want_shift:
+			_fail("keybindings (%s bound to key %d shift=%s, expected key %d shift=%s)" % [
+				action, got_key, str(ev.shift_pressed), want_key, str(want_shift)])
+			return
+	# Every rebindable action needs a label, or the Options menu shows a raw id.
+	for a in Actions.REBINDABLE_ACTIONS:
+		if not Actions.ACTION_LABELS.has(a):
+			_fail("keybindings (%s has no ACTION_LABELS entry)" % String(a))
+			return
+	_pass("default_keybindings_match_original_layout")
+
+
+func _bounce_world_with_wall(wall_x: int) -> DriftWorld:
+	## Uses the *shipped* rulesets/base.json rather than the code defaults, so this
+	## pins what a player actually feels, not just the fallback constants.
+	var world := DriftWorld.new()
+	var raw: Variant = JSON.parse_string(FileAccess.get_file_as_string("res://rulesets/base.json"))
+	if typeof(raw) == TYPE_DICTIONARY:
+		var valid: Dictionary = DriftValidate.validate_ruleset(raw)
+		if bool(valid.get("ok", false)):
+			world.apply_ruleset(valid.get("ruleset", raw))
+	world.set_map_dimensions(80, 60)
+	var solids: Array = []
+	for y in range(0, 60):
+		solids.append([wall_x, y, 0, 0])
+	world.set_solid_tiles(solids)
+	return world
+
+
+func _test_ship_wall_bounce_feel() -> void:
+	## Wall contact used to feel sticky for two reasons, both pinned here:
+	## a 160 px/s dead zone that deleted the normal component instead of bouncing
+	## (so anything but a fast head-on hit was a dead stop), and tangential damping
+	## applied per contact tick (so you could not slide along a wall).
+	_ran += 1
+	var wall_x: int = 20
+	var tile: int = int(DriftWorld.TILE_SIZE)
+	var wall_px: float = float(wall_x * tile)
+	var idle: Dictionary = {}
+
+	# --- Glancing hit: mostly parallel, slight push into the wall. The along-wall
+	# component must survive, otherwise the ship glues to the surface.
+	var w1 := _bounce_world_with_wall(wall_x)
+	w1.add_ship(1, Vector2(wall_px - 40.0, 300.0))
+	var s1 = w1.ships[1]
+	s1.velocity = Vector2(60.0, 200.0)  # 200 px/s along the wall, 60 into it
+	var along_before: float = s1.velocity.y
+	for _i in range(40):
+		w1.step_tick(idle, false, 0)
+	# Drag is the only thing that should have eaten the slide; allow for it generously.
+	if s1.velocity.y < along_before * 0.5:
+		_fail("wall_bounce (glancing hit killed the slide: %.1f -> %.1f)" % [along_before, s1.velocity.y])
+		return
+	if absf(s1.velocity.y) < 1.0:
+		_fail("wall_bounce (ship stuck to the wall, along-wall speed %.2f)" % s1.velocity.y)
+		return
+
+	# --- Head-on hit at a speed that used to fall inside the dead zone. It must
+	# actually reverse, not stop.
+	var w2 := _bounce_world_with_wall(wall_x)
+	w2.add_ship(1, Vector2(wall_px - 40.0, 300.0))
+	var s2 = w2.ships[1]
+	s2.velocity = Vector2(100.0, 0.0)  # well under the old 160 threshold
+	var hit: bool = false
+	for _j in range(60):
+		w2.step_tick(idle, false, 0)
+		if s2.velocity.x < 0.0:
+			hit = true
+			break
+	if not hit:
+		_fail("wall_bounce (a 100 px/s head-on hit did not reverse; dead zone is back)")
+		return
+
+	# --- Restitution mirrors the original Misc:BounceFactor (16 = no speed loss),
+	# so a bounce should not bleed speed off the normal.
+	if w2.wall_restitution < 1.0:
+		_fail("wall_bounce (wall_restitution %.3f loses speed; original ships 22/16)" % w2.wall_restitution)
+		return
+
+	# --- A ship overlapping geometry keeps its velocity so it can thrust free.
+	var w3 := _bounce_world_with_wall(wall_x)
+	w3.add_ship(1, Vector2(wall_px + float(tile) * 0.5, 300.0))  # inside the wall
+	var s3 = w3.ships[1]
+	s3.velocity = Vector2(-150.0, 0.0)
+	w3.step_tick(idle, false, 0)
+	if is_equal_approx(s3.velocity.x, 0.0):
+		_fail("wall_bounce (overlapping ship had its velocity zeroed and is stranded)")
+		return
+	_pass("ship_wall_bounce_feel")
 
 
 func _test_music_library_loads() -> void:

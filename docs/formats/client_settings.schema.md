@@ -11,9 +11,17 @@ This file is treated as a strict, versioned JSON contract:
 ## Identity
 
 - `format`: `driftline.client_settings`
-- `schema_version`: `1`
+- `schema_version`: `2`
 
 ## Upgrading from pre-v1
+
+**v1 -> v2 migration.** v2 exists because the default keymap moved to the original
+SubSpace layout. A v1 file's `controls.bindings` were recorded against the old WASD
+defaults, and any entry there wins over the new default permanently -- one stale
+`drift_thrust_forward` entry was enough to keep the arrow keys dead. Loading a v1
+file therefore clears `controls.bindings` and keeps every other setting, then saves
+as v2. This is the one supported in-place migration; other version mismatches still
+fail loudly.
 
 Older builds may have created a `user://settings.json` without `format` / `schema_version`.
 These files are now rejected by the loader.
@@ -27,7 +35,7 @@ To reset locally:
 ```json
 {
 	"format": "driftline.client_settings",
-	"schema_version": 1,
+	"schema_version": 2,
 	"audio": {
 		"master_db": 0.0,
 		"sfx_db": 0.0,

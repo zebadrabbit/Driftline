@@ -26,15 +26,15 @@ Top-level object:
   "format": "driftline.ruleset",
   "schema_version": 2,
   "physics": {
-    "wall_restitution": 0.6,
-    "tangent_damping": 0.5,
+    "wall_restitution": 1.375,
+    "tangent_damping": 0.0,
     "ship_turn_rate": 3.5,
     "ship_thrust_accel": 520.0,
     "ship_reverse_accel": 400.0,
     "ship_max_speed": 720.0,
     "ship_base_drag": 0.35,
     "ship_overspeed_drag": 2.0,
-    "ship_bounce_min_normal_speed": 160.0
+    "ship_bounce_min_normal_speed": 5.0
   },
   "weapons": {
     "ball_friction": 0.98,
@@ -205,19 +205,27 @@ Schema version `2` also introduces **continuous-drain abilities** under `abiliti
 - Type: number
 - Range: `0.0..2.0`
 
-Used for wall bounce response in the shared deterministic simulation. Values:
+Wall bounce response in the shared deterministic simulation. Mirrors the original's
+`Misc:BounceFactor`, where 16 means no speed loss, so `BounceFactor / 16` is the
+equivalent value here. The shipped `server.cfg` uses 22, hence the default of `1.375`.
 
 - `0.0` = no bounce (normal component is fully killed)
 - `1.0` = perfect elastic reflection (normal speed preserved)
-- `> 1.0` = energy gain (allowed for arcade tuning)
+- `> 1.0` = walls hand speed back — the original's behaviour, and intentional.
+  Overspeed drag pulls the ship back toward its max speed afterwards.
 
 #### `physics.tangent_damping` (optional)
 
 - Type: number
 - Range: `0.0..1.0`
 
-Applies tangential velocity damping on wall collisions to create SubSpace-style wall sliding.
-On impact, the tangential component is multiplied by $(1 - tangent_damping)$.
+Speed lost *along* the wall on contact: the tangential component is multiplied by
+$(1 - tangent\_damping)$.
+
+Defaults to `0.0`, matching the original, where a wall hit only affects the normal
+component and you keep sliding. Note this is applied **per axis, per tick of contact**,
+so even modest values bleed speed quickly while the ship stays against a surface —
+`0.5` reduces along-wall speed by roughly two thirds within a few frames of contact.
 
 #### `physics.ship_turn_rate` (optional)
 
@@ -302,7 +310,12 @@ Minimum multiplier applied to reverse acceleration at very high speed. `1.0` dis
 - Type: number
 - Range: `0.0..2000.0`
 
-Minimum normal component speed required to bounce; below this, normal velocity is killed and the ship slides.
+Minimum inward normal speed for a contact to count as a bounce. Below it the normal
+component is killed and the ship slides.
+
+This is a jitter guard for a ship resting against geometry, not a gameplay threshold —
+keep it small (default `5.0`). Setting it near typical ship speeds makes every ordinary
+impact a dead stop instead of a bounce, which reads as walls being "sticky".
 
 ### `weapons` (optional)
 

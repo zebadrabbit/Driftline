@@ -70,6 +70,10 @@ const GOAL_FRAME_PX: int = 16
 const GOAL_FRAME_COUNT: int = 9
 const GOAL_ANIM_FPS: float = 8.0
 const GOAL_DRAW_SCALE: float = 2.0
+const ENGYFONT_TEX: Texture2D = preload("res://client/graphics/ui/engyfont.png")
+const ENGYFONT_GLYPH_W: int = 16
+const ENGYFONT_GLYPH_H: int = 24
+const ENGYFONT_SCALE: float = 2.0
 const KING_TEX: Texture2D = preload("res://client/graphics/entities/king.png")
 # Flashing crown shown while the King of the Hill clock is nearly up.
 const KINGEX_TEX: Texture2D = preload("res://client/graphics/entities/kingex.png")
@@ -310,6 +314,12 @@ var _last_killed_name: String = ""
 
 # Player stat box (client-only). 0 = off, 1..6 are the SubSpace F2 modes.
 var _player_list_mode: int = 0
+var _player_list_rows_max: int = 12
+# Esc-menu view toggles (F3 name tags, F4 radar, F5 messages, F8 engine sounds).
+var _name_tag_mode: int = 0  # 0 = name+bounty, 1 = name only, 2 = off
+var _ui_radar_enabled: bool = true
+var _messages_visible: bool = true
+var _engine_sounds_enabled: bool = true
 const PLAYER_LIST_MODE_COUNT: int = 7
 # Names you privately messaged recently are highlighted in the list for 2 minutes.
 const RECENT_PM_TICKS: int = 120 * 60
@@ -466,6 +476,14 @@ func _apply_local_default_ruleset_if_available() -> void:
 		esc_menu.connect("save_bug_report_requested", Callable(self, "_on_esc_menu_save_bug_report_requested"))
 	if esc_menu != null and esc_menu.has_signal("disconnect_requested"):
 		esc_menu.connect("disconnect_requested", Callable(self, "_on_server_disconnected"))
+	if esc_menu != null and esc_menu.has_signal("ship_change_requested"):
+		esc_menu.connect("ship_change_requested", Callable(self, "_send_ship_change_request"))
+	if esc_menu != null and esc_menu.has_signal("spectate_requested"):
+		esc_menu.connect("spectate_requested", Callable(self, "_on_esc_spectate_requested"))
+	if esc_menu != null and esc_menu.has_signal("toggle_requested"):
+		esc_menu.connect("toggle_requested", Callable(self, "_on_esc_toggle_requested"))
+	if esc_menu != null and esc_menu.has_signal("stat_box_size_requested"):
+		esc_menu.connect("stat_box_size_requested", Callable(self, "_on_esc_stat_box_size_requested"))
 
 	# Camera2D setup
 	cam = get_node_or_null("Camera2D")
@@ -867,7 +885,7 @@ func _update_thruster_audio() -> void:
 	# Only play while in-game and thrusting.
 	var thrust_axis: float = 0.0
 	var boosting: bool = false
-	if not show_connect_ui and (is_connected or allow_offline_mode):
+	if not show_connect_ui and _engine_sounds_enabled and (is_connected or allow_offline_mode):
 		thrust_axis = Input.get_action_strength("drift_thrust_forward") - Input.get_action_strength("drift_thrust_reverse")
 		boosting = Input.is_action_pressed("drift_modifier_ability")
 	var is_thrusting: bool = absf(thrust_axis) > 0.01
@@ -1009,7 +1027,10 @@ func _process(delta: float) -> void:
 					bomb_lvl,
 					mf,
 					prox,
-					bb
+					bb,
+					bool(ss.has_stealth),
+					bool(ss.has_xradar),
+					bool(ss.has_antiwarp)
 				)
 				# Classic status panel extras: flag counts, shield/super timers.
 				if hud.has_method("set_classic_status"):
@@ -1382,16 +1403,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 
 	# Ship selection: F1-F8 to switch ship type (only when ESC menu is open).
-	var _esc_open: bool = _esc_menu_is_open()
-	if is_connected and _esc_open and event is InputEventKey:
-		var kev: InputEventKey = event
-		if kev.pressed and (not kev.echo):
-			var kcode: int = int(kev.physical_keycode) if int(kev.physical_keycode) != 0 else int(kev.keycode)
-			if kcode >= KEY_F1 and kcode <= KEY_F8:
-				var desired_type: int = kcode - KEY_F1
-				_send_ship_change_request(desired_type)
-				get_viewport().set_input_as_handled()
-				return
+	# Ship selection while the Esc menu is open is owned by EscMenu now (keys 1-8,
+	# matching the original). It emits ship_change_requested; nothing to do here.
 
 	if not debug_log_input_events:
 		return
@@ -1499,6 +1512,47 @@ func _on_esc_menu_save_replay_requested() -> void:
 	# Backward compat (in case the scene/script is older).
 	_save_bug_report_manual("manual")
 
+
+
+func _on_esc_spectate_requested() -> void:
+	_send_ship_change_request(255 if not _is_spectating else _last_played_ship_type)
+
+
+func _on_esc_stat_box_size_requested(delta: int) -> void:
+	# PgUp/PgDn in the original resize the stat box; here that is how many rows it shows.
+	_chat_visible_lines = _chat_visible_lines  # unchanged; stat box has its own limit
+	_player_list_rows_max = clampi(_player_list_rows_max + int(delta), 4, 32)
+	queue_redraw()
+
+
+func _on_esc_toggle_requested(what: StringName) -> void:
+	var hud := get_node_or_null("HUD")
+	match what:
+		&"help":
+			if hud != null and hud.has_method("help_ticker_next_page"):
+				hud.call("help_ticker_next_page")
+		&"stat_box":
+			_player_list_mode = (_player_list_mode + 1) % PLAYER_LIST_MODE_COUNT
+		&"name_tags":
+			# Cycle: names+bounty -> names only -> off.
+			_name_tag_mode = (_name_tag_mode + 1) % 3
+		&"radar":
+			if hud != null and hud.has_method("set_minimap_enabled"):
+				_ui_radar_enabled = not _ui_radar_enabled
+				hud.call("set_minimap_enabled", _ui_radar_enabled)
+		&"messages":
+			_messages_visible = not _messages_visible
+		&"help_ticker":
+			if hud != null and hud.has_method("help_ticker_toggle"):
+				hud.call("help_ticker_toggle")
+		&"engine_sounds":
+			_engine_sounds_enabled = not _engine_sounds_enabled
+			if not _engine_sounds_enabled:
+				if _rev_audio != null:
+					_rev_audio.stop()
+				if _thrust_audio != null:
+					_thrust_audio.stop()
+	queue_redraw()
 
 func _on_esc_menu_save_bug_report_requested() -> void:
 	_save_bug_report_manual("manual")
@@ -1717,7 +1771,7 @@ func _draw() -> void:
 			_draw_remote_ship_triangle(interp_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
 			# Draw username and bounty
 			if remote_state != null:
-				var label = "%s (%d)" % [remote_state.username, remote_state.bounty]
+				var label = _name_tag_text(String(remote_state.username), int(remote_state.bounty))
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, interp_pos + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				if king_id == ship_id:
@@ -1744,7 +1798,7 @@ func _draw() -> void:
 			_draw_remote_ship_triangle(remote_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
 			# Draw username and bounty
 			if snap_state != null:
-				var label = "%s (%d)" % [snap_state.username, snap_state.bounty]
+				var label = _name_tag_text(String(snap_state.username), int(snap_state.bounty))
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, remote_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				if king_id == ship_id:
@@ -1778,7 +1832,7 @@ func _draw() -> void:
 	# This element must never be hidden or removed.
 	var local_state = latest_snapshot.ships.get(local_ship_id)
 	if local_state != null:
-		var label = "%s(%d)" % [local_state.username, local_state.bounty]
+		var label = _name_tag_text(String(local_state.username), int(local_state.bounty))
 		SpriteFontLabelScript.draw_text(self, ship_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
 		if king_id == local_ship_id:
 			_draw_crown(ship_state.position + name_offset, label, _crown_seconds_for(local_state))
@@ -1818,6 +1872,9 @@ func _draw() -> void:
 
 	# Player stat box (screen-space, upper-left; F2 cycles the mode).
 	_draw_scoreboard()
+
+	# Status panel (screen-space, upper-right).
+	_draw_status_panel()
 
 
 	# Local ship (predicted)
@@ -1912,7 +1969,93 @@ func _draw_kill_feed() -> void:
 		idx += 1
 
 
+
+func _draw_engy_number(right_x: float, top_y: float, value: int) -> float:
+	## Big blue energy readout using the original engyfont.png (10 glyphs, 16x24).
+	## Right-aligned; returns the height consumed.
+	var txt: String = str(maxi(0, value))
+	var gw: float = float(ENGYFONT_GLYPH_W) * ENGYFONT_SCALE
+	var gh: float = float(ENGYFONT_GLYPH_H) * ENGYFONT_SCALE
+	if ENGYFONT_TEX == null:
+		return 0.0
+	var x: float = right_x - float(txt.length()) * gw
+	for i in range(txt.length()):
+		var digit: int = txt.unicode_at(i) - 48
+		if digit < 0 or digit > 9:
+			continue
+		var src := Rect2(float(digit * ENGYFONT_GLYPH_W), 0.0, float(ENGYFONT_GLYPH_W), float(ENGYFONT_GLYPH_H))
+		draw_texture_rect_region(ENGYFONT_TEX, Rect2(Vector2(x, top_y), Vector2(gw, gh)), src)
+		x += gw
+	return gh
+
+
+func _draw_status_panel() -> void:
+	## Upper-right status panel, field order straight from Screen Items.pdf:
+	## Energy, Frequency, Flags (personal left / team right), Bounty, Shields, Super,
+	## Portal timer, Flag-drop timer, King of the Hill timer. Fields that do not apply
+	## are omitted rather than shown as zero.
+	if latest_snapshot == null or local_ship_id < 0:
+		return
+	var ss = latest_snapshot.ships.get(local_ship_id)
+	if ss == null:
+		return
+	var vp_size: Vector2 = get_viewport_rect().size
+	var cam_offset: Vector2 = _get_camera_offset()
+	var right_x: float = cam_offset.x + vp_size.x - 12.0
+	var y: float = cam_offset.y + 10.0
+
+	y += _draw_engy_number(right_x, y, int(ss.energy_current)) + 4.0
+
+	var rows: Array = []
+	rows.append(["Freq", str(int(ss.freq))])
+	var pers_flags: int = _flags_carried_by(local_ship_id)
+	var team_flags: int = 0
+	for fl in authoritative_flags:
+		if fl != null and int(fl.team) == int(ss.freq):
+			team_flags += 1
+	if pers_flags > 0 or team_flags > 0:
+		rows.append(["Flags", "%d %d" % [pers_flags, team_flags]])
+	rows.append(["Bounty", str(int(ss.bounty))])
+	var now_tick: int = int(latest_snapshot.tick)
+	var shield_s: float = float(maxi(0, int(ss.shields_until_tick) - now_tick)) * DriftConstants.TICK_DT
+	if shield_s > 0.0:
+		if bool(ss.super_shields):
+			rows.append(["Super", "%ds" % int(ceil(shield_s))])
+		else:
+			rows.append(["Shields", "%ds" % int(ceil(shield_s))])
+	if world != null and world.ships.has(local_ship_id):
+		var ls: DriftTypes.DriftShipState = world.ships[local_ship_id]
+		var portal_s: float = float(maxi(0, int(ls.portal_until_tick) - int(world.tick))) * DriftConstants.TICK_DT
+		if portal_s > 0.0:
+			rows.append(["Portal", "%ds" % int(ceil(portal_s))])
+	if bool(ss.crown_on):
+		var king_s: float = float(maxi(0, int(ss.crown_ticks_left))) * DriftConstants.TICK_DT
+		rows.append(["King", "%d:%02d" % [int(king_s) / 60, int(king_s) % 60]])
+
+	var cell: int = SpriteFontLabelScript.SMALL_CELL_W
+	for r in rows:
+		var label: String = String(r[0])
+		var value: String = String(r[1])
+		SpriteFontLabelScript.draw_text(self, Vector2(right_x - float((label.length() + 1 + value.length()) * cell), y),
+			label, SpriteFontLabelScript.FontSize.SMALL, 0, 0)
+		SpriteFontLabelScript.draw_text(self, Vector2(right_x - float(value.length() * cell), y),
+			value, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
+		y += 12.0
+
+
+func _name_tag_text(uname: String, bounty_value: int) -> String:
+	## Esc+F3 cycles the name tag display, as in the original.
+	match _name_tag_mode:
+		1:
+			return uname
+		2:
+			return ""
+		_:
+			return "%s (%d)" % [uname, bounty_value]
+
 func _draw_chat_overlay() -> void:
+	if not _messages_visible and not _chat_input_active:
+		return
 	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
 	# Prune expired entries (keep all if chat input is active).
 	if not _chat_input_active:
@@ -2002,16 +2145,26 @@ func _player_list_rows() -> Array:
 	return rows
 
 
+# Screen Items.pdf: "Yellow pilot names are your teammates, Blue pilot names are pilots
+# you have sent a private message to in the last 2 minutes and the Gray pilot names are
+# enemy pilots." The sprite-font atlas has 8 bands
+# (white, green, light blue, red, orange, purple, dark orange, pink) with no true yellow
+# or grey, so orange stands in for yellow and white for grey.
+const LIST_COLOR_TEAMMATE: int = 4   # orange (nearest to the original's yellow)
+const LIST_COLOR_RECENT_PM: int = 2  # light blue
+const LIST_COLOR_ENEMY: int = 0      # white (nearest to the original's grey)
+const LIST_COLOR_SELF: int = 1       # green, so you can pick yourself out at a glance
+const LIST_COLOR_HEADER: int = 6     # dark orange
+
+
 func _player_list_name_color(row: Dictionary, my_freq: int) -> int:
-	# Screen Items.pdf colours the list by relationship: teammates one colour, anyone you
-	# privately messaged in the last 2 minutes another, enemies a third. Driftline's
-	# sprite-font palette has no yellow/grey, so this reuses the nameplate colours the
-	# rest of the HUD already uses and light blue for the recent-PM case.
 	if int(row["id"]) == local_ship_id:
-		return 2
+		return LIST_COLOR_SELF
 	if int(_recent_pm_tick_by_name.get(String(row["name"]).to_lower(), -RECENT_PM_TICKS)) + RECENT_PM_TICKS > int(latest_snapshot.tick):
-		return 2
-	return DriftTeamColors.get_nameplate_color_index(my_freq, int(row["freq"]))
+		return LIST_COLOR_RECENT_PM
+	if my_freq != 0 and int(row["freq"]) == my_freq:
+		return LIST_COLOR_TEAMMATE
+	return LIST_COLOR_ENEMY
 
 
 func _draw_scoreboard() -> void:
@@ -2022,7 +2175,8 @@ func _draw_scoreboard() -> void:
 		return
 	var cam_offset: Vector2 = _get_camera_offset()
 	var x: float = cam_offset.x + 12.0
-	var y: float = cam_offset.y + 12.0
+	# Below the HUD's name/telemetry line, which is anchored to the same corner.
+	var y: float = cam_offset.y + 56.0
 	var my_freq: int = 0
 	if world != null and world.ships.has(local_ship_id):
 		my_freq = int(world.ships[local_ship_id].freq)
@@ -2039,16 +2193,18 @@ func _draw_scoreboard() -> void:
 			agg["deaths"] = int(agg["deaths"]) + int(row["deaths"])
 			agg["flags"] = int(agg["flags"]) + int(row["flags"])
 			by_freq[f] = agg
-		lines.append(["FREQ   POINTS   W    L   FLAGS", 1])
+		lines.append([" FREQ  W-L  FLAGS	Points", LIST_COLOR_HEADER])
 		var freqs: Array = by_freq.keys()
 		freqs.sort()
 		for f2 in freqs:
 			var a2: Dictionary = by_freq[f2]
-			lines.append(["%-6d %-8d %-4d %-4d %d" % [
-				int(f2), int(a2["points"]), int(a2["kills"]), int(a2["deaths"]), int(a2["flags"]),
-			], 1 if int(f2) == my_freq else 0])
+			lines.append([" %-5d %d-%-3d %-5d	%d" % [
+				int(f2), int(a2["kills"]), int(a2["deaths"]), int(a2["flags"]), int(a2["points"]),
+			], LIST_COLOR_TEAMMATE if int(f2) == my_freq else LIST_COLOR_ENEMY])
 	else:
 		var rows: Array = _player_list_rows()
+		if rows.size() > _player_list_rows_max:
+			rows = rows.slice(0, _player_list_rows_max)
 		var last_freq: int = -99999
 		for row in rows:
 			var c: int = _player_list_name_color(row, my_freq)
@@ -2056,24 +2212,45 @@ func _draw_scoreboard() -> void:
 			if _player_list_mode == 4 and int(row["freq"]) != last_freq:
 				last_freq = int(row["freq"])
 				lines.append(["Freq %d" % last_freq, 4])
+			# The original marks the ticked pilot with a leading caret; we mark you.
+			var mark: String = ">" if int(row["id"]) == local_ship_id else " "
 			match _player_list_mode:
 				1:
-					lines.append([row["name"], c])
+					lines.append([mark + String(row["name"]), c])
 				5:
-					lines.append(["%-14s %-4d %-4d %.2f" % [
-						String(row["name"]).left(14), int(row["kills"]), int(row["deaths"]),
+					lines.append(["%s%-13s	%d-%d %.2f" % [
+						mark, String(row["name"]).left(13), int(row["kills"]), int(row["deaths"]),
 						float(row["kills"]) / maxf(1.0, float(row["deaths"])),
 					], c])
 				_:
-					lines.append(["%-14s %6d" % [String(row["name"]).left(14), int(row["points"])], c])
+					lines.append(["%s%-15s	%d" % [mark, String(row["name"]).left(15), int(row["points"])], c])
 		if _player_list_mode == 5:
-			lines.insert(0, ["NAME               W    L  RATIO", 1])
+			lines.insert(0, [" NAME	W-L RATIO", LIST_COLOR_HEADER])
+		elif _player_list_mode >= 2:
+			lines.insert(0, [" %d PLAYERS	Points" % rows.size(), LIST_COLOR_HEADER])
 
-	var bg_w: float = 300.0
-	draw_rect(Rect2(x - 4.0, y - 4.0, bg_w, float(lines.size()) * 16.0 + 8.0), Color(0, 0, 0, 0.6))
+	# Boxed panel, like the original stat box: dark fill with a light border.
+	var line_h: float = 12.0
+	var pad: float = 5.0
+	var bg_w: float = 250.0
+	var bg_h: float = float(lines.size()) * line_h + pad * 2.0
+	var panel := Rect2(x - pad, y - pad, bg_w, bg_h)
+	draw_rect(panel, Color(0.0, 0.0, 0.0, 0.72), true)
+	draw_rect(panel, Color(0.62, 0.62, 0.70, 0.85), false, 1.0)
 	for entry in lines:
-		SpriteFontLabelScript.draw_text(self, Vector2(x, y), String(entry[0]), SpriteFontLabelScript.FontSize.SMALL, int(entry[1]), 0)
-		y += 16.0
+		var txt: String = String(entry[0])
+		var col: int = int(entry[1])
+		# A right-aligned points column, as in the original, when the row carries one.
+		var tab: int = txt.find("	")
+		if tab >= 0:
+			var left_txt: String = txt.left(tab)
+			var right_txt: String = txt.substr(tab + 1)
+			SpriteFontLabelScript.draw_text(self, Vector2(x, y), left_txt, SpriteFontLabelScript.FontSize.SMALL, col, 0)
+			var rw: int = right_txt.length() * SpriteFontLabelScript.SMALL_CELL_W
+			SpriteFontLabelScript.draw_text(self, Vector2(x + bg_w - pad * 2.0 - float(rw), y), right_txt, SpriteFontLabelScript.FontSize.SMALL, col, 0)
+		else:
+			SpriteFontLabelScript.draw_text(self, Vector2(x, y), txt, SpriteFontLabelScript.FontSize.SMALL, col, 0)
+		y += line_h
 
 
 func _draw_explosions() -> void:
@@ -3811,17 +3988,19 @@ func _poll_network_packets() -> void:
 				var prefix: String = ""
 				var color_idx: int = 0  # white
 				if ctype == DriftNet.CHAT_TYPE_TEAM:
-					prefix = "[TEAM] "
+					prefix = ""
 					color_idx = 1  # green
 				elif ctype == DriftNet.CHAT_TYPE_PRIVATE:
-					prefix = "[PM] "
+					prefix = ""
 					color_idx = 5  # purple
 					# Highlights this player in the F2 list for the next 2 minutes.
 					_recent_pm_tick_by_name[sender.to_lower()] = int(latest_snapshot.tick) if latest_snapshot != null else 0
 				elif ctype == DriftNet.CHAT_TYPE_ARENA:
-					prefix = "[ARENA] "
+					prefix = ""
 					color_idx = 4  # orange
-				var line: String = "%s%s: %s" % [prefix, sender, txt]
+				# Original message format is "Name> text"; the channel is carried by colour
+				# (see the legend in Screen Items.pdf), not by a bracketed tag.
+				var line: String = "%s%s> %s" % [prefix, sender, txt]
 				var expire_tick: int = (int(latest_snapshot.tick) if latest_snapshot != null else 0) + CHAT_DISPLAY_DURATION_TICKS
 				_chat_messages.append({"text": line, "color": color_idx, "expire_tick": expire_tick})
 				if _chat_messages.size() > CHAT_MAX_DISPLAY * 2:
@@ -4499,6 +4678,10 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.in_safe_zone = bool(auth_state.in_safe_zone)
 	local_state.damage_protect_until_tick = int(auth_state.damage_protect_until_tick)
 	local_state.ship_type = int(auth_state.ship_type)
+	# freq is server-assigned; the predicted ship never received it, so anything
+	# reading the local ship's team (nameplate colours, cloak visibility, %freq,
+	# ?team, victory music) saw freq 0.
+	local_state.freq = int(auth_state.freq)
 	local_state.repel_count = int(auth_state.repel_count)
 	local_state.burst_count = int(auth_state.burst_count)
 	local_state.warp_count = int(auth_state.warp_count)
