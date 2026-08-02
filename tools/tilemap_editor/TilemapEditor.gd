@@ -79,6 +79,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("drift_editor_cancel"):
 		get_viewport().set_input_as_handled()
 		get_tree().change_scene_to_file("res://client/Main.tscn")
+	# F10 hands back to the map editor, matching the map editor's F10 the other way.
+	elif event.is_action_pressed("drift_editor_open_tileset_editor"):
+		get_viewport().set_input_as_handled()
+		get_tree().change_scene_to_file("res://client/scenes/editor/MapEditor.tscn")
 
 
 func _set_status(msg: String) -> void:

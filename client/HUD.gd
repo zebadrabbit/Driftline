@@ -389,14 +389,18 @@ var flags_team: int = 0
 var shield_seconds: float = 0.0
 var super_active: bool = false
 var portal_seconds: float = 0.0
+# "King of the Hill Timer: how many seconds you have left to live to be declared
+# 'KING'." (Screen Items.pdf). Zero means no crown / not a KOTH arena.
+var king_seconds: float = 0.0
 
 
-func set_classic_status(personal_flags: int, team_flags: int, shield_s: float, super_on: bool, portal_s: float = 0.0) -> void:
+func set_classic_status(personal_flags: int, team_flags: int, shield_s: float, super_on: bool, portal_s: float = 0.0, king_s: float = 0.0) -> void:
 	flags_personal = maxi(0, int(personal_flags))
 	flags_team = maxi(0, int(team_flags))
 	shield_seconds = maxf(0.0, float(shield_s))
 	super_active = bool(super_on)
 	portal_seconds = maxf(0.0, float(portal_s))
+	king_seconds = maxf(0.0, float(king_s))
 
 
 func set_minimap_dynamic(snapshot, local_ship_id: int, my_freq: int, player_world_pos: Vector2, xradar_active: bool) -> void:
@@ -463,6 +467,8 @@ func _process(delta: float) -> void:
 		stats_suffix += "  PT:%0.1fs" % portal_seconds
 	if super_active:
 		stats_suffix += "  SUPER"
+	if king_seconds > 0.0:
+		stats_suffix += "  KING:%d:%02d" % [int(king_seconds) / 60, int(king_seconds) % 60]
 
 	# Prefix (always white).
 	if stats_prefix != _last_stats_text:

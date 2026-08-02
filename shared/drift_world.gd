@@ -155,6 +155,10 @@ var prize_negative_factor: int = 0
 var death_prize_time_ticks: int = 0
 var multi_prize_count: int = 0
 var engine_shutdown_time_ticks: int = 0
+# "ENGINE SHUTDOWN SEVERE - the worst thing that can happen ... you are held for 40+
+# seconds." (Screen Items.pdf). The original server.cfg has no key for it -- only
+# Prize:EngineShutdownTime for the normal variant -- so it is a constant here.
+const ENGINE_SHUTDOWN_SEVERE_TICKS: int = 40 * DriftConstants.TICK_RATE
 var minimum_virtual: int = 0
 var upgrade_virtual: int = 0
 
@@ -191,6 +195,22 @@ var bricks: Array = [] # Array[{tiles: Array[Vector2i], die_tick: int}]
 # Wormholes (map-defined, static; deterministic gravity + teleport).
 # ponytail: fixed tuning constants; move to ruleset if maps need custom wormholes.
 var wormholes: Array = [] # Array[Vector2] centers in px
+# Powerball only exists on soccer maps (those with goal entities). Off by default so a
+# war/CTF map never has a stray ball at map centre. Set via set_ball_enabled().
+var ball_enabled: bool = false
+
+# King of the Hill. Semantics from SSOS_Help.txt L1556-1572:
+#   ExpireTime           initial crown time given to each player at round start
+#   DeathCount           deaths allowed before the crown is removed
+#   NonCrownAdjustTime   time added for killing an uncrowned player...
+#   NonCrownMinimumBounty ...but only if that player had at least this much bounty
+#   CrownRecoverKills    crown kills an uncrowned player needs to win their crown back
+var king_enabled: bool = false
+var king_expire_ticks: int = 0
+var king_death_count: int = 0
+var king_noncrown_adjust_ticks: int = 0
+var king_noncrown_min_bounty: int = 0
+var king_crown_recover_kills: int = 0
 const WORMHOLE_PULL_RADIUS_PX: float = 480.0
 const WORMHOLE_ACCEL_PX_S2: float = 1400.0
 const WORMHOLE_CORE_RADIUS_PX: float = 20.0
@@ -508,6 +528,9 @@ func compute_world_hash() -> int:
 		parts.append("gun=%d" % int(s.gun_level))
 		parts.append("bomb=%d" % int(s.bomb_level))
 		parts.append("multi=%d" % _qb(s.multi_fire_enabled))
+		parts.append("multicap=%d" % _qb(s.multi_fire_capable))
+		parts.append("owns=%d%d%d%d" % [_qb(s.has_stealth), _qb(s.has_cloak), _qb(s.has_xradar), _qb(s.has_antiwarp)])
+		parts.append("crown=%d,%d,%d,%d" % [_qb(s.crown_on), int(s.crown_ticks_left), int(s.crown_deaths), int(s.crown_kills)])
 		parts.append("bbounce=%d" % int(s.bullet_bounce_bonus))
 		parts.append("shutdown=%d" % int(s.engine_shutdown_until_tick))
 		parts.append("top=%d" % int(s.top_speed_bonus))
@@ -607,6 +630,7 @@ func compute_world_hash() -> int:
 
 	# Ball.
 	parts.append("ball_owner=%d" % int(ball.owner_id))
+	parts.append("ball_on=%d" % _qb(ball_enabled))
 	parts.append("ball_p=%d,%d" % [_q(float(ball.position.x), Q_POS), _q(float(ball.position.y), Q_POS)])
 	parts.append("ball_v=%d,%d" % [_q(float(ball.velocity.x), Q_VEL), _q(float(ball.velocity.y), Q_VEL)])
 
@@ -1212,6 +1236,10 @@ func _explosion_damage_for_profile(max_damage: int, dist: float, radius: float) 
 
 
 func _apply_explosion_effects(owner_id: int, origin: Vector2, radius: float, max_damage: int, knock_impulse: float, is_emp: bool, source_tag: String) -> void:
+	# Every bomb and mine detonation routes through here, so this is the one place an
+	# EMP blast can be announced to clients for its distinct burst visual and sound.
+	if is_emp:
+		effect_events.append({"type": &"emp", "ship_id": int(owner_id), "px": origin.x, "py": origin.y})
 	var ship_ids: Array = ships.keys()
 	ship_ids.sort()
 	var r2: float = radius * radius
@@ -1493,6 +1521,152 @@ func _step_mines(ship_ids_sorted: Array) -> void:
 
 	for mid2 in to_erase:
 		mines.erase(int(mid2))
+
+
+func _ship_spec_item_max(ship_state: DriftTypes.DriftShipState, key: String, fallback: int) -> int:
+	## Per-ship item capacity (RepelMax, BurstMax, DecoyMax, ThorMax, BrickMax,
+	## RocketMax, PortalMax). All eight ships ship with 3 in the original server.cfg.
+	var wpn: Variant = _get_ship_spec_for(ship_state).get("weapons")
+	if typeof(wpn) != TYPE_DICTIONARY:
+		return fallback
+	return maxi(0, int((wpn as Dictionary).get(key, fallback)))
+
+
+func _ship_ability_status(ship_state: DriftTypes.DriftShipState, key: String) -> int:
+	## Per-ship *Status: 0 = never, 1 = receivable via prize, 2 = start with it.
+	## (SSOS_Help.txt L2242-2257.)
+	## With no classic ship spec loaded (ruleset-only worlds, tests) there is no notion of
+	## prize-gated abilities, so default to 2 and leave that behaviour untouched.
+	var ab: Variant = _get_ship_spec_for(ship_state).get("abilities")
+	if typeof(ab) != TYPE_DICTIONARY:
+		return 2
+	return clampi(int((ab as Dictionary).get(key, 2)), 0, 2)
+
+
+func _reset_ship_abilities(ship_state: DriftTypes.DriftShipState) -> void:
+	## Spawn/ship-change loadout: only Status=2 abilities are owned from the start.
+	## Status=1 abilities have to be picked up as prizes first.
+	ship_state.has_stealth = _ship_ability_status(ship_state, "StealthStatus") >= 2
+	ship_state.has_cloak = _ship_ability_status(ship_state, "CloakStatus") >= 2
+	ship_state.has_xradar = _ship_ability_status(ship_state, "XRadarStatus") >= 2
+	ship_state.has_antiwarp = _ship_ability_status(ship_state, "AntiWarpStatus") >= 2
+	ship_state.stealth_on = false
+	ship_state.cloak_on = false
+	ship_state.xradar_on = false
+	ship_state.antiwarp_on = false
+
+
+func _grant_ship_ability(ship_state: DriftTypes.DriftShipState, key: String, is_negative: bool) -> void:
+	## Ability prize. A negative roll takes the ability away again unless the ship is
+	## configured to start with it (Status=2), which it can never lose.
+	var status: int = _ship_ability_status(ship_state, key)
+	if status <= 0:
+		return
+	var owned: bool = (not is_negative) or status >= 2
+	match key:
+		"StealthStatus":
+			ship_state.has_stealth = owned
+			ship_state.stealth_on = owned and not is_negative
+		"CloakStatus":
+			ship_state.has_cloak = owned
+			ship_state.cloak_on = owned and not is_negative
+		"XRadarStatus":
+			ship_state.has_xradar = owned
+			ship_state.xradar_on = owned and not is_negative
+		"AntiWarpStatus":
+			ship_state.has_antiwarp = owned
+			ship_state.antiwarp_on = owned and not is_negative
+
+
+func configure_king(cfg: Dictionary) -> void:
+	## Applies the [King] block. Called by the server; replicated to clients through the
+	## config hash so prediction of the crown countdown matches.
+	king_enabled = bool(cfg.get("enabled", false))
+	king_expire_ticks = maxi(0, int(cfg.get("expire_ticks", 0)))
+	king_death_count = maxi(0, int(cfg.get("death_count", 0)))
+	king_noncrown_adjust_ticks = maxi(0, int(cfg.get("noncrown_adjust_ticks", 0)))
+	king_noncrown_min_bounty = maxi(0, int(cfg.get("noncrown_min_bounty", 0)))
+	king_crown_recover_kills = maxi(0, int(cfg.get("crown_recover_kills", 0)))
+
+
+func start_king_round() -> void:
+	## Round start: every living player is crowned with a full ExpireTime clock.
+	if not king_enabled:
+		return
+	var ids: Array = ships.keys()
+	ids.sort()
+	for sid in ids:
+		var s: DriftTypes.DriftShipState = ships.get(sid)
+		if s == null:
+			continue
+		s.crown_on = true
+		s.crown_ticks_left = int(king_expire_ticks)
+		s.crown_deaths = 0
+		s.crown_kills = 0
+
+
+func king_crown_holders() -> Array:
+	var out: Array = []
+	var ids: Array = ships.keys()
+	ids.sort()
+	for sid in ids:
+		var s: DriftTypes.DriftShipState = ships.get(sid)
+		if s != null and bool(s.crown_on):
+			out.append(int(sid))
+	return out
+
+
+func _step_king(now_tick: int, ship_ids_sorted: Array) -> void:
+	## Crown clocks tick down only while alive; a crown expires at zero.
+	if not king_enabled:
+		return
+	for sid in ship_ids_sorted:
+		var s: DriftTypes.DriftShipState = ships.get(sid)
+		if s == null or not bool(s.crown_on):
+			continue
+		if _ship_is_dead(s, now_tick):
+			continue
+		s.crown_ticks_left = int(s.crown_ticks_left) - 1
+		if int(s.crown_ticks_left) <= 0:
+			s.crown_ticks_left = 0
+			s.crown_on = false
+
+
+func _king_on_kill(attacker: DriftTypes.DriftShipState, victim: DriftTypes.DriftShipState, victim_bounty_before: int) -> void:
+	## Crown bookkeeping for one kill. Called from the single death path in apply_damage.
+	if not king_enabled:
+		return
+	# Capture this before stripping the crown below -- the attacker's reward depends on
+	# whether the victim was crowned at the moment of the kill, not after.
+	var victim_had_crown: bool = bool(victim.crown_on)
+	if victim_had_crown:
+		victim.crown_deaths = int(victim.crown_deaths) + 1
+		if int(victim.crown_deaths) > int(king_death_count):
+			victim.crown_on = false
+			victim.crown_ticks_left = 0
+	if attacker == null or int(attacker.id) == int(victim.id):
+		return
+	if bool(attacker.crown_on):
+		# Killing an uncrowned player buys crown time, but only if they were worth it.
+		if not victim_had_crown and victim_bounty_before >= int(king_noncrown_min_bounty):
+			attacker.crown_ticks_left = int(attacker.crown_ticks_left) + int(king_noncrown_adjust_ticks)
+	elif victim_had_crown:
+		# Uncrowned player taking down crowns earns their own back.
+		attacker.crown_kills = int(attacker.crown_kills) + 1
+		if int(king_crown_recover_kills) > 0 and int(attacker.crown_kills) >= int(king_crown_recover_kills):
+			attacker.crown_on = true
+			attacker.crown_ticks_left = int(king_expire_ticks)
+			attacker.crown_kills = 0
+			attacker.crown_deaths = 0
+
+
+func set_ball_enabled(enabled: bool) -> void:
+	## Powerball is a map property: a map with goal entities is a soccer map.
+	## Both server and client derive this from the same map file, so no replication.
+	ball_enabled = bool(enabled)
+	if not ball_enabled:
+		ball.owner_id = -1
+		ball.velocity = Vector2.ZERO
 
 
 func set_wormholes(centers: Array) -> void:
@@ -1878,28 +2052,40 @@ func _step_ship_energy(ship_state: DriftTypes.DriftShipState, input_cmd: DriftTy
 		cur_bits |= 4
 	if bool(input_cmd.antiwarp_btn):
 		cur_bits |= 8
+	if bool(input_cmd.multifire_btn):
+		cur_bits |= 16
 	var pressed_bits: int = cur_bits & (~prev_bits)
 	_prev_ability_buttons_by_ship[int(ship_state.id)] = cur_bits
-	if (pressed_bits & 1) != 0:
+	# You can only switch on an ability you own. Status=2 ships own it from spawn;
+	# Status=1 ships have to pick the prize up first.
+	if (pressed_bits & 1) != 0 and bool(ship_state.has_stealth):
 		ship_state.stealth_on = not bool(ship_state.stealth_on)
-	if (pressed_bits & 2) != 0:
+	if (pressed_bits & 2) != 0 and bool(ship_state.has_cloak):
 		ship_state.cloak_on = not bool(ship_state.cloak_on)
-	if (pressed_bits & 4) != 0:
+	if (pressed_bits & 4) != 0 and bool(ship_state.has_xradar):
 		ship_state.xradar_on = not bool(ship_state.xradar_on)
-	if (pressed_bits & 8) != 0:
+	if (pressed_bits & 8) != 0 and bool(ship_state.has_antiwarp):
 		ship_state.antiwarp_on = not bool(ship_state.antiwarp_on)
+	# Classic DEL-key behaviour: the MultiFire prize grants the capability, the key only
+	# switches it on and off. A ship without the upgrade cannot toggle one into existence.
+	if (pressed_bits & 16) != 0 and bool(ship_state.multi_fire_capable):
+		ship_state.multi_fire_enabled = not bool(ship_state.multi_fire_enabled)
 
 	# Per-ship ability gate from server.cfg: Status=0 disallowed, Status=2 free (no drain).
 	var _spec_raw: Variant = _get_ship_spec_for(ship_state).get("abilities")
 	var _spec_ab: Dictionary = _spec_raw as Dictionary if typeof(_spec_raw) == TYPE_DICTIONARY else {}
 	if int(_spec_ab.get("StealthStatus", 1)) == 0:
 		ship_state.stealth_on = false
+		ship_state.has_stealth = false
 	if int(_spec_ab.get("CloakStatus", 1)) == 0:
 		ship_state.cloak_on = false
+		ship_state.has_cloak = false
 	if int(_spec_ab.get("XRadarStatus", 1)) == 0:
 		ship_state.xradar_on = false
+		ship_state.has_xradar = false
 	if int(_spec_ab.get("AntiWarpStatus", 1)) == 0:
 		ship_state.antiwarp_on = false
+		ship_state.has_antiwarp = false
 
 	# Item-use buttons (edge-detected; consume inventory and fire effect).
 	var prev_item_bits: int = int(_prev_item_buttons_by_ship.get(int(ship_state.id), 0))
@@ -2305,9 +2491,20 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 		DriftTypes.PrizeKind.QuickCharge:
 			applied_effect = true
 			if is_negative:
-				adjust_energy(int(ship_state.id), -int(ship_state.energy_max) / 2, EnergyReason.PRIZE_NEGATIVE, -1)
+				# "ENERGY DEPLETED: this Negative takes away your energy." (Screen Items.pdf)
+				adjust_energy(int(ship_state.id), -int(ship_state.energy_current), EnergyReason.PRIZE_NEGATIVE, -1)
 			else:
 				adjust_energy(int(ship_state.id), int(ship_state.energy_max), EnergyReason.PRIZE_POSITIVE, -1)
+		DriftTypes.PrizeKind.Glue:
+			# PrizeWeight:Glue is the 'Engine Shutdown' prize (SSOS_Help.txt L1879); the
+			# duration comes from Prize:EngineShutdownTime. The negative roll is the
+			# "Engine Shutdown Severe" variant, ~40 s per Screen Items.pdf.
+			applied_effect = true
+			var glue_ticks: int = int(engine_shutdown_time_ticks)
+			if is_negative:
+				glue_ticks = ENGINE_SHUTDOWN_SEVERE_TICKS
+			if glue_ticks > 0:
+				ship_state.engine_shutdown_until_tick = maxi(int(ship_state.engine_shutdown_until_tick), int(now_tick) + glue_ticks)
 		DriftTypes.PrizeKind.Energy:
 			applied_effect = true
 			var en_spec: Variant = _get_ship_spec_for(ship_state).get("energy")
@@ -2344,16 +2541,16 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				ship_state.rotation_bonus = mini(16, int(ship_state.rotation_bonus) + 1)
 		DriftTypes.PrizeKind.Stealth:
 			applied_effect = true
-			ship_state.stealth_on = not is_negative
+			_grant_ship_ability(ship_state, "StealthStatus", is_negative)
 		DriftTypes.PrizeKind.Cloak:
 			applied_effect = true
-			ship_state.cloak_on = not is_negative
+			_grant_ship_ability(ship_state, "CloakStatus", is_negative)
 		DriftTypes.PrizeKind.AntiWarp:
 			applied_effect = true
-			ship_state.antiwarp_on = not is_negative
+			_grant_ship_ability(ship_state, "AntiWarpStatus", is_negative)
 		DriftTypes.PrizeKind.XRadar:
 			applied_effect = true
-			ship_state.xradar_on = not is_negative
+			_grant_ship_ability(ship_state, "XRadarStatus", is_negative)
 		DriftTypes.PrizeKind.TopSpeed:
 			applied_effect = true
 			if is_negative:
@@ -2390,8 +2587,10 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 			applied_effect = true
 			if is_negative:
 				ship_state.multi_fire_enabled = false
+				ship_state.multi_fire_capable = false
 			else:
 				ship_state.multi_fire_enabled = true
+				ship_state.multi_fire_capable = true
 		DriftTypes.PrizeKind.BouncingBullets:
 			applied_effect = true
 			if is_negative:
@@ -2400,10 +2599,15 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				ship_state.bullet_bounce_bonus = mini(16, int(ship_state.bullet_bounce_bonus) + 1)
 		DriftTypes.PrizeKind.Shrapnel:
 			applied_effect = true
+			# ShrapnelRate is the amount gained per prize, ShrapnelMax the ceiling
+			# (SSOS_Help.txt L2394-2398). The Weasel's max is 0: its EMP bombs never
+			# throw shrapnel no matter how many prizes it eats.
+			var shrap_rate: int = _ship_spec_item_max(ship_state, "ShrapnelRate", 1)
+			var shrap_max: int = _ship_spec_item_max(ship_state, "ShrapnelMax", 16)
 			if is_negative:
-				ship_state.shrapnel_bonus = maxi(0, int(ship_state.shrapnel_bonus) - 1)
+				ship_state.shrapnel_bonus = maxi(0, int(ship_state.shrapnel_bonus) - shrap_rate)
 			else:
-				ship_state.shrapnel_bonus = mini(16, int(ship_state.shrapnel_bonus) + 1)
+				ship_state.shrapnel_bonus = mini(shrap_max, int(ship_state.shrapnel_bonus) + shrap_rate)
 		DriftTypes.PrizeKind.Proximity:
 			applied_effect = true
 			ship_state.bomb_proximity_enabled = not is_negative
@@ -2426,26 +2630,16 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 				_apply_prize_effect(ship_state, sub_kind, false, now_tick)
 		DriftTypes.PrizeKind.Repel:
 			applied_effect = true
-			var spec_rep: Dictionary = _get_ship_spec_for(ship_state)
-			var rep_max: int = 3
-			var wpn_rep: Variant = spec_rep.get("weapons")
-			if typeof(wpn_rep) == TYPE_DICTIONARY:
-				rep_max = maxi(1, int((wpn_rep as Dictionary).get("RepelMax", 3)))
 			if is_negative:
 				ship_state.repel_count = maxi(0, int(ship_state.repel_count) - 1)
 			else:
-				ship_state.repel_count = mini(rep_max, int(ship_state.repel_count) + 1)
+				ship_state.repel_count = mini(_ship_spec_item_max(ship_state, "RepelMax", 3), int(ship_state.repel_count) + 1)
 		DriftTypes.PrizeKind.Burst:
 			applied_effect = true
-			var spec_bst: Dictionary = _get_ship_spec_for(ship_state)
-			var bst_max: int = 3
-			var wpn_bst: Variant = spec_bst.get("weapons")
-			if typeof(wpn_bst) == TYPE_DICTIONARY:
-				bst_max = maxi(1, int((wpn_bst as Dictionary).get("BurstMax", 3)))
 			if is_negative:
 				ship_state.burst_count = maxi(0, int(ship_state.burst_count) - 1)
 			else:
-				ship_state.burst_count = mini(bst_max, int(ship_state.burst_count) + 1)
+				ship_state.burst_count = mini(_ship_spec_item_max(ship_state, "BurstMax", 3), int(ship_state.burst_count) + 1)
 		DriftTypes.PrizeKind.Warp:
 			applied_effect = true
 			if is_negative:
@@ -2457,35 +2651,31 @@ func _apply_prize_effect(ship_state: DriftTypes.DriftShipState, kind: int, is_ne
 			if is_negative:
 				ship_state.decoy_count = maxi(0, int(ship_state.decoy_count) - 1)
 			else:
-				ship_state.decoy_count = mini(10, int(ship_state.decoy_count) + 1)
+				ship_state.decoy_count = mini(_ship_spec_item_max(ship_state, "DecoyMax", 3), int(ship_state.decoy_count) + 1)
 		DriftTypes.PrizeKind.Brick:
 			applied_effect = true
 			if is_negative:
 				ship_state.brick_count = maxi(0, int(ship_state.brick_count) - 1)
 			else:
-				ship_state.brick_count = mini(10, int(ship_state.brick_count) + 1)
+				ship_state.brick_count = mini(_ship_spec_item_max(ship_state, "BrickMax", 3), int(ship_state.brick_count) + 1)
 		DriftTypes.PrizeKind.Portal:
 			applied_effect = true
 			if is_negative:
 				ship_state.portal_count = maxi(0, int(ship_state.portal_count) - 1)
 			else:
-				var pspec: Variant = _get_ship_spec_for(ship_state).get("weapons")
-				var pmax: int = 3
-				if typeof(pspec) == TYPE_DICTIONARY:
-					pmax = maxi(1, int((pspec as Dictionary).get("PortalMax", 3)))
-				ship_state.portal_count = mini(pmax, int(ship_state.portal_count) + 1)
+				ship_state.portal_count = mini(_ship_spec_item_max(ship_state, "PortalMax", 3), int(ship_state.portal_count) + 1)
 		DriftTypes.PrizeKind.Thor:
 			applied_effect = true
 			if is_negative:
 				ship_state.thor_count = maxi(0, int(ship_state.thor_count) - 1)
 			else:
-				ship_state.thor_count = mini(10, int(ship_state.thor_count) + 1)
+				ship_state.thor_count = mini(_ship_spec_item_max(ship_state, "ThorMax", 3), int(ship_state.thor_count) + 1)
 		DriftTypes.PrizeKind.Rocket:
 			applied_effect = true
 			if is_negative:
 				ship_state.rocket_count = maxi(0, int(ship_state.rocket_count) - 1)
 			else:
-				ship_state.rocket_count = mini(10, int(ship_state.rocket_count) + 1)
+				ship_state.rocket_count = mini(_ship_spec_item_max(ship_state, "RocketMax", 3), int(ship_state.rocket_count) + 1)
 		DriftTypes.PrizeKind.Shields:
 			applied_effect = true
 			if is_negative:
@@ -2820,12 +3010,18 @@ func apply_damage(attacker_id: int, target_id: int, damage: int, source: Variant
 			# reward = victim bounty unless FixedKillReward overrides).
 			target.deaths = int(target.deaths) + 1
 			var kill_reward: int = int(kill_fixed_reward) if int(kill_fixed_reward) >= 0 else maxi(0, int(target.bounty))
+			var attacker_for_king: DriftTypes.DriftShipState = null
 			if ships.has(attacker_id) and attacker_id != target_id:
 				var attacker_s: DriftTypes.DriftShipState = ships.get(attacker_id)
 				if attacker_s != null:
 					attacker_s.kills = int(attacker_s.kills) + 1
 					attacker_s.points = int(attacker_s.points) + kill_reward
 					attacker_s.bounty = int(attacker_s.bounty) + int(kill_bounty_increase)
+					attacker_for_king = attacker_s
+			# Crown bookkeeping shares this single death path; a no-op unless
+			# configure_king() enabled KOTH. Runs before the bounty reset below
+			# because NonCrownMinimumBounty tests the victim's bounty at death.
+			_king_on_kill(attacker_for_king, target, int(target.bounty))
 			# Bounty resets on death (SubSpace behavior).
 			target.bounty = _ship_spec_initial_bounty(target)
 			# Record kill event for server to broadcast.
@@ -2885,6 +3081,7 @@ func add_ship(id: int, position: Vector2, ship_type: int = 0) -> void:
 	s.brick_count = _ship_spec_initial_item_count(s, "InitialBrick")
 	s.rocket_count = _ship_spec_initial_item_count(s, "InitialRocket")
 	s.portal_count = _ship_spec_initial_item_count(s, "InitialPortal")
+	_reset_ship_abilities(s)
 	s.bounty = _ship_spec_initial_bounty(s)
 	s.safe_zone_time_used_ticks = 0
 	s.safe_zone_time_max_ticks = int(safe_zone_max_ticks)
@@ -3274,6 +3471,7 @@ func _use_burst(ship_state: DriftTypes.DriftShipState) -> void:
 	if not bool(gate.get("ok", true)):
 		return
 	ship_state.burst_count = int(ship_state.burst_count) - 1
+	effect_events.append({"type": &"burst", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
 	var spec: Dictionary = _get_ship_spec_for(ship_state)
 	var shrapnel_count: int = 24
 	var burst_speed: int = 300
@@ -3360,6 +3558,7 @@ func _use_portal(ship_state: DriftTypes.DriftShipState) -> void:
 	ship_state.portal_count = int(ship_state.portal_count) - 1
 	ship_state.portal_pos = ship_state.position
 	ship_state.portal_until_tick = int(tick) + PORTAL_ACTIVE_TICKS
+	effect_events.append({"type": &"portal", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
 
 
 func _use_brick(ship_state: DriftTypes.DriftShipState) -> void:
@@ -3395,6 +3594,7 @@ func _use_decoy(ship_state: DriftTypes.DriftShipState) -> void:
 	if not bool(gate.get("ok", true)):
 		return
 	ship_state.decoy_count = int(ship_state.decoy_count) - 1
+	effect_events.append({"type": &"decoy", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
 	# Decoy lives for 3 seconds, drifts at owner's velocity (no thrust).
 	var lifetime_ticks: int = int(3.0 * DriftConstants.TICK_RATE)
 	var did: int = int(next_decoy_id)
@@ -3435,6 +3635,7 @@ func _use_rocket(ship_state: DriftTypes.DriftShipState) -> void:
 	if not bool(gate.get("ok", true)):
 		return
 	ship_state.rocket_count = int(ship_state.rocket_count) - 1
+	effect_events.append({"type": &"rocket", "ship_id": int(ship_state.id), "px": ship_state.position.x, "py": ship_state.position.y})
 	var boost_ticks: int = int(5.0 * DriftConstants.TICK_RATE)
 	ship_state.rocket_boost_until_tick = maxi(int(ship_state.rocket_boost_until_tick), int(tick) + boost_ticks)
 
@@ -3470,6 +3671,7 @@ func change_ship_type(ship_id: int, new_type: int) -> bool:
 	s.repel_count = _ship_spec_initial_item_count(s, "InitialRepel")
 	s.burst_count = _ship_spec_initial_item_count(s, "InitialBurst")
 	s.multi_fire_enabled = false
+	s.multi_fire_capable = false
 	s.bullet_bounce_bonus = 0
 	s.shrapnel_bonus = 0
 	s.rotation_bonus = 0
@@ -3485,6 +3687,7 @@ func change_ship_type(ship_id: int, new_type: int) -> bool:
 	s.decoy_count = _ship_spec_initial_item_count(s, "InitialDecoy")
 	s.brick_count = _ship_spec_initial_item_count(s, "InitialBrick")
 	s.portal_count = _ship_spec_initial_item_count(s, "InitialPortal")
+	_reset_ship_abilities(s)
 	# Ship change drops any prize-raised energy max; respawn re-derives from the new spec.
 	s.energy_max = 0
 	s.shields_until_tick = 0
@@ -4130,6 +4333,9 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 					)
 
 		# Store sanitized action command.
+		# The multifire toggle is not an ability and costs nothing, so it survives the
+		# safe-zone sanitizer above (players stage their loadout inside safe zones).
+		action_cmd.multifire_btn = bool(input_cmd.multifire_btn)
 		action_cmds[ship_id] = action_cmd
 
 		_step_ship_energy(ship_state, energy_cmd)
@@ -4298,7 +4504,12 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 
 
 	# --- Sticky/Magnetic Ball Logic ---
-	if ball.owner_id == -1:
+	# Only powerball maps have a ball. Without this gate every arena had an invisible
+	# ball parked at map centre that any ship could pick up, after which firing kicked
+	# the ball instead of shooting.
+	if not ball_enabled:
+		pass
+	elif ball.owner_id == -1:
 		# Free ball physics
 		# Clamp ball position to arena bounds
 		var ball_old_x = ball.position.x
@@ -4595,6 +4806,7 @@ func step_tick(inputs: Dictionary, include_prizes: bool = false, player_count_fo
 	_step_decoys()
 	_step_bricks()
 	_step_wormholes(ship_ids)
+	_step_king(tick, ship_ids)
 
 	# Step bullets (deterministic collision + damage).
 	_step_bullets(ship_ids)
@@ -4776,5 +4988,14 @@ func _copy_ship_state(source: DriftTypes.DriftShipState) -> DriftTypes.DriftShip
 	copy.shrapnel_bonus = source.shrapnel_bonus
 	copy.rotation_bonus = source.rotation_bonus
 	copy.bomb_proximity_enabled = source.bomb_proximity_enabled
+	copy.multi_fire_capable = source.multi_fire_capable
+	copy.has_stealth = source.has_stealth
+	copy.has_cloak = source.has_cloak
+	copy.has_xradar = source.has_xradar
+	copy.has_antiwarp = source.has_antiwarp
+	copy.crown_on = source.crown_on
+	copy.crown_ticks_left = source.crown_ticks_left
+	copy.crown_deaths = source.crown_deaths
+	copy.crown_kills = source.crown_kills
 	copy.rocket_boost_until_tick = source.rocket_boost_until_tick
 	return copy

@@ -33,3 +33,7 @@ $RECYCLE.BIN/
 
 # CI / headless test artifacts (created on failures)
 .ci_artifacts/
+
+# Local-only reference material (see README "Project Layout"): original SubSpace
+# configs, graphics and sounds. Not redistributable; supply your own copy.
+original_content/

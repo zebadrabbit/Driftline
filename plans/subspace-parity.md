@@ -38,7 +38,7 @@ is a direct id→atlas mapping, no remapping table needed.
 - LVZ (Continuum decor overlays): later, low gameplay value. Original 1.34
   didn't have LVZ; skip for 1:1-with-1.34.
 
-## Phase 2 — special-tile gameplay
+## Phase 2 — special-tile gameplay (DONE)
 
 - **Wormholes**: gravity well (pull accel ∝ 1/r², `Wormhole:GravityAccel`,
   `SwitchTime` from server.cfg) + teleport to another wormhole. Deterministic,
@@ -59,15 +59,17 @@ is a direct id→atlas mapping, no remapping table needed.
 
 ## Phase 4 — feel parity
 
-- **Sounds**: wire remaining originals — flag.wav, goal.wav, wormhole/warp,
-  bong chat sounds, ship engine loops (wbroll/jvroll/…), prize/bong on green.
+- **Sounds**: ✅ mostly done — 26 originals wired (per-level bomb/mine/EMP fire,
+  EMP detonation, ability toggles, multifire on/off, decoy, rocket, victory).
+  Still open: `bong1`-`bong26` chat macro sounds (needs the audio-message system),
+  `ballbnc`/`catch`/`throw` (powerball polish), ship engine loops (`wbroll` etc.).
 - **Ruleset audit**: ✅ DONE — `rulesets/classic/*.json` is a byte-for-byte value
   match to the original `server.cfg` for all 8 ships, 84/84 keys each.
   What remains is *wiring*, not data. These keys are parsed but never read by
   the sim, and each is a concrete parity gap:
   - `RocketTime` — `_use_rocket()` hardcodes a 5 s boost; cfg says 1000 cs = 10 s.
-  - `ShrapnelRate` / `ShrapnelMax` — each Shrapnel prize adds a flat +1 capped at
-    16, ignoring the per-ship rate and max.
+  - ~~`ShrapnelRate` / `ShrapnelMax`~~ — ✅ wired; the Weasel's max of 0 means its
+    EMP bombs never throw shrapnel.
   - `SoccerBallSpeed` / `SoccerBallFriction` / `SoccerBallProximity` /
     `SoccerThrowTime` — powerball uses hardcoded constants.
   - `GravityTopSpeed` — wormhole gravity has no speed cap.
@@ -75,8 +77,22 @@ is a direct id→atlas mapping, no remapping table needed.
   - `AttachBounty`, `TurretLimit`, `TurretSpeedPenalty`, `TurretThrustPenalty` —
     deferred with turrets, see Phase 5.
 - **Energy viewing**: `SeeEnergy` — show teammate energy bars (Terrier/spec).
-- **Radar**: `FlaggerOnRadar` red flaggers, X-radar cloak reveal rules.
+- **Radar**: `FlaggerOnRadar` red flaggers ✅; X-radar now counters cloak in the
+  world view as well as on radar.
 - **Kill messages**: original green-text style + bong.
+
+## Phase 4b — done 2026-08-01
+
+- **Ability ownership**: `*Status` now distinguishes 1 (must be prized) from 2
+  (start with it). Previously every ship could toggle stealth/xradar/antiwarp from
+  spawn and the Spider/Shark could cloak without the prize.
+- **Per-ship item caps** (`DecoyMax`/`ThorMax`/`BrickMax`/`RocketMax`) honoured.
+- **King of the Hill** from `[King]`, all six keys, gated on the mode profile.
+- **Game-mode profiles**: `[Game] Mode` → `res://modes/<mode>.cfg`, a third config
+  layer generated from the original per-arena SERVER.CFGs.
+- **Chat commands** `?`/`%`/`=NNNN`, multifire toggle key, F2 stat box modes,
+  F11 spectate, F12 ship cycle.
+- **Negative prizes**: `Glue` = Engine Shutdown (+ severe variant), Energy Depleted.
 
 ## Phase 5 — later / deferred
 
@@ -86,18 +102,14 @@ is a direct id→atlas mapping, no remapping table needed.
 - Persistent scores between sessions; squads/banners.
 - Jackpot game (`JackpotBountyPercent`).
 
-## Known bug, not yet scheduled
+## Known bug — FIXED 2026-08-01
 
-The powerball is live in every world with no game-mode gate: `DriftWorld` always
-has a ball, `set_map_dimensions()` puts it at map center, and any ship touching
-it picks it up — after which fire = kick, so your guns stop working. On a WAR map
-like `castle` that is an invisible gun-disabling trap at map center. Gate the
-ball on the map actually being a soccer map (goal entities present, or an
-explicit mode) before doing more flag/mode work.
+The powerball used to be live in every world with no game-mode gate, making an
+invisible gun-disabling trap at map centre on any non-soccer map. It is now gated
+on `DriftWorld.ball_enabled`, derived on both client and server from the map
+containing `goal`/`base` entities — no protocol change, no desync risk.
 
 ## Commit discipline
 
 One commit per completed slice, tests green — the suite is green as of
-2026-08-01 (87 smoke + 76 contract). It had been red since the June graphics
-merge; those 8 failures were regressions from that merge, not Godot version
-drift (CI's 4.5.1 and local 4.6.1 failed identically), and are now fixed.
+2026-08-01 (98 smoke + 76 contract).

@@ -28,6 +28,7 @@ const REBINDABLE_ACTIONS: Array[String] = [
 	"drift_item_decoy",
 	"drift_item_brick",
 	"drift_item_portal",
+	"drift_toggle_multifire",
 	"drift_toggle_pause_menu",
 	"drift_help_toggle",
 	"drift_help_next",
@@ -59,6 +60,7 @@ const ACTION_LABELS: Dictionary = {
 	"drift_item_decoy": "Item: Decoy",
 	"drift_item_brick": "Item: Brick",
 	"drift_item_portal": "Item: Portal",
+	"drift_toggle_multifire": "Toggle Multifire",
 	"drift_toggle_pause_menu": "Menu",
 	"drift_help_toggle": "Help Toggle",
 	"drift_help_next": "Help Next",
@@ -72,27 +74,13 @@ const ACTION_LABELS: Dictionary = {
 # Stable keycode integers (Godot 4) used by project defaults.
 # For letter keys, this matches ASCII and the physical_keycode used in project.godot.
 const SHIFT_KEYCODE: int = 4194325
-const CTRL_KEYCODE: int = 4194324
 const ESCAPE_KEYCODE: int = 4194305
 const ENTER_KEYCODE: int = 4194309
 const TAB_KEYCODE: int = 4194306
 
-# Keycodes used by the current project defaults (as set in project.godot).
-const DEFAULT_W: int = 87
-const DEFAULT_A: int = 65
-const DEFAULT_S: int = 83
-const DEFAULT_D: int = 68
-const DEFAULT_SPACE: int = 32
-const DEFAULT_Z: int = 90
-const DEFAULT_X: int = 88
-const DEFAULT_C: int = 67
-const DEFAULT_V: int = 86
-const DEFAULT_Q: int = 81
-const DEFAULT_B: int = 66
-const DEFAULT_R: int = 82
+# Keycodes for the menu-only actions (connect screen).
 const DEFAULT_O: int = 79
 const DEFAULT_T: int = 84
-const DEFAULT_F: int = 70
 
 static var DEFAULT_BINDINGS: Dictionary = _build_default_bindings()
 
@@ -123,35 +111,49 @@ static func debug_probe_keycode() -> int:
 
 
 static func _build_default_bindings() -> Dictionary:
+	# Original SubSpace 1.34 layout (original_content/controls.txt + ticker.txt).
+	# Shift is the modifier for the paired actions: the unshifted half is suppressed while
+	# Shift is held, in DriftClientMain._collect_input_cmd(). Godot action matching is not
+	# exact by default, so Shift+HOME fires both drift_ability_stealth and _cloak; that
+	# suppression is what disambiguates them.
 	return {
-		"drift_thrust_forward": [_key_ev(0, DEFAULT_W)],
-		"drift_thrust_reverse": [_key_ev(0, DEFAULT_S)],
-		"drift_rotate_left": [_key_ev(0, DEFAULT_A)],
-		"drift_rotate_right": [_key_ev(0, DEFAULT_D)],
-		"drift_fire_primary": [_key_ev(0, DEFAULT_SPACE)],
-		# Default bombs: Tab.
+		"drift_thrust_forward": [_key_ev(0, KEY_UP)],
+		"drift_thrust_reverse": [_key_ev(0, KEY_DOWN)],
+		"drift_rotate_left": [_key_ev(0, KEY_LEFT)],
+		"drift_rotate_right": [_key_ev(0, KEY_RIGHT)],
+		# Guns: Ctrl. Repel: Shift+Ctrl.
+		"drift_fire_primary": [_key_ev(0, KEY_CTRL)],
+		"drift_item_repel": [_key_ev(0, KEY_CTRL, true)],
+		# Bombs: Tab. Mine: Shift+Tab.
 		"drift_fire_secondary": [_key_ev(0, TAB_KEYCODE)],
-		# Default mine: Shift+Tab.
 		"drift_lay_mine": [_key_ev(0, TAB_KEYCODE, true)],
+		# Shift alone is the afterburner (Shift+thrust).
 		"drift_modifier_ability": [_key_ev(0, SHIFT_KEYCODE)],
-		"drift_ability_stealth": [_key_ev(0, DEFAULT_Z)],
-		"drift_ability_cloak": [_key_ev(0, DEFAULT_X)],
-		"drift_ability_xradar": [_key_ev(0, DEFAULT_C)],
-		"drift_ability_antiwarp": [_key_ev(0, DEFAULT_V)],
-		"drift_item_repel": [_key_ev(0, DEFAULT_Q)],
-		"drift_item_burst": [_key_ev(0, DEFAULT_R)],
-		"drift_item_warp": [_key_ev(0, DEFAULT_B)],
-		"drift_item_thor": [_key_ev(0, DEFAULT_T)],
-		"drift_item_rocket": [_key_ev(0, DEFAULT_F)],
-		"drift_item_decoy": [_key_ev(0, KEY_DELETE)],
-		"drift_item_brick": [_key_ev(0, KEY_INSERT)],
-			"drift_item_portal": [_key_ev(0, KEY_HOME)],
+		# Stealth: Home. Cloak: Shift+Home.
+		"drift_ability_stealth": [_key_ev(0, KEY_HOME)],
+		"drift_ability_cloak": [_key_ev(0, KEY_HOME, true)],
+		# XRadar: End. Antiwarp: Shift+End.
+		"drift_ability_xradar": [_key_ev(0, KEY_END)],
+		"drift_ability_antiwarp": [_key_ev(0, KEY_END, true)],
+		# Multifire: Del. Burst: Shift+Del.
+		"drift_toggle_multifire": [_key_ev(0, KEY_DELETE)],
+		"drift_item_burst": [_key_ev(0, KEY_DELETE, true)],
+		# Warp: Insert. Portal drop/return: Shift+Insert.
+		"drift_item_warp": [_key_ev(0, KEY_INSERT)],
+		"drift_item_portal": [_key_ev(0, KEY_INSERT, true)],
+		"drift_item_rocket": [_key_ev(0, KEY_F3)],
+		"drift_item_brick": [_key_ev(0, KEY_F4)],
+		"drift_item_decoy": [_key_ev(0, KEY_F5)],
+		"drift_item_thor": [_key_ev(0, KEY_F6)],
 		"drift_toggle_pause_menu": [_key_ev(0, ESCAPE_KEYCODE)],
-		"drift_help_next": [_key_ev(0, 4194332)],
-		"drift_help_toggle": [_key_ev(0, 4194337)],
+		# F1 pages the help ticker; F6 toggles it, but only as the Esc+F6 chord, so plain
+		# F6 stays free for Thor above.
+		"drift_help_next": [_key_ev(0, KEY_F1)],
+		"drift_help_toggle": [_key_ev(0, KEY_F6)],
 		"drift_menu_connect": [_key_ev(0, ENTER_KEYCODE)],
 		"drift_menu_offline": [_key_ev(0, DEFAULT_O)],
-		"drift_open_map_editor": [_key_ev(0, 4194322)],
+		# Connect-screen only. Was the Down arrow, which is now thrust-reverse.
+		"drift_open_map_editor": [_key_ev(0, KEY_F10)],
 		"drift_open_tilemap_editor": [_key_ev(0, DEFAULT_T)],
 		"ui_escape_menu": [_key_ev(ESCAPE_KEYCODE, 0)],
 	}

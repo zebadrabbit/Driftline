@@ -1,9 +1,10 @@
 extends Node2D
 
 ## Tile-based map editor (client-only, no server required).
-## WASD moves cursor, Space/LMB places, Backspace/RMB erases.
-## Tab cycles layers, Q/E cycles favorites, Ctrl+S/O save/load.
-## Boundary tiles are immutable and auto-generated.
+## WASD moves the camera; the cursor follows the mouse.
+## Tools: B rect, L line, G bucket, I eyedropper. Ctrl+Z / Ctrl+Y undo and redo.
+## Space or LMB places, Backspace/RMB erases, Tab cycles layers, Q opens the palette.
+## Press F1 in-editor for the full key list. Boundary tiles are generated and immutable.
 
 const LevelIO = preload("res://client/scripts/maps/level_io.gd")
 const TilesetMetaScript = preload("res://editor/tileset_meta.gd")
@@ -79,7 +80,10 @@ var palette_atlas: TileSetAtlasSource
 var palette_texture: Texture2D
 const PALETTE_COLUMNS := 16
 
-# Rectangle fill tool state (LMB drag)
+# Drag tool state (LMB drag). The active tool decides what the drag commits.
+enum Tool { RECT, LINE, FILL }
+var current_tool: int = Tool.RECT
+const TOOL_NAMES := {Tool.RECT: "RECT", Tool.LINE: "LINE", Tool.FILL: "FILL"}
 var dragging: bool = false
 var drag_start_cell := Vector2i.ZERO
 var drag_end_cell := Vector2i.ZERO
@@ -142,6 +146,7 @@ func _ready() -> void:
 	_build_new_map_ui()
 	_build_load_map_ui()
 	_build_status_ui()
+	_build_help_overlay()
 	_build_tile_properties_ui()
 	_build_overlays()
 	_apply_editor_zoom()
@@ -324,6 +329,55 @@ func _unhandled_input(event: InputEvent) -> void:
 		# Let UI consume events; do not handle editor input.
 		return
 
+	# While the help overlay is up it swallows everything except closing it.
+	if help_visible:
+		if event.is_action_pressed("drift_editor_help") or event.is_action_pressed("drift_editor_cancel"):
+			_toggle_help_overlay()
+			get_viewport().set_input_as_handled()
+		elif event is InputEventKey and event.pressed:
+			get_viewport().set_input_as_handled()
+		return
+
+	# Undo/redo before anything else so they work regardless of tool or mode.
+	if event.is_action_pressed("drift_editor_undo"):
+		_undo()
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("drift_editor_redo"):
+		_redo()
+		get_viewport().set_input_as_handled()
+		return
+
+	# F1 toggles the full hotkey overlay.
+	if event.is_action_pressed("drift_editor_help"):
+		_toggle_help_overlay()
+		get_viewport().set_input_as_handled()
+		return
+
+	# Tool selection: B rect, L line, G bucket. I picks the tile under the cursor.
+	if event.is_action_pressed("drift_editor_tool_rect"):
+		_set_tool(Tool.RECT)
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("drift_editor_tool_line"):
+		_set_tool(Tool.LINE)
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("drift_editor_tool_fill"):
+		_set_tool(Tool.FILL)
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("drift_editor_pick_tile"):
+		_pick_tile_under_cursor()
+		get_viewport().set_input_as_handled()
+		return
+
+	# F10 hands off to the tileset editor without a trip through the connect screen.
+	if event.is_action_pressed("drift_editor_open_tileset_editor"):
+		get_tree().change_scene_to_file("res://tools/tilemap_editor/TilemapEditor.tscn")
+		get_viewport().set_input_as_handled()
+		return
+
 	# Ctrl+N opens New Map dialog.
 	if event.is_action_pressed("drift_editor_new_map"):
 		_show_new_map_dialog()
@@ -486,15 +540,23 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not Input.is_action_pressed("drift_editor_pan_modifier"):
 		if event.pressed:
-			dragging = true
-			drag_start_cell = cursor_cell
-			drag_end_cell = cursor_cell
-			queue_redraw()
-			get_viewport().set_input_as_handled()
+			if current_tool == Tool.FILL:
+				# Bucket fill is a single click, not a drag.
+				_flood_fill(cursor_cell)
+				get_viewport().set_input_as_handled()
+			else:
+				dragging = true
+				drag_start_cell = cursor_cell
+				drag_end_cell = cursor_cell
+				queue_redraw()
+				get_viewport().set_input_as_handled()
 		else:
 			if dragging:
 				drag_end_cell = cursor_cell
-				_fill_rect(drag_start_cell, drag_end_cell, Input.is_action_pressed("drift_modifier_ability"))
+				if current_tool == Tool.LINE:
+					_draw_line_cells(drag_start_cell, drag_end_cell)
+				else:
+					_fill_rect(drag_start_cell, drag_end_cell, Input.is_action_pressed("drift_modifier_ability"))
 				dragging = false
 				queue_redraw()
 				get_viewport().set_input_as_handled()
@@ -531,27 +593,143 @@ func _is_boundary_cell(cell: Vector2i) -> bool:
 	return cell.x == 0 or cell.y == 0 or cell.x == w - 1 or cell.y == h - 1
 
 
-func _place_tile() -> void:
-	if _is_boundary_cell(cursor_cell):
-		print("Cannot edit boundary cells")
-		return
+# --- Undo / redo -------------------------------------------------------------
+#
+# Every tile write in the editor goes through _write_cell(), which records the
+# previous atlas coords. Edits are grouped into ops by _begin_op()/_commit_op(), so a
+# rect fill or a flood fill undoes as one step. Document-level changes (new map, load,
+# paste) cannot be expressed as cell diffs, so they clear both stacks instead.
 
-	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_tile_meta(selected_atlas_coords).get("layer", "mid")))
-	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
-	tilemap.set_cell(0, cursor_cell, 0, selected_atlas_coords)
+const UNDO_MAX_OPS: int = 64
+# Total recorded cell changes held across the whole stack. A full-map rect fill is a
+# legitimate single op, so cap by changes rather than only by op count.
+const UNDO_MAX_CHANGES: int = 400000
+const NO_TILE := Vector2i(-1, -1)
+
+var _undo_stack: Array = []   # Array[{label: String, changes: Array}]
+var _redo_stack: Array = []
+var _pending_changes: Array = []
+var _op_open: bool = false
+var _undo_change_count: int = 0
+
+
+func _cell_atlas(layer_name: String, cell: Vector2i) -> Vector2i:
+	var tm: TileMap = _tilemaps.get(layer_name, null)
+	if tm == null or tm.get_cell_source_id(0, cell) < 0:
+		return NO_TILE
+	return tm.get_cell_atlas_coords(0, cell)
+
+
+func _write_cell(layer_name: String, cell: Vector2i, atlas: Vector2i) -> void:
+	## The single tile-mutation primitive. atlas == NO_TILE erases.
+	var tm: TileMap = _tilemaps.get(layer_name, null)
+	if tm == null:
+		return
+	var before := _cell_atlas(layer_name, cell)
+	if before == atlas:
+		return
+	if _op_open:
+		_pending_changes.append({"layer": layer_name, "cell": cell, "from": before, "to": atlas})
+	if atlas == NO_TILE:
+		tm.erase_cell(0, cell)
+	else:
+		tm.set_cell(0, cell, 0, atlas)
+
+
+func _begin_op() -> void:
+	_pending_changes = []
+	_op_open = true
+
+
+func _commit_op(label: String) -> void:
+	_op_open = false
+	if _pending_changes.is_empty():
+		return
+	_undo_stack.append({"label": label, "changes": _pending_changes})
+	_undo_change_count += _pending_changes.size()
+	_pending_changes = []
+	_redo_stack.clear()
+	while _undo_stack.size() > UNDO_MAX_OPS or (_undo_change_count > UNDO_MAX_CHANGES and _undo_stack.size() > 1):
+		var dropped: Dictionary = _undo_stack.pop_front()
+		_undo_change_count -= int((dropped["changes"] as Array).size())
 	rebuild_collision_cache()
+	_update_ui()
+
+
+func _clear_undo_history() -> void:
+	## Called after new/load/paste: those replace the document wholesale.
+	_undo_stack.clear()
+	_redo_stack.clear()
+	_pending_changes.clear()
+	_op_open = false
+	_undo_change_count = 0
+
+
+func _apply_changes(changes: Array, use_from: bool) -> void:
+	var was_open := _op_open
+	_op_open = false  # replaying history must not record new history
+	# Reverse order on undo so overlapping writes to one cell unwind correctly.
+	var idx_range: Array = range(changes.size() - 1, -1, -1) if use_from else range(changes.size())
+	for i in idx_range:
+		var c: Dictionary = changes[i]
+		_write_cell(String(c["layer"]), c["cell"], c["from"] if use_from else c["to"])
+	_op_open = was_open
+	rebuild_collision_cache()
+
+
+func _undo() -> void:
+	if _undo_stack.is_empty():
+		_set_status("Nothing to undo", false, 1.5)
+		return
+	var op: Dictionary = _undo_stack.pop_back()
+	_undo_change_count -= int((op["changes"] as Array).size())
+	_apply_changes(op["changes"], true)
+	_redo_stack.append(op)
+	_set_status("Undo: %s" % String(op["label"]), false, 1.5)
+	_update_ui()
+
+
+func _redo() -> void:
+	if _redo_stack.is_empty():
+		_set_status("Nothing to redo", false, 1.5)
+		return
+	var op: Dictionary = _redo_stack.pop_back()
+	_apply_changes(op["changes"], false)
+	_undo_stack.append(op)
+	_undo_change_count += int((op["changes"] as Array).size())
+	_set_status("Redo: %s" % String(op["label"]), false, 1.5)
+	_update_ui()
+
+
+func _selected_dest_layer() -> String:
+	return _meta_layer_to_map_layer(String(_tileset_meta.get_tile_meta(selected_atlas_coords).get("layer", "mid")))
+
+
+func _place_tile_at(cell: Vector2i) -> void:
+	if _is_boundary_cell(cell):
+		_set_status("Boundary tiles are generated and cannot be edited", true, 2.0)
+		return
+	_begin_op()
+	_write_cell(_selected_dest_layer(), cell, selected_atlas_coords)
+	_commit_op("place tile")
+
+
+func _place_tile() -> void:
+	_place_tile_at(cursor_cell)
+
+
+func _erase_tile_at(cell: Vector2i) -> void:
+	if _is_boundary_cell(cell):
+		_set_status("Boundary tiles are generated and cannot be edited", true, 2.0)
+		return
+	_begin_op()
+	for layer_name in ["bg", "solid", "fg"]:
+		_write_cell(layer_name, cell, NO_TILE)
+	_commit_op("erase tile")
 
 
 func _erase_tile() -> void:
-	if _is_boundary_cell(cursor_cell):
-		print("Cannot edit boundary cells")
-		return
-
-	for layer_name in ["bg", "solid", "fg"]:
-		var tm: TileMap = _tilemaps.get(layer_name, null)
-		if tm != null:
-			tm.erase_cell(0, cursor_cell)
-	rebuild_collision_cache()
+	_erase_tile_at(cursor_cell)
 
 
 func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
@@ -559,19 +737,91 @@ func _fill_rect(a: Vector2i, b: Vector2i, outline_only: bool) -> void:
 	var max_x: int = maxi(a.x, b.x)
 	var min_y: int = mini(a.y, b.y)
 	var max_y: int = maxi(a.y, b.y)
-
-	var dest_layer := _meta_layer_to_map_layer(String(_tileset_meta.get_tile_meta(selected_atlas_coords).get("layer", "mid")))
-	var tilemap: TileMap = _tilemaps.get(dest_layer, _get_active_tilemap())
+	var dest_layer := _selected_dest_layer()
+	_begin_op()
 	for y in range(min_y, max_y + 1):
 		for x in range(min_x, max_x + 1):
 			var cell := Vector2i(x, y)
 			if _is_boundary_cell(cell):
 				continue
-			if outline_only:
-				if not (x == min_x or x == max_x or y == min_y or y == max_y):
-					continue
-			tilemap.set_cell(0, cell, 0, selected_atlas_coords)
-	rebuild_collision_cache()
+			if outline_only and not (x == min_x or x == max_x or y == min_y or y == max_y):
+				continue
+			_write_cell(dest_layer, cell, selected_atlas_coords)
+	_commit_op("outline" if outline_only else "rect fill")
+
+
+func _draw_line_cells(a: Vector2i, b: Vector2i) -> void:
+	## Bresenham between two cells on the selected tile's destination layer.
+	var dest_layer := _selected_dest_layer()
+	var dx: int = absi(b.x - a.x)
+	var dy: int = -absi(b.y - a.y)
+	var sx: int = 1 if a.x < b.x else -1
+	var sy: int = 1 if a.y < b.y else -1
+	var err: int = dx + dy
+	var cur := a
+	_begin_op()
+	while true:
+		if not _is_boundary_cell(cur):
+			_write_cell(dest_layer, cur, selected_atlas_coords)
+		if cur == b:
+			break
+		var e2: int = err * 2
+		if e2 >= dy:
+			err += dy
+			cur.x += sx
+		if e2 <= dx:
+			err += dx
+			cur.y += sy
+	_commit_op("line")
+
+
+func _flood_fill(start: Vector2i) -> void:
+	## Bucket fill: replaces the contiguous region of cells matching whatever is under the
+	## start cell on the target layer. Bounded by the map edge and by UNDO_MAX_CHANGES.
+	var dest_layer := _selected_dest_layer()
+	if _is_boundary_cell(start):
+		_set_status("Boundary tiles are generated and cannot be edited", true, 2.0)
+		return
+	var target := _cell_atlas(dest_layer, start)
+	if target == selected_atlas_coords:
+		_set_status("Flood fill: already that tile", false, 1.5)
+		return
+	var w := _map_width_cells()
+	var h := _map_height_cells()
+	var seen: Dictionary = {}
+	var queue: Array = [start]
+	seen[start] = true
+	_begin_op()
+	var guard: int = 0
+	while not queue.is_empty():
+		guard += 1
+		if guard > UNDO_MAX_CHANGES:
+			_set_status("Flood fill stopped at %d cells" % guard, true, 3.0)
+			break
+		var cell: Vector2i = queue.pop_back()
+		_write_cell(dest_layer, cell, selected_atlas_coords)
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var n: Vector2i = cell + d
+			if n.x < 0 or n.y < 0 or n.x >= w or n.y >= h or seen.has(n):
+				continue
+			if _is_boundary_cell(n) or _cell_atlas(dest_layer, n) != target:
+				continue
+			seen[n] = true
+			queue.append(n)
+	_commit_op("flood fill")
+
+
+func _pick_tile_under_cursor() -> void:
+	## Eyedropper: adopt whatever tile is under the cursor, topmost layer first.
+	for layer_name in ["fg", "solid", "bg"]:
+		var atlas := _cell_atlas(layer_name, cursor_cell)
+		if atlas != NO_TILE:
+			selected_atlas_coords = atlas
+			_sync_tile_props_from_selection()
+			_set_status("Picked tile (%d,%d)" % [atlas.x, atlas.y], false, 1.5)
+			_update_ui()
+			return
+	_set_status("No tile under cursor", true, 1.5)
 
 
 func _cycle_layer() -> void:
@@ -599,10 +849,78 @@ func _update_cursor_position(move_camera: bool = true) -> void:
 	queue_redraw()
 
 
+const HELP_TEXT := """EDITOR HOTKEYS                                    [F1] close
+
+TOOLS                          EDIT
+  B    rect fill (drag)          LMB drag   apply tool
+  L    line (drag)               Shift+drag rect outline
+  G    bucket fill (click)       Space      place at cursor
+  I    pick tile under cursor    Backspace / RMB   erase
+                                 Ctrl+Z     undo
+VIEW                             Ctrl+Y     redo
+  WASD      move camera
+  Wheel     zoom               TILES
+  + / -     zoom                 Q          tile palette
+  1 / 2 / 3 zoom presets         Shift+Q/E  cycle favourites
+  MMB drag  pan                  Tab        cycle layer
+  Space+LMB pan                  Ctrl+T     cycle tileset
+
+FILE                           OTHER
+  Ctrl+N  new map                T    physics test puck
+  Ctrl+S  save                   F10  tileset editor
+  Ctrl+O  open                   Esc  exit editor
+  Ctrl+Shift+O  open latest
+  Ctrl+V  paste map JSON"""
+
+var help_visible: bool = false
+var help_layer: CanvasLayer
+var help_label: Label
+
+
+func _set_tool(tool_id: int) -> void:
+	current_tool = tool_id
+	_set_status("Tool: %s" % String(TOOL_NAMES[tool_id]), false, 1.5)
+	_update_ui()
+
+
+func _build_help_overlay() -> void:
+	help_layer = CanvasLayer.new()
+	help_layer.name = "HelpOverlay"
+	help_layer.layer = 90
+	help_layer.visible = false
+	add_child(help_layer)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.82)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	help_layer.add_child(dim)
+	help_label = Label.new()
+	help_label.text = HELP_TEXT
+	help_label.position = Vector2(32, 28)
+	help_label.add_theme_font_size_override("font_size", 15)
+	help_layer.add_child(help_label)
+
+
+func _toggle_help_overlay() -> void:
+	help_visible = not help_visible
+	if help_layer != null:
+		help_layer.visible = help_visible
+
+
 func _update_ui() -> void:
-	var layer_display := current_layer.to_upper()
-	var atlas_str := "(%d,%d)" % [selected_atlas_coords.x, selected_atlas_coords.y]
-	ui_label.text = "Map: %d×%d | Cell: %s | Layer: %s | Tile: %s | Zoom: %.1f\n[WASD] Camera | [Space] Place | [LMB Drag] Rect Fill | [Shift+Drag] Outline\n[Backspace/RMB] Erase | [Tab] Layer | [Q] Palette | [T] Test | [Wheel/+/-] Zoom | [MMB Drag] Pan | [Space+LMB] Pan | [Esc] Exit" % [map_width_tiles, map_height_tiles, cursor_cell, layer_display, atlas_str, editor_zoom]
+	# One compact status line. The full key list lives behind F1 so it is not permanently
+	# covering the top-left of the map.
+	var undo_hint := ""
+	if not _undo_stack.is_empty():
+		undo_hint = "  |  Undo: %d" % _undo_stack.size()
+	ui_label.text = "%d×%d  |  Cell %d,%d  |  Layer %s  |  Tool %s  |  Tile (%d,%d)  |  Zoom %.1fx%s        [F1] help" % [
+		map_width_tiles, map_height_tiles,
+		cursor_cell.x, cursor_cell.y,
+		current_layer.to_upper(),
+		String(TOOL_NAMES[current_tool]),
+		selected_atlas_coords.x, selected_atlas_coords.y,
+		editor_zoom, undo_hint,
+	]
 
 
 func _build_status_ui() -> void:
@@ -628,6 +946,8 @@ func _set_status(msg: String, is_error: bool = false, seconds: float = 4.0) -> v
 
 
 func _paste_map_from_clipboard() -> void:
+	# History is cleared only once the paste is known to be good -- a rejected paste
+	# must not cost the user their undo stack. _create_new_map() below does the clearing.
 	var s = DisplayServer.clipboard_get()
 	var parsed = LevelIO.parse_map_json(s)
 	if not bool(parsed.get("ok", false)):
@@ -786,6 +1106,7 @@ func _hide_new_map_dialog() -> void:
 
 
 func _create_new_map(width: int, height: int) -> void:
+	_clear_undo_history()  # a new map replaces the document
 	map_width_tiles = width
 	map_height_tiles = height
 	# Keep inspector exports in sync (exports store tile dimensions).
@@ -1408,6 +1729,8 @@ func _load_latest_map() -> void:
 
 
 func _load_map_from_path(full_path: String) -> void:
+	# _create_new_map() below clears the undo history, and only once the metadata has
+	# been accepted -- a failed load leaves the current map and its history intact.
 	var meta0 := LevelIO.load_map_meta(full_path)
 	if meta0.is_empty():
 		push_error("Failed to load map meta: " + full_path)

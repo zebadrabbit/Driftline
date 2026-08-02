@@ -71,6 +71,25 @@ const GOAL_FRAME_COUNT: int = 9
 const GOAL_ANIM_FPS: float = 8.0
 const GOAL_DRAW_SCALE: float = 2.0
 const KING_TEX: Texture2D = preload("res://client/graphics/entities/king.png")
+# Flashing crown shown while the King of the Hill clock is nearly up.
+const KINGEX_TEX: Texture2D = preload("res://client/graphics/entities/kingex.png")
+const KING_EXPIRING_SECONDS: float = 15.0
+# Ship wreckage, one sheet per ship: 10 animation columns x 9 debris rows of 16px.
+const JUNK_TEX_BY_SHIP: Array[Texture2D] = [
+	preload("res://client/graphics/effects/junkwb.png"),
+	preload("res://client/graphics/effects/junkjv.png"),
+	preload("res://client/graphics/effects/junksp.png"),
+	preload("res://client/graphics/effects/junklv.png"),
+	preload("res://client/graphics/effects/junkte.png"),
+	preload("res://client/graphics/effects/junkwe.png"),
+	preload("res://client/graphics/effects/junknw.png"),
+	preload("res://client/graphics/effects/junksh.png"),
+]
+const JUNK_FRAME_PX: int = 16
+const JUNK_COLS: int = 10
+const JUNK_ROWS: int = 9
+const JUNK_TICKS_PER_FRAME: int = 6
+const JUNK_PIECES_PER_DEATH: int = 5
 const WALL_TEX: Texture2D = preload("res://client/graphics/entities/wall.png")
 const WALL_FRAME_PX: int = 16
 const WALL_FRAME_COUNT: int = 10
@@ -92,6 +111,14 @@ const SHIELD_TEX: Texture2D = preload("res://client/graphics/effects/shield.png"
 const SHIELD_FRAME_PX: int = 16
 const SHIELD_FRAME_COUNT: int = 10
 const SHIELD_ANIM_FPS: float = 12.0
+# Super shields use the gold variant of the same 10-frame 16px sheet.
+const SSSHIELD_TEX: Texture2D = preload("res://client/graphics/effects/ssshield.png")
+# EMP blast: 5 columns x 2 rows of 80px frames, played once.
+const EMPBURST_TEX: Texture2D = preload("res://client/graphics/effects/empburst.png")
+const EMPBURST_FRAME_PX: int = 80
+const EMPBURST_COLS: int = 5
+const EMPBURST_FRAME_COUNT: int = 10
+const EMPBURST_TICKS_PER_FRAME: int = 3
 const ROCKET_TEX: Texture2D = preload("res://client/graphics/effects/rocket.png")
 const ROCKET_FRAME_W: int = 24
 const ROCKET_FRAME_H: int = 24
@@ -178,6 +205,7 @@ var _connect_screen_ship_buttons: Array = []
 var _pending_ship_type: int = 0
 var _spectate_requested: bool = false    # true when player chose spectate on connect screen
 var _is_spectating: bool = false          # confirmed spectator (no ship in world)
+var _last_played_ship_type: int = 0       # ship to restore when leaving spectate (F11)
 var _spectator_target_id: int = -1       # ship being watched
 
 # Wall-bounce audio (driven by shared simulation collision events)
@@ -250,6 +278,11 @@ var _active_explosions: Array = []
 var _active_repel_rings: Array = [] # Array[{pos: Vector2, start_tick: int}]
 var _active_warp_flashes: Array = [] # Array[{pos: Vector2, start_tick: int}]
 var _active_thor_bursts: Array = [] # Array[{pos: Vector2, start_tick: int}]
+var _active_emp_bursts: Array = [] # Array[{pos: Vector2, start_tick: int}]
+var _active_debris: Array = [] # Array[{tex, pos, vel, row, start_tick}]
+# Last-frame ability/multifire state, so toggle wavs fire once per transition.
+var _prev_ability_sfx_state: Dictionary = {}
+var _prev_multifire_sfx_state: bool = false
 var _exhaust_particles: Array = [] # Array[{pos: Vector2, vel: Vector2, start_tick: int}]
 # Death transition tracking: previous tick alive state per ship id.
 var _prev_alive_by_ship: Dictionary = {} # Dictionary[int, bool]
@@ -267,9 +300,20 @@ var _chat_input_text: String = ""
 const CHAT_MAX_DISPLAY: int = 10
 const CHAT_DISPLAY_DURATION_TICKS: int = 600  # 10 seconds
 const CHAT_MAX_LENGTH: int = 200
+# Adjustable via ?lines=N; kill feed via ?kill; ignore list via ?ignore <name>.
+var _chat_visible_lines: int = CHAT_MAX_DISPLAY
+var _kill_feed_enabled: bool = true
+var _ignored_names: Dictionary = {}  # lowercased name -> true
+# Last kill participants, for the %killer / %killed message macros.
+var _last_killer_name: String = ""
+var _last_killed_name: String = ""
 
-# Scoreboard (client-only).
-var _scoreboard_visible: bool = false
+# Player stat box (client-only). 0 = off, 1..6 are the SubSpace F2 modes.
+var _player_list_mode: int = 0
+const PLAYER_LIST_MODE_COUNT: int = 7
+# Names you privately messaged recently are highlighted in the list for 2 minutes.
+const RECENT_PM_TICKS: int = 120 * 60
+var _recent_pm_tick_by_name: Dictionary = {}
 
 # Powerball / match scoring (authoritative from server via PKT_SCORE_EVENT).
 var _team_scores: Array = [0, 0]  # index 0 = team 1, index 1 = team 2
@@ -450,7 +494,15 @@ func _apply_local_default_ruleset_if_available() -> void:
 	add_child(_prize_audio)
 
 	# Event SFX pool (original SubSpace wavs). One player per sound; fire-and-forget.
-	for sfx_name in ["warp", "goal", "flag", "repel", "thor", "burst", "explode0", "explode1", "bomb1"]:
+	for sfx_name in [
+		"warp", "warppnt", "goal", "flag", "repel", "thor", "burst",
+		"explode0", "explode1", "explode2",
+		"bomb1", "bomb2", "bomb3", "bomb4",
+		"ebomb1", "ebomb2", "ebomb3", "ebomb4", "ebombex",
+		"mine1", "mine2", "mine3", "mine4",
+		"stealth", "cloak", "xradar", "antiwarp", "multion", "multioff", "off",
+		"decoy", "rocket1", "rocket2", "alarm", "victory", "victoryl",
+	]:
 		var p := AudioStreamPlayer.new()
 		p.name = "Sfx_" + sfx_name
 		var st = load("res://client/audio/%s.wav" % sfx_name)
@@ -660,16 +712,20 @@ func _load_client_map(path: String = CLIENT_MAP_PATH) -> void:
 					continue
 				var ent_type_c: String = String(ent_c.get("type", ""))
 				var ent_pos_c := Vector2(int(ent_c.get("x", 0)) * t_sz_c + t_sz_c / 2, int(ent_c.get("y", 0)) * t_sz_c + t_sz_c / 2)
-				if ent_type_c == "goal":
+				# Must accept the same entity types the server does (server_main:476),
+				# otherwise the two sides disagree on whether the ball exists.
+				if ent_type_c == "goal" or ent_type_c == "base":
 					client_goal_zones.append({"pos": ent_pos_c, "team": int(ent_c.get("team", 1))})
 				elif ent_type_c == "wormhole":
 					client_wormholes.append(ent_pos_c)
 			world.set_wormholes(client_wormholes)
+			world.set_ball_enabled(not client_goal_zones.is_empty())
 		else:
 			client_map_meta = {}
 			client_map_solid_cells = []
 			client_map_safe_cells = []
 			client_goal_zones.clear()
+			world.set_ball_enabled(false)
 
 	# Also read raw map for checksum/manifest verification and canonical layers for collision.
 	var raw := LevelIO.read_map_data(client_map_path)
@@ -976,7 +1032,10 @@ func _process(delta: float) -> void:
 						var ps = world.ships.get(local_ship_id)
 						if ps != null:
 							portal_s = float(maxi(0, int(ps.portal_until_tick) - int(world.tick))) * DriftConstants.TICK_DT
-					hud.call("set_classic_status", pers_flags, team_flags, sh_s, sup_on, portal_s)
+					var king_s: float = 0.0
+					if bool(ss.crown_on):
+						king_s = float(maxi(0, int(ss.crown_ticks_left))) * DriftConstants.TICK_DT
+					hud.call("set_classic_status", pers_flags, team_flags, sh_s, sup_on, portal_s, king_s)
 				# Minimap dynamic state (client-only UI; uses authoritative snapshot)
 				if hud.has_method("set_minimap_dynamic"):
 					var my_freq: int = int(ss.freq) if ("freq" in ss) else 0
@@ -1136,13 +1195,23 @@ func _consume_local_combat_events() -> void:
 				"expire_tick": cur_tick + 20,
 			})
 
+		elif ty == "bomb_fire":
+			if int(d.get("ship_id", -1)) != local_ship_id:
+				continue
+			# Original wavs are per level; the Weasel's EMP bomb has its own set.
+			var blv: int = clampi(int(d.get("level", 1)), 1, 4)
+			_play_sfx(("ebomb%d" if bool(d.get("emp", false)) else "bomb%d") % blv)
+		elif ty == "mine_lay":
+			if int(d.get("ship_id", -1)) != local_ship_id:
+				continue
+			_play_sfx("mine%d" % clampi(int(d.get("level", 1)), 1, 4))
 		elif ty == "bomb_explode" or ty == "mine_explode":
 			var bpos_any: Variant = d.get("pos", Vector2.ZERO)
 			var bpos: Vector2 = bpos_any if bpos_any is Vector2 else Vector2.ZERO
 			var blvl: int = int(d.get("level", 1))
 			var tier: int = 2 if blvl >= 3 else 1
 			_active_explosions.append({"pos": bpos, "start_tick": cur_tick, "tier": tier, "level": blvl})
-			_play_sfx("explode1" if blvl >= 2 else "explode0")
+			_play_sfx("explode2" if blvl >= 3 else ("explode1" if blvl >= 2 else "explode0"))
 
 	_prune_local_combat_fx(cur_tick)
 	queue_redraw()
@@ -1197,29 +1266,42 @@ func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void
 
 
 func _collect_input_cmd() -> DriftTypes.DriftInputCmd:
-	# Suppress all gameplay input while chat is active.
-	if _chat_input_active:
+	# Suppress all gameplay input while chat or the Esc menu is open.
+	# The Esc menu owns Esc+F1-F8 (ship change) and Esc+F6 (help ticker); without this
+	# gate those chords would also fire the F-key items bound underneath them.
+	if _chat_input_active or _esc_menu_is_open():
 		return DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 	var rotate_axis: float = Input.get_action_strength("drift_rotate_right") - Input.get_action_strength("drift_rotate_left")
 	var thrust_axis: float = Input.get_action_strength("drift_thrust_forward") - Input.get_action_strength("drift_thrust_reverse")
-	var fire_primary: bool = Input.is_action_pressed("drift_fire_primary")
-	var fire_secondary: bool = Input.is_action_pressed("drift_fire_secondary")
-	var lay_mine: bool = Input.is_action_pressed("drift_lay_mine")
 	var modifier: bool = Input.is_action_pressed("drift_modifier_ability")
-	# Ability toggle buttons (edge detection happens in shared sim).
-	var stealth_btn: bool = Input.is_action_pressed("drift_ability_stealth")
-	var cloak_btn: bool = Input.is_action_pressed("drift_ability_cloak")
-	var xradar_btn: bool = Input.is_action_pressed("drift_ability_xradar")
-	var antiwarp_btn: bool = Input.is_action_pressed("drift_ability_antiwarp")
+	# Original layout pairs an unshifted and a Shift+ action on the same physical key
+	# (Ctrl/Shift+Ctrl, Tab/Shift+Tab, Home/Shift+Home, End/Shift+End, Del/Shift+Del,
+	# Insert/Shift+Insert). Godot matches actions non-exactly, so the Shift+ chord also
+	# triggers the unshifted action; `and not modifier` is what keeps them apart.
+	var fire_primary: bool = Input.is_action_pressed("drift_fire_primary") and not modifier
+	var fire_secondary: bool = Input.is_action_pressed("drift_fire_secondary") and not modifier
 	var repel_btn: bool = Input.is_action_pressed("drift_item_repel")
+	var lay_mine: bool = Input.is_action_pressed("drift_lay_mine")
+	# Ability toggle buttons (edge detection happens in shared sim).
+	var stealth_btn: bool = Input.is_action_pressed("drift_ability_stealth") and not modifier
+	var cloak_btn: bool = Input.is_action_pressed("drift_ability_cloak")
+	var xradar_btn: bool = Input.is_action_pressed("drift_ability_xradar") and not modifier
+	var antiwarp_btn: bool = Input.is_action_pressed("drift_ability_antiwarp")
+	var multifire_btn: bool = Input.is_action_pressed("drift_toggle_multifire") and not modifier
 	var burst_btn: bool = Input.is_action_pressed("drift_item_burst")
-	var warp_btn: bool = Input.is_action_pressed("drift_item_warp")
+	var warp_btn: bool = Input.is_action_pressed("drift_item_warp") and not modifier
+	var portal_btn: bool = Input.is_action_pressed("drift_item_portal")
 	var thor_btn: bool = Input.is_action_pressed("drift_item_thor")
 	var rocket_btn: bool = Input.is_action_pressed("drift_item_rocket")
 	var decoy_btn: bool = Input.is_action_pressed("drift_item_decoy")
 	var brick_btn: bool = Input.is_action_pressed("drift_item_brick")
-	var portal_btn: bool = Input.is_action_pressed("drift_item_portal")
-	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn, lay_mine, repel_btn, burst_btn, warp_btn, thor_btn, rocket_btn, decoy_btn, brick_btn, portal_btn)
+	return DriftTypes.DriftInputCmd.new(thrust_axis, rotate_axis, fire_primary, fire_secondary, modifier, stealth_btn, cloak_btn, xradar_btn, antiwarp_btn, lay_mine, repel_btn, burst_btn, warp_btn, thor_btn, rocket_btn, decoy_btn, brick_btn, portal_btn, multifire_btn)
+
+
+func _esc_menu_is_open() -> bool:
+	if pause_menu_visible:
+		return true
+	return esc_menu != null and esc_menu.has_method("is_open") and bool(esc_menu.call("is_open"))
 
 
 func _ensure_debug_probe_action() -> void:
@@ -1300,7 +1382,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 
 	# Ship selection: F1-F8 to switch ship type (only when ESC menu is open).
-	var _esc_open: bool = esc_menu != null and esc_menu.has_method("is_open") and bool(esc_menu.call("is_open"))
+	var _esc_open: bool = _esc_menu_is_open()
 	if is_connected and _esc_open and event is InputEventKey:
 		var kev: InputEventKey = event
 		if kev.pressed and (not kev.echo):
@@ -1625,6 +1707,8 @@ func _draw() -> void:
 			# Skip dead ships.
 			if remote_state != null and int(remote_state.dead_until_tick) > 0 and int(latest_snapshot.tick) < int(remote_state.dead_until_tick):
 				continue
+			if _remote_ship_cloaked_from_me(remote_state, my_freq):
+				continue
 			var interp_pos = a.position.lerp(b.position, alpha)
 			var interp_rot = lerp_angle(a.rotation, b.rotation, alpha)
 			var interp_state = DriftTypes.DriftShipState.new(ship_id, interp_pos, Vector2.ZERO, interp_rot)
@@ -1637,7 +1721,7 @@ func _draw() -> void:
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, interp_pos + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				if king_id == ship_id:
-					_draw_crown(interp_pos + name_offset, label)
+					_draw_crown(interp_pos + name_offset, label, _crown_seconds_for(remote_state))
 		# Interpolated ball
 		if latest_snapshot.ball_owner_id != local_ship_id:
 			var interp_ball_pos = snap_a_ball_pos.lerp(snap_b_ball_pos, alpha)
@@ -1654,6 +1738,8 @@ func _draw() -> void:
 			# Skip dead ships.
 			if snap_state != null and int(snap_state.dead_until_tick) > 0 and int(latest_snapshot.tick) < int(snap_state.dead_until_tick):
 				continue
+			if _remote_ship_cloaked_from_me(snap_state, my_freq):
+				continue
 			var remote_freq: int = int(snap_state.freq) if snap_state != null else -1
 			_draw_remote_ship_triangle(remote_state, DriftTeamColors.ship_marker_color(my_freq, remote_freq))
 			# Draw username and bounty
@@ -1662,7 +1748,7 @@ func _draw() -> void:
 				var color_index: int = DriftTeamColors.get_nameplate_color_index(my_freq, remote_freq, 0)
 				SpriteFontLabelScript.draw_text(self, remote_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, color_index, 0)
 				if king_id == ship_id:
-					_draw_crown(remote_state.position + name_offset, label)
+					_draw_crown(remote_state.position + name_offset, label, _crown_seconds_for(snap_state))
 		if latest_snapshot.ball_owner_id != local_ship_id:
 			_draw_ball_at(ball_position)
 
@@ -1683,6 +1769,8 @@ func _draw() -> void:
 	_draw_repel_rings()
 	_draw_warp_flashes()
 	_draw_thor_bursts()
+	_draw_emp_bursts()
+	_draw_ship_debris()
 	_draw_shield_bubbles(latest_snapshot)
 	_draw_local_combat_fx(ship_state)
 	
@@ -1693,7 +1781,7 @@ func _draw() -> void:
 		var label = "%s(%d)" % [local_state.username, local_state.bounty]
 		SpriteFontLabelScript.draw_text(self, ship_state.position + name_offset, label, SpriteFontLabelScript.FontSize.SMALL, 2, 0)
 		if king_id == local_ship_id:
-			_draw_crown(ship_state.position + name_offset, label)
+			_draw_crown(ship_state.position + name_offset, label, _crown_seconds_for(local_state))
 
 	# _draw_authoritative_ghost_ship()  # Disabled - no ghost ship
 	if debug_show_overlay:
@@ -1728,9 +1816,8 @@ func _draw() -> void:
 	# Chat overlay (screen-space, bottom-left).
 	_draw_chat_overlay()
 
-	# Scoreboard overlay (screen-space, centered).
-	if _scoreboard_visible:
-		_draw_scoreboard()
+	# Player stat box (screen-space, upper-left; F2 cycles the mode).
+	_draw_scoreboard()
 
 
 	# Local ship (predicted)
@@ -1802,6 +1889,8 @@ func _get_camera_offset() -> Vector2:
 
 
 func _draw_kill_feed() -> void:
+	if not _kill_feed_enabled:
+		return
 	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
 	# Prune expired entries.
 	while _kill_feed_entries.size() > 0 and int(_kill_feed_entries[0].get("expire_tick", 0)) <= now_tick:
@@ -1834,7 +1923,7 @@ func _draw_chat_overlay() -> void:
 	var x_left: float = cam_offset.x + 16.0
 	var y_bottom: float = cam_offset.y + vp_size.y - 40.0
 	# Show last N messages above the input line.
-	var visible: Array = _chat_messages.slice(maxi(0, _chat_messages.size() - CHAT_MAX_DISPLAY))
+	var visible: Array = _chat_messages.slice(maxi(0, _chat_messages.size() - _chat_visible_lines))
 	var line_height: float = 14.0
 	var y_offset: float = y_bottom - float(visible.size()) * line_height
 	if _chat_input_active:
@@ -1878,42 +1967,112 @@ func _draw_spectator_hud() -> void:
 	SpriteFontLabelScript.draw_text(self, Vector2(cx - 100.0, cy), label, SpriteFontLabelScript.FontSize.SMALL, 1, 0)
 
 
-func _draw_scoreboard() -> void:
-	if latest_snapshot == null:
-		return
-	var vp_size: Vector2 = get_viewport_rect().size
-	var cam_offset: Vector2 = _get_camera_offset()
-	var cx: float = cam_offset.x + vp_size.x * 0.5
-	var cy_start: float = cam_offset.y + 80.0
-	# Semi-transparent background.
-	var bg_w: float = 500.0
-	var bg_h: float = 24.0 + float(latest_snapshot.ships.size()) * 16.0 + 8.0
-	draw_rect(Rect2(cx - bg_w * 0.5, cy_start - 4.0, bg_w, bg_h), Color(0, 0, 0, 0.7))
-	# Header.
-	var header: String = "  NAME            SHIP  FREQ  KILLS DEATHS BOUNTY"
-	SpriteFontLabelScript.draw_text(self, Vector2(cx - bg_w * 0.5 + 8.0, cy_start + 4.0), header, SpriteFontLabelScript.FontSize.SMALL, 1, 0)
-	# Sort ships by kills desc, then bounty desc.
-	var ship_ids: Array = latest_snapshot.ships.keys()
-	ship_ids.sort_custom(func(a, b):
-		var sa = latest_snapshot.ships.get(a)
-		var sb = latest_snapshot.ships.get(b)
-		if sa == null or sb == null: return false
-		if int(sa.kills) != int(sb.kills): return int(sa.kills) > int(sb.kills)
-		return int(sa.bounty) > int(sb.bounty)
-	)
-	var y: float = cy_start + 20.0
+func _player_list_rows() -> Array:
+	## One row per player for the F2 panel, in the order the current mode wants them.
+	## Returns [{name, ship, freq, points, kills, deaths, bounty, flags, id}].
+	var rows: Array = []
 	var ship_names: Array[String] = ["WB", "JV", "SP", "LV", "TR", "WS", "LC", "SH"]
-	for sid in ship_ids:
+	var ids: Array = latest_snapshot.ships.keys()
+	ids.sort()
+	for sid in ids:
 		var s = latest_snapshot.ships.get(sid)
 		if s == null:
 			continue
-		var sname: String = String(s.username) if String(s.username) != "" else ("Ship%d" % int(s.id))
-		var st_idx: int = clampi(int(s.ship_type), 0, 7)
-		var line: String = "  %-16s %-4s  %-5d %-5d %-6d %d" % [sname.left(16), ship_names[st_idx], int(s.freq), int(s.kills), int(s.deaths), int(s.bounty)]
-		var color_idx: int = 0  # white
-		if int(s.id) == local_ship_id:
-			color_idx = 2  # blue for local player
-		SpriteFontLabelScript.draw_text(self, Vector2(cx - bg_w * 0.5 + 8.0, y), line, SpriteFontLabelScript.FontSize.SMALL, color_idx, 0)
+		rows.append({
+			"id": int(sid),
+			"name": String(s.username) if String(s.username) != "" else ("Ship%d" % int(sid)),
+			"ship": ship_names[clampi(int(s.ship_type), 0, 7)],
+			"freq": int(s.freq),
+			"points": int(s.points),
+			"kills": int(s.kills),
+			"deaths": int(s.deaths),
+			"bounty": int(s.bounty),
+			"flags": _flags_carried_by(int(sid)),
+		})
+	match _player_list_mode:
+		3:
+			rows.sort_custom(func(a, b): return int(a["points"]) > int(b["points"]))
+		4:
+			rows.sort_custom(func(a, b):
+				if int(a["freq"]) != int(b["freq"]): return int(a["freq"]) < int(b["freq"])
+				return int(a["points"]) > int(b["points"])
+			)
+		5:
+			rows.sort_custom(func(a, b): return int(a["kills"]) > int(b["kills"]))
+	return rows
+
+
+func _player_list_name_color(row: Dictionary, my_freq: int) -> int:
+	# Screen Items.pdf colours the list by relationship: teammates one colour, anyone you
+	# privately messaged in the last 2 minutes another, enemies a third. Driftline's
+	# sprite-font palette has no yellow/grey, so this reuses the nameplate colours the
+	# rest of the HUD already uses and light blue for the recent-PM case.
+	if int(row["id"]) == local_ship_id:
+		return 2
+	if int(_recent_pm_tick_by_name.get(String(row["name"]).to_lower(), -RECENT_PM_TICKS)) + RECENT_PM_TICKS > int(latest_snapshot.tick):
+		return 2
+	return DriftTeamColors.get_nameplate_color_index(my_freq, int(row["freq"]))
+
+
+func _draw_scoreboard() -> void:
+	## SubSpace player stat box: upper-left, cycled with F2 (Screen Items.pdf).
+	## Mode 1 names - 2 names+points - 3 sorted by points - 4 grouped by team
+	## - 5 win/loss record - 6 frequency statistics.
+	if latest_snapshot == null or _player_list_mode <= 0:
+		return
+	var cam_offset: Vector2 = _get_camera_offset()
+	var x: float = cam_offset.x + 12.0
+	var y: float = cam_offset.y + 12.0
+	var my_freq: int = 0
+	if world != null and world.ships.has(local_ship_id):
+		my_freq = int(world.ships[local_ship_id].freq)
+
+	var lines: Array = []  # [text, color_idx]
+	if _player_list_mode == 6:
+		# Frequency statistics: aggregate every player on each freq.
+		var by_freq: Dictionary = {}
+		for row in _player_list_rows():
+			var f: int = int(row["freq"])
+			var agg: Dictionary = by_freq.get(f, {"points": 0, "kills": 0, "deaths": 0, "flags": 0})
+			agg["points"] = int(agg["points"]) + int(row["points"])
+			agg["kills"] = int(agg["kills"]) + int(row["kills"])
+			agg["deaths"] = int(agg["deaths"]) + int(row["deaths"])
+			agg["flags"] = int(agg["flags"]) + int(row["flags"])
+			by_freq[f] = agg
+		lines.append(["FREQ   POINTS   W    L   FLAGS", 1])
+		var freqs: Array = by_freq.keys()
+		freqs.sort()
+		for f2 in freqs:
+			var a2: Dictionary = by_freq[f2]
+			lines.append(["%-6d %-8d %-4d %-4d %d" % [
+				int(f2), int(a2["points"]), int(a2["kills"]), int(a2["deaths"]), int(a2["flags"]),
+			], 1 if int(f2) == my_freq else 0])
+	else:
+		var rows: Array = _player_list_rows()
+		var last_freq: int = -99999
+		for row in rows:
+			var c: int = _player_list_name_color(row, my_freq)
+			# Mode 4 groups by team, so break the list with a freq header.
+			if _player_list_mode == 4 and int(row["freq"]) != last_freq:
+				last_freq = int(row["freq"])
+				lines.append(["Freq %d" % last_freq, 4])
+			match _player_list_mode:
+				1:
+					lines.append([row["name"], c])
+				5:
+					lines.append(["%-14s %-4d %-4d %.2f" % [
+						String(row["name"]).left(14), int(row["kills"]), int(row["deaths"]),
+						float(row["kills"]) / maxf(1.0, float(row["deaths"])),
+					], c])
+				_:
+					lines.append(["%-14s %6d" % [String(row["name"]).left(14), int(row["points"])], c])
+		if _player_list_mode == 5:
+			lines.insert(0, ["NAME               W    L  RATIO", 1])
+
+	var bg_w: float = 300.0
+	draw_rect(Rect2(x - 4.0, y - 4.0, bg_w, float(lines.size()) * 16.0 + 8.0), Color(0, 0, 0, 0.6))
+	for entry in lines:
+		SpriteFontLabelScript.draw_text(self, Vector2(x, y), String(entry[0]), SpriteFontLabelScript.FontSize.SMALL, int(entry[1]), 0)
 		y += 16.0
 
 
@@ -2127,6 +2286,42 @@ func _consume_local_effect_events() -> void:
 			&"thor":
 				_active_thor_bursts.append({"pos": pos, "start_tick": int(world.tick)})
 				_play_sfx("thor")
+			&"emp":
+				_active_emp_bursts.append({"pos": pos, "start_tick": int(world.tick)})
+				_play_sfx("ebombex")
+			&"burst":
+				_play_sfx("burst")
+			&"portal":
+				_play_sfx("warppnt")
+			&"decoy":
+				_play_sfx("decoy")
+			&"rocket":
+				_play_sfx("rocket1")
+	_play_ability_toggle_sfx()
+
+
+func _play_ability_toggle_sfx() -> void:
+	# Toggles are edge-detected in the sim, so the client compares the predicted local
+	# ship against last frame to know when to play the on/off wav. Client-only.
+	if world == null or not world.ships.has(local_ship_id):
+		return
+	var ls: DriftTypes.DriftShipState = world.ships[local_ship_id]
+	var now: Dictionary = {
+		"stealth": bool(ls.stealth_on),
+		"cloak": bool(ls.cloak_on),
+		"xradar": bool(ls.xradar_on),
+		"antiwarp": bool(ls.antiwarp_on),
+	}
+	for key in now:
+		if bool(now[key]) == bool(_prev_ability_sfx_state.get(key, false)):
+			continue
+		_play_sfx(String(key) if bool(now[key]) else "off")
+	_prev_ability_sfx_state = now
+	# Multifire has its own pair of wavs rather than the shared "off".
+	var mf: bool = bool(ls.multi_fire_enabled)
+	if mf != _prev_multifire_sfx_state:
+		_play_sfx("multion" if mf else "multioff")
+		_prev_multifire_sfx_state = mf
 
 
 const REPEL_RING_DURATION_TICKS: int = 24 # 0.4s at 60Hz
@@ -2243,7 +2438,74 @@ func _draw_thor_bursts() -> void:
 		i += 1
 
 
-func _draw_shield_at(pos: Vector2, alpha: float) -> void:
+func _spawn_ship_debris(pos: Vector2, vel: Vector2, ship_type: int, seed_id: int, start_tick: int) -> void:
+	## Client-only wreckage from the original junk<ship>.png sheets. Purely cosmetic, so
+	## it is seeded off the ship id and death tick rather than the sim RNG.
+	var tex: Texture2D = JUNK_TEX_BY_SHIP[clampi(ship_type, 0, 7)]
+	if tex == null:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = (int(seed_id) << 20) ^ int(start_tick)
+	for i in range(JUNK_PIECES_PER_DEATH):
+		var angle: float = rng.randf() * TAU
+		_active_debris.append({
+			"tex": tex,
+			"pos": pos,
+			"vel": vel * 0.35 + Vector2(cos(angle), sin(angle)) * rng.randf_range(40.0, 140.0),
+			"row": rng.randi_range(0, JUNK_ROWS - 1),
+			"start_tick": start_tick,
+		})
+
+
+func _draw_ship_debris() -> void:
+	var cur_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	var total_ticks: int = JUNK_COLS * JUNK_TICKS_PER_FRAME
+	var i: int = 0
+	while i < _active_debris.size():
+		var d: Dictionary = _active_debris[i]
+		var elapsed: int = cur_tick - int(d.get("start_tick", cur_tick))
+		if elapsed < 0 or elapsed >= total_ticks:
+			_active_debris.remove_at(i)
+			continue
+		var fp: float = float(JUNK_FRAME_PX)
+		var col: int = mini(elapsed / JUNK_TICKS_PER_FRAME, JUNK_COLS - 1)
+		var src := Rect2(float(col) * fp, float(int(d.get("row", 0))) * fp, fp, fp)
+		var pos: Vector2 = Vector2(d.get("pos", Vector2.ZERO)) + Vector2(d.get("vel", Vector2.ZERO)) * (float(elapsed) * DriftConstants.TICK_DT)
+		var fade: float = 1.0 - float(elapsed) / float(total_ticks)
+		var sz: float = fp * 1.5
+		draw_texture_rect_region(d["tex"], Rect2(pos - Vector2(sz, sz) * 0.5, Vector2(sz, sz)), src, Color(1, 1, 1, fade))
+		i += 1
+
+
+func _draw_emp_bursts() -> void:
+	# EMP blast from a Weasel bomb: the gameplay effect is engine shutdown, this is its tell.
+	var cur_tick: int = int(world.tick) if world != null else 0
+	var total_ticks: int = EMPBURST_FRAME_COUNT * EMPBURST_TICKS_PER_FRAME
+	var i: int = 0
+	while i < _active_emp_bursts.size():
+		var eb: Dictionary = _active_emp_bursts[i]
+		var elapsed: int = cur_tick - int(eb.get("start_tick", cur_tick))
+		if elapsed >= total_ticks or EMPBURST_TEX == null:
+			_active_emp_bursts.remove_at(i)
+			continue
+		var pos: Vector2 = eb.get("pos", Vector2.ZERO)
+		var frame: int = mini(elapsed / EMPBURST_TICKS_PER_FRAME, EMPBURST_FRAME_COUNT - 1)
+		var fp: float = float(EMPBURST_FRAME_PX)
+		var src := Rect2(float(frame % EMPBURST_COLS) * fp, float(frame / EMPBURST_COLS) * fp, fp, fp)
+		var dst := Rect2(pos - Vector2(fp, fp) * 0.5, Vector2(fp, fp))
+		draw_texture_rect_region(EMPBURST_TEX, dst, src)
+		i += 1
+
+
+func _draw_shield_at(pos: Vector2, alpha: float, super_shields: bool = false) -> void:
+	if super_shields and SSSHIELD_TEX != null:
+		var t_ss: float = float(Time.get_ticks_msec()) / 1000.0
+		var frame_ss: int = int(floor(t_ss * SHIELD_ANIM_FPS)) % SHIELD_FRAME_COUNT
+		var fp_ss: float = float(SHIELD_FRAME_PX)
+		var src_ss := Rect2(float(frame_ss) * fp_ss, 0.0, fp_ss, fp_ss)
+		var sz_ss: float = fp_ss * 3.0
+		draw_texture_rect_region(SSSHIELD_TEX, Rect2(pos - Vector2(sz_ss, sz_ss) * 0.5, Vector2(sz_ss, sz_ss)), src_ss, Color(1, 1, 1, alpha))
+		return
 	if SHIELD_TEX != null:
 		var t_s: float = float(Time.get_ticks_msec()) / 1000.0
 		var frame: int = int(floor(t_s * SHIELD_ANIM_FPS)) % SHIELD_FRAME_COUNT
@@ -2262,13 +2524,26 @@ func _draw_shield_bubbles(snap: DriftTypes.DriftWorldSnapshot) -> void:
 		var ls: DriftTypes.DriftShipState = world.ships[local_ship_id]
 		if int(ls.shields_until_tick) > cur_tick:
 			var t: float = clampf(float(int(ls.shields_until_tick) - cur_tick) / 60.0, 0.0, 1.0)
-			_draw_shield_at(ls.position, t)
+			_draw_shield_at(ls.position, t, bool(ls.super_shields))
 	for s in snap.ships.values():
 		if s == null or int(s.id) == local_ship_id:
 			continue
 		if int(s.shields_until_tick) > cur_tick:
 			var t: float = clampf(float(int(s.shields_until_tick) - cur_tick) / 60.0, 0.0, 1.0)
-			_draw_shield_at(s.position, t)
+			_draw_shield_at(s.position, t, bool(s.super_shields))
+
+
+func _remote_ship_cloaked_from_me(snap_state, my_freq: int) -> bool:
+	## Screen Items.pdf: cloak makes a ship invisible in the world view (its radar blip
+	## still shows -- that is stealth's job), and XRadar counters it. Teammates always
+	## see each other, so only enemies are hidden.
+	if snap_state == null or not bool(snap_state.cloak_on):
+		return false
+	if int(snap_state.freq) == my_freq:
+		return false
+	if world != null and world.ships.has(local_ship_id) and bool(world.ships[local_ship_id].xradar_on):
+		return false
+	return true
 
 
 func _local_ship_see_mines() -> bool:
@@ -2545,12 +2820,22 @@ func _draw_ship_triangle(ship_state: DriftTypes.DriftShipState) -> void:
 		return
 
 	var dst := Rect2(ship_state.position - src.size * 0.5, src.size)
-	draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, 1))
-	# Rocket boost glow.
+	# Your own cloaked ship stays faintly visible so the ability reads as active; enemies
+	# see nothing at all (see _remote_ship_cloaked_from_me).
+	var ship_alpha: float = 0.35 if bool(ship_state.cloak_on) else 1.0
+	draw_texture_rect_region(tex, dst, src, Color(1, 1, 1, ship_alpha))
+	# Rocket boost: original rocket.png exhaust plume trailing the ship.
 	var cur_t: int = int(world.tick) if world != null else 0
 	if int(ship_state.rocket_boost_until_tick) > cur_t:
 		var remain: float = clampf(float(int(ship_state.rocket_boost_until_tick) - cur_t) / 30.0, 0.0, 1.0)
-		draw_arc(ship_state.position, src.size.x * 0.65, 0.0, TAU, 24, Color(1.0, 0.5, 0.1, 0.55 * remain), 3.0)
+		if ROCKET_TEX != null:
+			var frame: int = int(floor(float(Time.get_ticks_msec()) / 1000.0 * ROCKET_ANIM_FPS)) % ROCKET_COLS
+			var rsrc := Rect2(float(frame * ROCKET_FRAME_W), 0.0, float(ROCKET_FRAME_W), float(ROCKET_FRAME_H))
+			var back: Vector2 = ship_state.position - Vector2(cos(ship_state.rotation), sin(ship_state.rotation)) * (src.size.x * 0.6)
+			var rsz := Vector2(float(ROCKET_FRAME_W), float(ROCKET_FRAME_H))
+			draw_texture_rect_region(ROCKET_TEX, Rect2(back - rsz * 0.5, rsz), rsrc, Color(1, 1, 1, remain))
+		else:
+			draw_arc(ship_state.position, src.size.x * 0.65, 0.0, TAU, 24, Color(1.0, 0.5, 0.1, 0.55 * remain), 3.0)
 
 
 func _draw_authoritative_ghost_ship() -> void:
@@ -2574,17 +2859,29 @@ func _draw_authoritative_ghost_ship() -> void:
 	draw_polyline(world_points, Color(0.9, 0.9, 0.9, 1.0), 2.0)
 
 
-func _draw_crown(label_pos: Vector2, label: String) -> void:
+func _crown_seconds_for(state) -> float:
+	## Seconds left on a King of the Hill crown, or -1 when this is not a KOTH arena
+	## (the crown marker then just means "highest bounty").
+	if state == null or not ("crown_on" in state) or not bool(state.crown_on):
+		return -1.0
+	return float(maxi(0, int(state.crown_ticks_left))) * DriftConstants.TICK_DT
+
+
+func _draw_crown(label_pos: Vector2, label: String, crown_seconds: float = -1.0) -> void:
 	var t_s: float = float(Time.get_ticks_msec()) / 1000.0
 	var frame: int = int(floor(t_s * KING_ANIM_FPS)) % KING_FRAME_COUNT
 	var label_px_w: int = label.length() * SpriteFontLabelScript.SMALL_CELL_W
 	# Place crown sprite just to the right of the label, vertically centered on it.
 	var crown_draw_sz: float = float(KING_FRAME_PX)
 	var crown_pos := label_pos + Vector2(float(label_px_w) + 2.0, 0.0)
-	if KING_TEX != null:
+	# Swap to the expiring-crown sheet once the KOTH clock is nearly out.
+	var tex: Texture2D = KING_TEX
+	if crown_seconds >= 0.0 and crown_seconds <= KING_EXPIRING_SECONDS and KINGEX_TEX != null:
+		tex = KINGEX_TEX
+	if tex != null:
 		var src := Rect2(float(frame) * float(KING_FRAME_PX), 0.0, float(KING_FRAME_PX), float(KING_FRAME_PX))
 		var dst := Rect2(crown_pos, Vector2(crown_draw_sz, crown_draw_sz))
-		draw_texture_rect_region(KING_TEX, dst, src, Color.WHITE)
+		draw_texture_rect_region(tex, dst, src, Color.WHITE)
 	else:
 		var crown_color := Color(1.0, 0.9, 0.2, 1.0)
 		var cp := crown_pos + Vector2(8.0, 8.0)
@@ -2719,11 +3016,11 @@ func _input(event: InputEvent) -> void:
 					get_viewport().set_input_as_handled()
 					return
 
-	# Scoreboard toggle: F9
+	# Player stat box: F2 cycles through the modes, including off (controls.txt).
 	if not show_connect_ui and is_connected and event is InputEventKey:
 		var kev3: InputEventKey = event
-		if kev3.pressed and not kev3.echo and int(kev3.physical_keycode) == KEY_F9:
-			_scoreboard_visible = not _scoreboard_visible
+		if kev3.pressed and not kev3.echo and int(kev3.physical_keycode) == KEY_F2:
+			_player_list_mode = (_player_list_mode + 1) % PLAYER_LIST_MODE_COUNT
 			queue_redraw()
 			get_viewport().set_input_as_handled()
 			return
@@ -2739,6 +3036,20 @@ func _input(event: InputEvent) -> void:
 		# While the menu is open, do not handle any other global UI hotkeys here.
 		# The menu itself enforces click-away and "unbound input dismiss" in _unhandled_input.
 		if menu_open:
+			return
+
+	# F11 toggles spectator mode, F12 cycles ship type (controls.txt).
+	if is_connected and event is InputEventKey and event.pressed and not event.echo:
+		var fkey: int = int(event.physical_keycode) if int(event.physical_keycode) != 0 else int(event.keycode)
+		if fkey == KEY_F11:
+			_send_ship_change_request(255 if not _is_spectating else _last_played_ship_type)
+			get_viewport().set_input_as_handled()
+			return
+		if fkey == KEY_F12 and not _is_spectating:
+			# "Cycles through ship types in the game. Will loose powerups." -- the server
+			# resets upgrades on ship change, so nothing extra to do here.
+			_send_ship_change_request((_last_played_ship_type + 1) % 8)
+			get_viewport().set_input_as_handled()
 			return
 
 	# Spectator: Tab cycles through ships.
@@ -3275,6 +3586,11 @@ func _poll_network_packets() -> void:
 					_is_spectating = true
 					print("[NET] spectate confirmed")
 				else:
+					# Leaving spectate has to clear the flag, otherwise the camera stays
+					# locked to the spectate target and Tab keeps cycling.
+					_is_spectating = false
+					_spectator_target_id = -1
+					_last_played_ship_type = clampi(st, 0, 7)
 					print("[NET] ship change ok type=", st)
 			else:
 				print("[NET] ship change rejected type=", st, " reason=", int(scr.get("reason", 0)))
@@ -3463,6 +3779,11 @@ func _poll_network_packets() -> void:
 			if not ke.is_empty():
 				var a_name: String = String(ke.get("attacker_name", "???"))
 				var v_name: String = String(ke.get("victim_name", "???"))
+				# Remember who I killed / who killed me, for the %killed and %killer macros.
+				if int(ke.get("victim_id", -1)) == int(local_ship_id):
+					_last_killer_name = a_name
+				elif int(ke.get("attacker_id", -1)) == int(local_ship_id):
+					_last_killed_name = v_name
 				var wt: int = int(ke.get("weapon_type", 0))
 				var weapon_label: String = "killed"
 				if wt == 1:
@@ -3483,6 +3804,8 @@ func _poll_network_packets() -> void:
 			var cm: Dictionary = DriftNet.unpack_chat_broadcast(bytes)
 			if not cm.is_empty():
 				var sender: String = String(cm.get("sender_name", ""))
+				if _ignored_names.has(sender.to_lower()):
+					continue
 				var ctype: int = int(cm.get("chat_type", 0))
 				var txt: String = String(cm.get("text", ""))
 				var prefix: String = ""
@@ -3493,6 +3816,8 @@ func _poll_network_packets() -> void:
 				elif ctype == DriftNet.CHAT_TYPE_PRIVATE:
 					prefix = "[PM] "
 					color_idx = 5  # purple
+					# Highlights this player in the F2 list for the next 2 minutes.
+					_recent_pm_tick_by_name[sender.to_lower()] = int(latest_snapshot.tick) if latest_snapshot != null else 0
 				elif ctype == DriftNet.CHAT_TYPE_ARENA:
 					prefix = "[ARENA] "
 					color_idx = 4  # orange
@@ -3508,12 +3833,17 @@ func _poll_network_packets() -> void:
 			if not se.is_empty():
 				_team_scores[0] = int(se.get("team1_score", 0))
 				_team_scores[1] = int(se.get("team2_score", 0))
+				var was_over: bool = _match_over
 				_match_over = bool(se.get("match_over", false))
 				_match_winner = int(se.get("winner_team", 0))
 				var scorer: int = int(se.get("scoring_team", 0))
 				if bool(se.get("match_reset", false)):
 					_match_over = false
 					_match_winner = 0
+				elif _match_over and not was_over:
+					# Original VictoryMusic: the long cue for your team, the short one otherwise.
+					var my_team: int = _local_team_index()
+					_play_sfx("victoryl" if (my_team > 0 and _match_winner == my_team) else "victory")
 				if scorer > 0:
 					_play_sfx("goal")
 					var score_line: String = "Team %d scores! (%d-%d)" % [scorer, _team_scores[0], _team_scores[1]]
@@ -3588,7 +3918,7 @@ func _send_chat_message() -> void:
 	var text: String = _chat_input_text.strip_edges()
 	var chat_type: int = DriftNet.CHAT_TYPE_PUBLIC
 	var target_name: String = ""
-	# Chat command parsing.
+	# Channel prefixes first; everything after them is command/macro territory.
 	if text.begins_with("/team ") or text.begins_with("/t "):
 		chat_type = DriftNet.CHAT_TYPE_TEAM
 		text = text.substr(text.find(" ") + 1).strip_edges()
@@ -3599,6 +3929,7 @@ func _send_chat_message() -> void:
 		if space_idx > 0:
 			target_name = rest.left(space_idx)
 			text = rest.substr(space_idx + 1).strip_edges()
+			_recent_pm_tick_by_name[target_name.to_lower()] = int(latest_snapshot.tick) if latest_snapshot != null else 0
 		else:
 			return  # No message body after target name.
 	elif text.begins_with("/arena "):
@@ -3606,11 +3937,169 @@ func _send_chat_message() -> void:
 		text = text.substr(text.find(" ") + 1).strip_edges()
 	if text.is_empty():
 		return
+
+	# SubSpace-style ? commands, = frequency change and % macros.
+	var cmd: Dictionary = DriftChatCommands.parse(text, _build_chat_context())
+	match String(cmd.get("kind", DriftChatCommands.KIND_SEND)):
+		DriftChatCommands.KIND_NONE:
+			return
+		DriftChatCommands.KIND_FREQ:
+			request_set_freq(int(cmd.get("freq", 0)))
+			return
+		DriftChatCommands.KIND_LOCAL:
+			_apply_local_chat_command(cmd)
+			return
+		_:
+			text = String(cmd.get("text", text))
+	if text.is_empty():
+		return
+
 	var packet: PackedByteArray = DriftNet.pack_chat_message(local_ship_id, chat_type, text, target_name)
 	enet_peer.set_transfer_channel(NET_CHANNEL)
 	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
 	enet_peer.set_target_peer(1)
 	enet_peer.put_packet(packet)
+
+
+func _push_local_chat_line(text: String, color_idx: int = 2) -> void:
+	# Client-side only: command output never leaves this machine.
+	var now_tick: int = int(latest_snapshot.tick) if latest_snapshot != null else 0
+	_chat_messages.append({
+		"text": text,
+		"color": color_idx,
+		"expire_tick": now_tick + CHAT_DISPLAY_DURATION_TICKS,
+	})
+	if _chat_messages.size() > CHAT_MAX_DISPLAY * 2:
+		_chat_messages = _chat_messages.slice(_chat_messages.size() - CHAT_MAX_DISPLAY)
+
+
+func _apply_local_chat_command(cmd: Dictionary) -> void:
+	match String(cmd.get("effect", DriftChatCommands.EFFECT_NONE)):
+		DriftChatCommands.EFFECT_KILL_FEED:
+			_kill_feed_enabled = not _kill_feed_enabled
+			_push_local_chat_line("Kill messages: %s" % ("on" if _kill_feed_enabled else "off"))
+		DriftChatCommands.EFFECT_CHAT_LINES:
+			_chat_visible_lines = clampi(int(cmd.get("value", CHAT_MAX_DISPLAY)), 1, CHAT_MAX_DISPLAY * 2)
+		DriftChatCommands.EFFECT_IGNORE:
+			var who: String = String(cmd.get("value", "")).to_lower()
+			if who.is_empty():
+				return
+			if _ignored_names.has(who):
+				_ignored_names.erase(who)
+				_push_local_chat_line("No longer ignoring %s" % who)
+			else:
+				_ignored_names[who] = true
+				_push_local_chat_line("Ignoring %s" % who)
+	for line_any in cmd.get("lines", []):
+		_push_local_chat_line(String(line_any))
+
+
+func _build_chat_context() -> Dictionary:
+	# Snapshot of everything the ? commands and % macros can report on. Values come from the
+	# predicted local ship where the player expects immediacy, and from the authoritative
+	# snapshot where other players are involved.
+	var ctx: Dictionary = {
+		"name": player_username,
+		"ping_ms": 0,
+		"loss_pct": 0.0,
+		"killer": _last_killer_name if _last_killer_name != "" else "nobody",
+		"killed": _last_killed_name if _last_killed_name != "" else "nobody",
+		"red_name": "none",
+	}
+
+	if enet_peer != null and is_connected:
+		var peer: ENetPacketPeer = enet_peer.get_peer(1)
+		if peer != null:
+			ctx["ping_ms"] = int(peer.get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME))
+			# ENet scales packet loss by 65536.
+			ctx["loss_pct"] = float(peer.get_statistic(ENetPacketPeer.PEER_PACKET_LOSS)) * 100.0 / 65536.0
+
+	var ls: DriftTypes.DriftShipState = world.ships.get(local_ship_id) if (world != null and world.ships.has(local_ship_id)) else null
+	if ls == null:
+		return ctx
+
+	var arena_min: Vector2 = DriftConstants.ARENA_MIN
+	var arena_max: Vector2 = DriftConstants.ARENA_MAX
+	var span: Vector2 = arena_max - arena_min
+	var norm := Vector2(
+		clampf((ls.position.x - arena_min.x) / span.x, 0.0, 0.999999) if span.x > 0.0 else 0.0,
+		clampf((ls.position.y - arena_min.y) / span.y, 0.0, 0.999999) if span.y > 0.0 else 0.0
+	)
+	var now_tick: int = int(world.tick)
+	ctx["coord"] = DriftCoordFormat.sector_label(ls.position, arena_min, arena_max)
+	ctx["area"] = DriftChatCommands.area_label(norm)
+	ctx["freq"] = int(ls.freq)
+	ctx["bounty"] = int(ls.bounty)
+	ctx["energy"] = int(ls.energy_current)
+	ctx["shield_s"] = float(maxi(0, int(ls.shields_until_tick) - now_tick)) * DriftConstants.TICK_DT
+	ctx["super_s"] = float(maxi(0, int(ls.shields_until_tick) - now_tick)) * DriftConstants.TICK_DT if bool(ls.super_shields) else 0.0
+	# Upgrade counters are capped at 16; report them as a percentage of that maximum.
+	ctx["status"] = {
+		"recharge": int(round(float(ls.recharge_bonus) * 100.0 / 16.0)),
+		"thruster": int(round(float(ls.thruster_bonus) * 100.0 / 16.0)),
+		"speed": int(round(float(ls.top_speed_bonus) * 100.0 / 16.0)),
+		"rotation": int(round(float(ls.rotation_bonus) * 100.0 / 16.0)),
+		"shrapnel": int(ls.shrapnel_bonus),
+	}
+
+	# Flag carriers and teammates come from the authoritative snapshot.
+	var names_by_id: Dictionary = {}
+	if latest_snapshot != null:
+		for sid in latest_snapshot.ships:
+			var s = latest_snapshot.ships[sid]
+			if s != null:
+				names_by_id[int(sid)] = String(s.username) if String(s.username) != "" else ("Ship%d" % int(sid))
+
+	var my_flags: int = 0
+	var holders: Array[String] = []
+	var nearest_red_dist: float = INF
+	for fl in authoritative_flags:
+		if fl == null or int(fl.carrier_ship_id) < 0:
+			continue
+		var cid: int = int(fl.carrier_ship_id)
+		if cid == int(local_ship_id):
+			my_flags += 1
+		var holder_name: String = String(names_by_id.get(cid, "Ship%d" % cid))
+		if not holders.has(holder_name):
+			holders.append(holder_name)
+		# %red* refer to the closest *enemy* flag carrier.
+		if latest_snapshot != null and latest_snapshot.ships.has(cid) and cid != int(local_ship_id):
+			var carrier = latest_snapshot.ships[cid]
+			if carrier != null and int(carrier.freq) != int(ls.freq):
+				var d: float = ls.position.distance_to(carrier.position)
+				if d < nearest_red_dist:
+					nearest_red_dist = d
+					ctx["red_name"] = holder_name
+					ctx["red_bounty"] = int(carrier.bounty)
+					ctx["red_flags"] = _flags_carried_by(cid)
+	ctx["flags"] = my_flags
+	ctx["flag_holders"] = holders
+
+	var mates: Array[String] = []
+	if latest_snapshot != null:
+		for sid2 in latest_snapshot.ships:
+			if int(sid2) == int(local_ship_id):
+				continue
+			var s2 = latest_snapshot.ships[sid2]
+			if s2 != null and int(s2.freq) == int(ls.freq):
+				mates.append("%s (%d)" % [String(names_by_id.get(int(sid2), "?")), _flags_carried_by(int(sid2))])
+	ctx["team"] = mates
+	return ctx
+
+
+func _local_team_index() -> int:
+	# Score events index teams by freq (see server_main: cteam = carrier.freq).
+	if world == null or not world.ships.has(local_ship_id):
+		return 0
+	return int(world.ships[local_ship_id].freq)
+
+
+func _flags_carried_by(ship_id: int) -> int:
+	var n: int = 0
+	for fl in authoritative_flags:
+		if fl != null and int(fl.carrier_ship_id) == int(ship_id):
+			n += 1
+	return n
 
 
 func _update_connection_state() -> void:
@@ -3830,6 +4319,17 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 			&"thor":
 				_active_thor_bursts.append({"pos": ee_pos, "start_tick": snap_tick})
 				_play_sfx("thor")
+			&"emp":
+				_active_emp_bursts.append({"pos": ee_pos, "start_tick": snap_tick})
+				_play_sfx("ebombex")
+			&"burst":
+				_play_sfx("burst")
+			&"portal":
+				_play_sfx("warppnt")
+			&"decoy":
+				_play_sfx("decoy")
+			&"rocket":
+				_play_sfx("rocket1")
 
 	# Apply authoritative brick tiles to TileMapSolid.
 	_apply_brick_tiles(snap_dict.get("bricks", []))
@@ -3841,6 +4341,7 @@ func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 		var is_dead: bool = int(ship_state.dead_until_tick) > 0 and int(snap_tick) < int(ship_state.dead_until_tick)
 		if was_alive and is_dead:
 			_active_explosions.append({"pos": ship_state.position, "start_tick": snap_tick, "tier": 2})
+			_spawn_ship_debris(ship_state.position, ship_state.velocity, int(ship_state.ship_type), sid, snap_tick)
 		_prev_alive_by_ship[sid] = not is_dead
 
 	# Track remote ships
@@ -3962,6 +4463,15 @@ func _reconcile_to_authoritative_snapshot(snapshot_tick: int, auth_state: DriftT
 	local_state.gun_level = int(auth_state.gun_level)
 	local_state.bomb_level = int(auth_state.bomb_level)
 	local_state.multi_fire_enabled = bool(auth_state.multi_fire_enabled)
+	# Capability flags gate what prediction is allowed to toggle, so they have to come
+	# back from the server too or the predicted ship drifts from the authoritative one.
+	local_state.multi_fire_capable = bool(auth_state.multi_fire_capable)
+	local_state.has_stealth = bool(auth_state.has_stealth)
+	local_state.has_cloak = bool(auth_state.has_cloak)
+	local_state.has_xradar = bool(auth_state.has_xradar)
+	local_state.has_antiwarp = bool(auth_state.has_antiwarp)
+	local_state.crown_on = bool(auth_state.crown_on)
+	local_state.crown_ticks_left = int(auth_state.crown_ticks_left)
 	local_state.bullet_bounce_bonus = int(auth_state.bullet_bounce_bonus)
 	local_state.shrapnel_bonus = int(auth_state.shrapnel_bonus)
 	local_state.rotation_bonus = int(auth_state.rotation_bonus)

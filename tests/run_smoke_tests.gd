@@ -124,6 +124,17 @@ func _initialize() -> void:
 	_test_portal_beacon_roundtrip()
 	_test_wormhole_pull_and_teleport()
 	_test_two_worlds_do_not_share_arena()
+	_test_multifire_toggle_requires_capability()
+	_test_multifire_input_roundtrip()
+	_test_chat_commands()
+	_test_chat_macros()
+	_test_special_negative_prizes()
+	_test_music_library_loads()
+	_test_map_editor_undo_and_tools()
+	_test_ship_starting_loadouts()
+	_test_ability_ownership_and_item_caps()
+	_test_king_of_the_hill()
+	_test_ball_gated_on_goal_entities()
 	print("[SMOKE] Done: ", _ran, " checks, ", _failures, " failures")
 	quit(0 if _failures == 0 else 1)
 
@@ -1866,7 +1877,10 @@ func _test_determinism_checksum_fixed_input() -> void:
 	# Update only when you intentionally change sim semantics.
 	# Re-baselined 2026-08-01: the classic weapon/damage rework and the move of
 	# arena bounds off DriftConstants statics both change sim state legitimately.
-	const EXPECTED := "182a8192221041c4b1ecd9d5ac31d63153607e33e6d3685a2ac68faed17ce5c9"
+	# Re-baselined again same day: the powerball is now gated on the map having goal
+	# entities (DriftWorld.ball_enabled, off by default), so this fixture's ball no
+	# longer moves or gets picked up. Intended behaviour change, not lost determinism.
+	const EXPECTED := "9921ce881dd75ec9bb38f6d9bde39b77a04bb63381313fb8da11af0e61dce54b"
 	if got != EXPECTED:
 		_fail("determinism_checksum (got %s expected %s)" % [got, EXPECTED])
 		return
@@ -4977,6 +4991,587 @@ func _test_two_worlds_do_not_share_arena() -> void:
 			_fail("two_worlds_arena (expected 1 bullet, got %d)" % w.bullets.size())
 			return
 	_pass("two_worlds_do_not_share_arena")
+
+
+func _multifire_cmd(pressed: bool) -> DriftTypes.DriftInputCmd:
+	var c := DriftTypes.DriftInputCmd.new()
+	c.multifire_btn = pressed
+	return c
+
+
+func _test_multifire_toggle_requires_capability() -> void:
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+
+	# Without the MultiFire prize the key must not conjure the upgrade.
+	world.step_tick({1: _multifire_cmd(true)}, false, 0)
+	if bool(s1.multi_fire_enabled):
+		_fail("multifire_toggle (enabled without the MultiFire upgrade)")
+		return
+
+	# Prize grants the capability and switches it on.
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.MultiFire, false, 0)
+	if not (bool(s1.multi_fire_capable) and bool(s1.multi_fire_enabled)):
+		_fail("multifire_toggle (prize should grant capability and enable)")
+		return
+
+	# Press → off, release → no change, press again → on. Edge-detected, not level-triggered.
+	world.step_tick({1: _multifire_cmd(false)}, false, 0)
+	world.step_tick({1: _multifire_cmd(true)}, false, 0)
+	if bool(s1.multi_fire_enabled):
+		_fail("multifire_toggle (press should switch off)")
+		return
+	world.step_tick({1: _multifire_cmd(true)}, false, 0)
+	if bool(s1.multi_fire_enabled):
+		_fail("multifire_toggle (held key must not re-toggle)")
+		return
+	world.step_tick({1: _multifire_cmd(false)}, false, 0)
+	world.step_tick({1: _multifire_cmd(true)}, false, 0)
+	if not bool(s1.multi_fire_enabled):
+		_fail("multifire_toggle (second press should switch back on)")
+		return
+
+	# Negative prize revokes the capability entirely.
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.MultiFire, true, 0)
+	if bool(s1.multi_fire_capable) or bool(s1.multi_fire_enabled):
+		_fail("multifire_toggle (negative prize should revoke capability)")
+		return
+	_pass("multifire_toggle_requires_capability")
+
+
+func _test_multifire_input_roundtrip() -> void:
+	# The toggle bit must survive pack → unpack, and multi_fire_capable must survive a snapshot.
+	_ran += 1
+	var cmd := DriftTypes.DriftInputCmd.new()
+	cmd.multifire_btn = true
+	var d: Dictionary = DriftNet.unpack_input_packet(DriftNet.pack_input_packet(7, 3, cmd))
+	if not bool(d.get("multifire_btn", false)):
+		_fail("multifire_input_roundtrip (bit lost in input packet)")
+		return
+
+	var s := DriftTypes.DriftShipState.new(1, Vector2(10, 20))
+	s.multi_fire_capable = true
+	s.multi_fire_enabled = false
+	var snap: Dictionary = DriftNet.unpack_snapshot_packet(DriftNet.pack_snapshot_packet(1, [s]))
+	if snap.is_empty():
+		_fail("multifire_input_roundtrip (snapshot did not unpack)")
+		return
+	var out_ships: Array = snap.get("ships", [])
+	if out_ships.size() != 1:
+		_fail("multifire_input_roundtrip (expected 1 ship)")
+		return
+	var back: DriftTypes.DriftShipState = out_ships[0]
+	if not bool(back.multi_fire_capable) or bool(back.multi_fire_enabled):
+		_fail("multifire_input_roundtrip (capability/enabled flags lost in snapshot)")
+		return
+	_pass("multifire_input_roundtrip")
+
+
+func _test_chat_commands() -> void:
+	_ran += 1
+	var ctx: Dictionary = {
+		"ping_ms": 42,
+		"loss_pct": 1.25,
+		"status": {"recharge": 50, "thruster": 25, "speed": 0, "rotation": 75, "shrapnel": 3},
+		"flag_holders": [],
+		"team": ["Bob (1)", "Eve (0)"],
+	}
+
+	# =NNNN is a frequency request, not chat.
+	var freq: Dictionary = DriftChatCommands.parse("=555", ctx)
+	if String(freq.get("kind")) != DriftChatCommands.KIND_FREQ or int(freq.get("freq")) != 555:
+		_fail("chat_commands (=555 should request freq 555)")
+		return
+	if String(DriftChatCommands.parse("=abc", ctx).get("kind")) != DriftChatCommands.KIND_LOCAL:
+		_fail("chat_commands (=abc should report usage locally)")
+		return
+
+	# Local commands never reach the network.
+	var ping: Dictionary = DriftChatCommands.parse("?ping", ctx)
+	if String(ping.get("kind")) != DriftChatCommands.KIND_LOCAL or not String(ping["lines"][0]).contains("42"):
+		_fail("chat_commands (?ping should report 42 ms locally)")
+		return
+	if not String(DriftChatCommands.parse("?status", ctx)["lines"][0]).contains("Rotation:75%"):
+		_fail("chat_commands (?status should report rotation 75%)")
+		return
+	if not String(DriftChatCommands.parse("?flags", ctx)["lines"][0]).contains("No flags"):
+		_fail("chat_commands (?flags should report the empty case)")
+		return
+	if not String(DriftChatCommands.parse("?team", ctx)["lines"][0]).contains("Bob (1)"):
+		_fail("chat_commands (?team should list teammates)")
+		return
+
+	# Effects are described, not applied, by the parser.
+	if String(DriftChatCommands.parse("?kill", ctx).get("effect")) != DriftChatCommands.EFFECT_KILL_FEED:
+		_fail("chat_commands (?kill should request the kill-feed effect)")
+		return
+	var lines_cmd: Dictionary = DriftChatCommands.parse("?lines=99", ctx)
+	if String(lines_cmd.get("effect")) != DriftChatCommands.EFFECT_CHAT_LINES or int(lines_cmd.get("value")) != DriftChatCommands.CHAT_LINES_MAX:
+		_fail("chat_commands (?lines=99 should clamp to the maximum)")
+		return
+	var ign: Dictionary = DriftChatCommands.parse("?ignore Bob", ctx)
+	if String(ign.get("effect")) != DriftChatCommands.EFFECT_IGNORE or String(ign.get("value")) != "Bob":
+		_fail("chat_commands (?ignore Bob should target Bob)")
+		return
+
+	# Unknown ? commands fall through to public chat, as in SubSpace.
+	var unknown: Dictionary = DriftChatCommands.parse("?wat is this", ctx)
+	if String(unknown.get("kind")) != DriftChatCommands.KIND_SEND or String(unknown.get("text")) != "?wat is this":
+		_fail("chat_commands (unknown ? command should be sent as chat)")
+		return
+	_pass("chat_commands")
+
+
+func _test_chat_macros() -> void:
+	_ran += 1
+	var ctx: Dictionary = {
+		"name": "Rodvik", "coord": "H11", "area": "upper left", "freq": 7,
+		"bounty": 15, "energy": 900, "flags": 2, "shield_s": 3.0, "super_s": 0.0,
+		"killer": "Marx", "killed": "Luxor",
+		"red_name": "Zed", "red_flags": 3, "red_bounty": 88,
+	}
+	var out: String = DriftChatCommands.expand_macros("I am %selfname at %coord (%area) on freq %freq", ctx)
+	if out != "I am Rodvik at H11 (upper left) on freq 7":
+		_fail("chat_macros (basic expansion got '%s')" % out)
+		return
+
+	# %redname must not be eaten by the shorter %red token.
+	if DriftChatCommands.expand_macros("%redname/%redflags/%redbounty", ctx) != "Zed/3/88":
+		_fail("chat_macros (longer red tokens must win over %red)")
+		return
+	if not DriftChatCommands.expand_macros("%red", ctx).contains("Zed (3 flags, 88 bty)"):
+		_fail("chat_macros (%red should summarise the carrier)")
+		return
+
+	# %% is the literal-percent escape and must not expand what follows it.
+	if DriftChatCommands.expand_macros("100%%coord done", ctx) != "100%coord done":
+		_fail("chat_macros (%% should escape, got '%s')" % DriftChatCommands.expand_macros("100%%coord done", ctx))
+		return
+	if DriftChatCommands.expand_macros("%killer beat %killed", ctx) != "Marx beat Luxor":
+		_fail("chat_macros (killer/killed expansion)")
+		return
+
+	# Nine-region %area labels.
+	if DriftChatCommands.area_label(Vector2(0.5, 0.5)) != "center":
+		_fail("chat_macros (area centre)")
+		return
+	if DriftChatCommands.area_label(Vector2(0.9, 0.1)) != "upper right":
+		_fail("chat_macros (area upper right)")
+		return
+	if DriftChatCommands.area_label(Vector2(0.5, 0.9)) != "lower":
+		_fail("chat_macros (area lower, got '%s')" % DriftChatCommands.area_label(Vector2(0.5, 0.9)))
+		return
+	_pass("chat_macros")
+
+
+func _test_special_negative_prizes() -> void:
+	# Screen Items.pdf's three special negatives: Engine Shutdown, Engine Shutdown
+	# Severe and Energy Depleted. Glue is the cfg name for the Engine Shutdown prize.
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, Vector2(500, 500))
+	var s1 = world.ships.get(1)
+	world.engine_shutdown_time_ticks = 420  # EngineShutdownTime=700 cs -> 7 s
+
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Glue, false, 0)
+	if int(s1.engine_shutdown_until_tick) != 420:
+		_fail("negative_prizes (Glue should shut the engine down for 420 ticks, got %d)" % int(s1.engine_shutdown_until_tick))
+		return
+
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.Glue, true, 0)
+	if int(s1.engine_shutdown_until_tick) != DriftWorld.ENGINE_SHUTDOWN_SEVERE_TICKS:
+		_fail("negative_prizes (severe Glue should last %d ticks, got %d)" % [
+			DriftWorld.ENGINE_SHUTDOWN_SEVERE_TICKS, int(s1.engine_shutdown_until_tick)])
+		return
+
+	# Energy Depleted takes all of it, not half.
+	s1.energy_current = int(s1.energy_max)
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.QuickCharge, true, 0)
+	if int(s1.energy_current) != 0:
+		_fail("negative_prizes (Energy Depleted should empty the bar, got %d)" % int(s1.energy_current))
+		return
+	world._apply_prize_effect(s1, DriftTypes.PrizeKind.QuickCharge, false, 0)
+	if int(s1.energy_current) != int(s1.energy_max):
+		_fail("negative_prizes (Full Charge should refill, got %d/%d)" % [int(s1.energy_current), int(s1.energy_max)])
+		return
+	_pass("special_negative_prizes")
+
+
+func _test_music_library_loads() -> void:
+	## Every file in the music folder must actually load as an AudioStream with real
+	## audio in it. A missing .import or a corrupt ogg fails silently at runtime -- the
+	## game just goes quiet -- so it gets pinned here instead.
+	_ran += 1
+	var Jukebox = load("res://client/audio/music_jukebox.gd")
+	var paths: PackedStringArray = Jukebox.scan_music_paths()
+	if paths.is_empty():
+		_fail("music_library (no tracks found in res://client/audio/music/)")
+		return
+
+	# The scan must agree with what is on disk, so a newly dropped-in track cannot be
+	# silently skipped because nobody ran --import.
+	var on_disk: Array[String] = []
+	var dir := DirAccess.open("res://client/audio/music/")
+	if dir != null:
+		dir.list_dir_begin()
+		var fn: String = dir.get_next()
+		while fn != "":
+			if not dir.current_is_dir() and (fn.ends_with(".ogg") or fn.ends_with(".wav") or fn.ends_with(".mp3")):
+				on_disk.append(fn)
+			fn = dir.get_next()
+		dir.list_dir_end()
+	if on_disk.size() > 0 and paths.size() != on_disk.size():
+		_fail("music_library (scan found %d tracks but %d audio files are on disk -- run --import)" % [paths.size(), on_disk.size()])
+		return
+
+	var bad: Array[String] = []
+	var silent: Array[String] = []
+	for p in paths:
+		var stream = load(p)
+		if not (stream is AudioStream):
+			bad.append(p.get_file())
+			continue
+		if float((stream as AudioStream).get_length()) <= 0.0:
+			silent.append(p.get_file())
+	if not bad.is_empty():
+		_fail("music_library (%d unplayable: %s)" % [bad.size(), ", ".join(bad)])
+		return
+	if not silent.is_empty():
+		_fail("music_library (%d zero-length: %s)" % [silent.size(), ", ".join(silent)])
+		return
+	# The jukebox must queue up every track it scanned. Playback itself needs a live
+	# scene tree, so this stops at playlist construction rather than calling play().
+	var jb: Node = Jukebox.new()
+	jb._build_playlist()
+	if jb._playlist.size() != paths.size():
+		_fail("music_library (jukebox queued %d of %d tracks)" % [jb._playlist.size(), paths.size()])
+		jb.free(); return
+	jb.free()
+
+	print("[SMOKE]   music: %d tracks playable" % paths.size())
+	_pass("music_library_loads")
+
+
+func _test_map_editor_undo_and_tools() -> void:
+	## Drives the editor's edit primitives directly. Covers the undo/redo stack and the
+	## line/flood-fill/eyedropper tools, which are the parts most likely to break silently.
+	_ran += 1
+	var packed = load("res://client/scenes/editor/MapEditor.tscn")
+	if packed == null:
+		_fail("map_editor (MapEditor.tscn failed to load)")
+		return
+	var ed = (packed as PackedScene).instantiate()
+	root.add_child(ed)
+	# _initialize() runs before the tree starts processing, so _ready() has not fired yet.
+	# Drive it once by hand; the null tileset meta is the reliable signal it is pending.
+	if ed._tileset_meta == null:
+		ed._ready()
+
+	var layer: String = String(ed._selected_dest_layer())
+	var a := Vector2i(10, 10)
+	var b := Vector2i(14, 10)
+
+	# A single place is one undo step and is exactly reversible.
+	var before: Vector2i = ed._cell_atlas(layer, a)
+	ed._place_tile_at(a)
+	if ed._cell_atlas(layer, a) != ed.selected_atlas_coords:
+		_fail("map_editor (place did not write the selected tile)")
+		ed.queue_free(); return
+	if ed._undo_stack.size() != 1:
+		_fail("map_editor (place should push exactly one undo op, got %d)" % ed._undo_stack.size())
+		ed.queue_free(); return
+	ed._undo()
+	if ed._cell_atlas(layer, a) != before:
+		_fail("map_editor (undo did not restore the previous tile)")
+		ed.queue_free(); return
+	ed._redo()
+	if ed._cell_atlas(layer, a) != ed.selected_atlas_coords:
+		_fail("map_editor (redo did not reapply the tile)")
+		ed.queue_free(); return
+
+	# A rect fill is also one undo step, however many cells it touched.
+	var ops_before: int = ed._undo_stack.size()
+	ed._fill_rect(Vector2i(20, 20), Vector2i(24, 24), false)
+	if ed._undo_stack.size() != ops_before + 1:
+		_fail("map_editor (rect fill should be a single undo op)")
+		ed.queue_free(); return
+	if ed._cell_atlas(layer, Vector2i(22, 22)) != ed.selected_atlas_coords:
+		_fail("map_editor (rect fill did not paint its interior)")
+		ed.queue_free(); return
+	ed._undo()
+	if ed._cell_atlas(layer, Vector2i(22, 22)) == ed.selected_atlas_coords:
+		_fail("map_editor (undo did not clear the rect fill)")
+		ed.queue_free(); return
+
+	# Line tool paints both endpoints and the cells between them.
+	ed._draw_line_cells(a, b)
+	for x in range(a.x, b.x + 1):
+		if ed._cell_atlas(layer, Vector2i(x, a.y)) != ed.selected_atlas_coords:
+			_fail("map_editor (line missed cell %d,%d)" % [x, a.y])
+			ed.queue_free(); return
+	ed._undo()
+
+	# A new edit must drop the redo stack (no branching history).
+	ed._place_tile_at(Vector2i(30, 30))
+	if not ed._redo_stack.is_empty():
+		_fail("map_editor (a fresh edit should clear the redo stack)")
+		ed.queue_free(); return
+
+	# Eyedropper adopts the tile under the cursor.
+	ed.selected_atlas_coords = Vector2i(0, 0)
+	ed.cursor_cell = Vector2i(30, 30)
+	ed._pick_tile_under_cursor()
+	if ed._cell_atlas(ed._selected_dest_layer(), Vector2i(30, 30)) == ed.NO_TILE:
+		_fail("map_editor (eyedropper test cell is empty)")
+		ed.queue_free(); return
+
+	# Loading/creating a document clears history rather than leaving stale diffs.
+	ed._create_new_map(ed.map_width_tiles, ed.map_height_tiles)
+	if not ed._undo_stack.is_empty() or not ed._redo_stack.is_empty():
+		_fail("map_editor (new map should clear undo history)")
+		ed.queue_free(); return
+
+	ed.queue_free()
+	_pass("map_editor_undo_and_tools")
+
+
+func _classic_world_with_all_ships() -> DriftWorld:
+	var registry := DriftShipRegistry.new()
+	if not registry.load_all_specs():
+		return null
+	var world = DriftWorld.new()
+	world.set_map_dimensions(200, 200)
+	world.set_all_ship_specs(registry.specs)
+	for t in range(8):
+		world.add_ship(t + 1, Vector2(200.0 + float(t) * 200.0, 200.0), t)
+	return world
+
+
+func _test_ship_starting_loadouts() -> void:
+	## Pins each ship's spawn loadout to the original server.cfg. Ship order:
+	## 0 Warbird 1 Javelin 2 Spider 3 Leviathan 4 Terrier 5 Weasel 6 Lancaster 7 Shark.
+	_ran += 1
+	var world = _classic_world_with_all_ships()
+	if world == null:
+		_fail("ship_loadouts (registry load failed)")
+		return
+
+	# InitialGuns / InitialBombs: only the Terrier starts above gun level 1, only the
+	# Leviathan and Weasel start with a bomb.
+	var expect_gun: Array[int] = [1, 1, 1, 1, 2, 1, 1, 1]
+	var expect_bomb: Array[int] = [0, 0, 0, 1, 0, 1, 0, 0]
+	for t in range(8):
+		var s: DriftTypes.DriftShipState = world.ships[t + 1]
+		if int(s.gun_level) != expect_gun[t]:
+			_fail("ship_loadouts (ship %d gun_level %d, expected %d)" % [t, int(s.gun_level), expect_gun[t]])
+			return
+		# bomb_level is clamped to >=1 in state; 0 in cfg means "no bombs yet".
+		if expect_bomb[t] == 1 and int(s.bomb_level) < 1:
+			_fail("ship_loadouts (ship %d should start with a bomb)" % t)
+			return
+
+	# InitialDecoy: the Spider is the only ship that spawns with an item.
+	for t in range(8):
+		var s2: DriftTypes.DriftShipState = world.ships[t + 1]
+		var expect_decoy: int = 1 if t == 2 else 0
+		if int(s2.decoy_count) != expect_decoy:
+			_fail("ship_loadouts (ship %d decoy_count %d, expected %d)" % [t, int(s2.decoy_count), expect_decoy])
+			return
+		for field in [s2.repel_count, s2.burst_count, s2.thor_count, s2.brick_count, s2.rocket_count, s2.portal_count]:
+			if int(field) != 0:
+				_fail("ship_loadouts (ship %d should spawn with no items but decoy)" % t)
+				return
+
+	# CloakStatus: only the Spider (2) and Shark (7) may ever cloak, and neither owns it
+	# at spawn -- Status=1 means it has to be prized. StealthStatus=2 on the Spider is
+	# the one ability anyone starts with.
+	for t in range(8):
+		var s3: DriftTypes.DriftShipState = world.ships[t + 1]
+		if bool(s3.has_cloak):
+			_fail("ship_loadouts (ship %d must not own cloak at spawn)" % t)
+			return
+		var expect_stealth: bool = (t == 2)
+		if bool(s3.has_stealth) != expect_stealth:
+			_fail("ship_loadouts (ship %d has_stealth=%s, expected %s)" % [t, str(s3.has_stealth), str(expect_stealth)])
+			return
+		if bool(s3.has_xradar) or bool(s3.has_antiwarp):
+			_fail("ship_loadouts (ship %d must prize xradar/antiwarp)" % t)
+			return
+
+	# MaxBombs: the Leviathan is the only ship that reaches level 3 bombs.
+	for t in range(8):
+		var s4: DriftTypes.DriftShipState = world.ships[t + 1]
+		for _i in range(6):
+			world._apply_prize_effect(s4, DriftTypes.PrizeKind.Bomb, false, 0)
+		var expect_max_bomb: int = 3 if t == 3 else 2
+		if int(s4.bomb_level) != expect_max_bomb:
+			_fail("ship_loadouts (ship %d maxed bomb_level %d, expected %d)" % [t, int(s4.bomb_level), expect_max_bomb])
+			return
+	_pass("ship_starting_loadouts")
+
+
+func _test_ability_ownership_and_item_caps() -> void:
+	_ran += 1
+	var world = _classic_world_with_all_ships()
+	if world == null:
+		_fail("ability_ownership (registry load failed)")
+		return
+	var warbird: DriftTypes.DriftShipState = world.ships[1]
+	var spider: DriftTypes.DriftShipState = world.ships[3]
+
+	# CloakStatus=0 on the Warbird: the prize must not grant it.
+	world._apply_prize_effect(warbird, DriftTypes.PrizeKind.Cloak, false, 0)
+	if bool(warbird.has_cloak) or bool(warbird.cloak_on):
+		_fail("ability_ownership (Warbird has CloakStatus=0 and must never cloak)")
+		return
+	# CloakStatus=1 on the Spider: the prize grants and switches it on.
+	world._apply_prize_effect(spider, DriftTypes.PrizeKind.Cloak, false, 0)
+	if not (bool(spider.has_cloak) and bool(spider.cloak_on)):
+		_fail("ability_ownership (Cloak prize should grant the Spider its cloak)")
+		return
+	# A negative roll takes a Status=1 ability away again...
+	world._apply_prize_effect(spider, DriftTypes.PrizeKind.Cloak, true, 0)
+	if bool(spider.has_cloak):
+		_fail("ability_ownership (negative Cloak should revoke a prized ability)")
+		return
+	# ...but never a Status=2 one. The Spider's stealth is start-with.
+	world._apply_prize_effect(spider, DriftTypes.PrizeKind.Stealth, true, 0)
+	if not bool(spider.has_stealth):
+		_fail("ability_ownership (StealthStatus=2 must survive a negative prize)")
+		return
+
+	# Item counts cap at the per-ship *Max (3 for every ship in the original cfg),
+	# not the old hardcoded 10.
+	for kind in [DriftTypes.PrizeKind.Decoy, DriftTypes.PrizeKind.Thor,
+			DriftTypes.PrizeKind.Brick, DriftTypes.PrizeKind.Rocket,
+			DriftTypes.PrizeKind.Repel, DriftTypes.PrizeKind.Burst,
+			DriftTypes.PrizeKind.Portal]:
+		for _i in range(12):
+			world._apply_prize_effect(warbird, kind, false, 0)
+	for pair in [[warbird.decoy_count, "decoy"], [warbird.thor_count, "thor"],
+			[warbird.brick_count, "brick"], [warbird.rocket_count, "rocket"],
+			[warbird.repel_count, "repel"], [warbird.burst_count, "burst"],
+			[warbird.portal_count, "portal"]]:
+		if int(pair[0]) != 3:
+			_fail("ability_ownership (%s capped at %d, expected 3)" % [String(pair[1]), int(pair[0])])
+			return
+
+	# ShrapnelMax=0 on the Weasel: EMP bombs never throw shrapnel, however many prizes.
+	var weasel: DriftTypes.DriftShipState = world.ships[6]
+	for _j in range(10):
+		world._apply_prize_effect(weasel, DriftTypes.PrizeKind.Shrapnel, false, 0)
+	if int(weasel.shrapnel_bonus) != 0:
+		_fail("ability_ownership (Weasel ShrapnelMax=0 but got %d)" % int(weasel.shrapnel_bonus))
+		return
+	# Everyone else gains ShrapnelRate=2 per prize up to ShrapnelMax=8.
+	for _k in range(10):
+		world._apply_prize_effect(warbird, DriftTypes.PrizeKind.Shrapnel, false, 0)
+	if int(warbird.shrapnel_bonus) != 8:
+		_fail("ability_ownership (Warbird shrapnel capped at %d, expected 8)" % int(warbird.shrapnel_bonus))
+		return
+	_pass("ability_ownership_and_item_caps")
+
+
+func _test_king_of_the_hill() -> void:
+	# [King] semantics per SSOS_Help.txt L1556-1572.
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.configure_king({
+		"enabled": true,
+		"expire_ticks": 100,
+		"death_count": 0,
+		"noncrown_adjust_ticks": 60,
+		"noncrown_min_bounty": 10,
+		"crown_recover_kills": 2,
+	})
+	world.add_ship(1, Vector2(400, 400))
+	world.add_ship(2, Vector2(900, 900))
+	world.add_ship(3, Vector2(1400, 1400))
+	world.start_king_round()
+	var a = world.ships.get(1)
+	var b = world.ships.get(2)
+	var c = world.ships.get(3)
+	if world.king_crown_holders().size() != 3:
+		_fail("king (everyone should start a round crowned)")
+		return
+
+	# The crown clock ticks down while alive.
+	var idle: Dictionary = {}
+	for _i in range(10):
+		world.step_tick(idle, false, 0)
+	if int(a.crown_ticks_left) != 90:
+		_fail("king (crown clock should be 90 after 10 ticks, got %d)" % int(a.crown_ticks_left))
+		return
+
+	# Killing an uncrowned player with enough bounty buys crown time.
+	b.crown_on = false
+	b.bounty = 50
+	var before: int = int(a.crown_ticks_left)
+	world._king_on_kill(a, b, int(b.bounty))
+	if int(a.crown_ticks_left) != before + 60:
+		_fail("king (NonCrownAdjustTime should add 60 ticks, got %d)" % (int(a.crown_ticks_left) - before))
+		return
+	# ...but not when they were worth less than NonCrownMinimumBounty.
+	before = int(a.crown_ticks_left)
+	world._king_on_kill(a, b, 5)
+	if int(a.crown_ticks_left) != before:
+		_fail("king (a cheap kill must not add crown time)")
+		return
+
+	# DeathCount=0 means one death loses the crown.
+	world._king_on_kill(a, c, int(c.bounty))
+	if bool(c.crown_on):
+		_fail("king (DeathCount=0 should strip the crown on first death)")
+		return
+
+	# Two crown kills win an uncrowned player their crown back.
+	b.crown_kills = 0
+	world._king_on_kill(b, a, int(a.bounty))
+	if bool(b.crown_on):
+		_fail("king (one crown kill is not enough with CrownRecoverKills=2)")
+		return
+	a.crown_on = true
+	world._king_on_kill(b, a, int(a.bounty))
+	if not bool(b.crown_on) or int(b.crown_ticks_left) != 100:
+		_fail("king (second crown kill should restore a full crown)")
+		return
+
+	# The clock expiring removes the crown.
+	c.crown_on = true
+	c.crown_ticks_left = 2
+	for _j in range(3):
+		world.step_tick(idle, false, 0)
+	if bool(c.crown_on) or int(c.crown_ticks_left) != 0:
+		_fail("king (crown should expire at zero)")
+		return
+	_pass("king_of_the_hill")
+
+
+func _test_ball_gated_on_goal_entities() -> void:
+	# The powerball only exists on soccer maps; otherwise it was an invisible
+	# gun-disabling trap parked at map centre.
+	_ran += 1
+	var world = DriftWorld.new()
+	world.set_map_dimensions(80, 60)
+	world.add_ship(1, world.arena_center)
+	var idle: Dictionary = {}
+	world.step_tick(idle, false, 0)
+	if int(world.ball.owner_id) == 1:
+		_fail("ball_gated (a ship on a non-soccer map must not pick up a ball)")
+		return
+
+	world.set_ball_enabled(true)
+	world.ball.position = world.ships[1].position
+	world.step_tick(idle, false, 0)
+	if int(world.ball.owner_id) != 1:
+		_fail("ball_gated (with goals present the ball should be pickable, owner=%d)" % int(world.ball.owner_id))
+		return
+	_pass("ball_gated_on_goal_entities")
 
 
 func _pass(name: String) -> void:

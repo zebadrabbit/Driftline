@@ -267,6 +267,8 @@ static func pack_input_packet(tick: int, ship_id: int, cmd: DriftTypes.DriftInpu
 	buffer.put_u8(1 if cmd.decoy_btn else 0)
 	buffer.put_u8(1 if cmd.brick_btn else 0)
 	buffer.put_u8(1 if cmd.portal_btn else 0)
+	# Multifire toggle button (append-only).
+	buffer.put_u8(1 if cmd.multifire_btn else 0)
 
 	return buffer.data_array
 
@@ -332,6 +334,9 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 	var portal_btn: bool = false
 	if buffer.get_available_bytes() >= 1:
 		portal_btn = buffer.get_u8() != 0
+	var multifire_btn: bool = false
+	if buffer.get_available_bytes() >= 1:
+		multifire_btn = buffer.get_u8() != 0
 	var thrust: float = (1.0 if forward else 0.0) + (-1.0 if reverse else 0.0)
 
 	return {
@@ -356,6 +361,7 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 		"decoy_btn": decoy_btn,
 		"brick_btn": brick_btn,
 		"portal_btn": portal_btn,
+		"multifire_btn": multifire_btn,
 	}
 
 
@@ -424,7 +430,8 @@ static func pack_snapshot_packet(
 	#     u8 gun_level
 	#     u8 bomb_level
 	#     u8 bullet_bounce_bonus
-	#     u8 flags (bit0=multi_fire_enabled)
+	#     u8 flags (bit0=multi_fire_enabled, bit1=bomb_proximity_enabled, bit2=multi_fire_capable,
+	#              bit3=has_stealth, bit4=has_cloak, bit5=has_xradar, bit6=has_antiwarp)
 	#     u32 engine_shutdown_until_tick
 	#     u32 bounty
 	#   [optional] u16 prize_count
@@ -558,6 +565,16 @@ static func pack_snapshot_packet(
 			flags |= 1
 		if bool(s.bomb_proximity_enabled):
 			flags |= 2
+		if bool(s.multi_fire_capable):
+			flags |= 4
+		if bool(s.has_stealth):
+			flags |= 8
+		if bool(s.has_cloak):
+			flags |= 16
+		if bool(s.has_xradar):
+			flags |= 32
+		if bool(s.has_antiwarp):
+			flags |= 64
 		buffer.put_u8(flags)
 		buffer.put_32(int(maxi(0, int(s.engine_shutdown_until_tick))))
 		buffer.put_32(int(maxi(0, int(s.bounty))))
@@ -898,6 +915,15 @@ static func pack_snapshot_packet(
 		buffer.put_32(int(sp.id))
 		buffer.put_u32(maxi(0, int(sp.points) if ("points" in sp) else 0))
 
+	# King of the Hill v1 (optional trailing; append-only).
+	#   u16 count, repeated: u32 id, u8 crown_on, u32 crown_ticks_left
+	buffer.put_u16(ship_count)
+	for i in range(ship_count):
+		var sk = ships[i]
+		buffer.put_32(int(sk.id))
+		buffer.put_u8(1 if bool(sk.crown_on) else 0)
+		buffer.put_u32(maxi(0, int(sk.crown_ticks_left)))
+
 	return buffer.data_array
 
 
@@ -1212,6 +1238,11 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 				ss.bullet_bounce_bonus = clampi(bullet_bounce_bonus, 0, 16)
 				ss.multi_fire_enabled = (flags & 1) != 0
 				ss.bomb_proximity_enabled = (flags & 2) != 0
+				ss.multi_fire_capable = (flags & 4) != 0
+				ss.has_stealth = (flags & 8) != 0
+				ss.has_cloak = (flags & 16) != 0
+				ss.has_xradar = (flags & 32) != 0
+				ss.has_antiwarp = (flags & 64) != 0
 				ss.engine_shutdown_until_tick = maxi(0, engine_shutdown_until_tick)
 				ss.bounty = maxi(0, bounty)
 
@@ -1704,6 +1735,18 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 				var pts_val: int = int(buffer.get_u32())
 				if ships_by_id.has(pts_id):
 					ships_by_id[pts_id].points = pts_val
+
+	# Optional King of the Hill v1 section.
+	if buffer.get_available_bytes() >= 2:
+		var king_count: int = int(buffer.get_u16())
+		if buffer.get_available_bytes() >= (king_count * 9):
+			for _ki in range(king_count):
+				var k_id: int = int(buffer.get_32())
+				var k_on: bool = buffer.get_u8() != 0
+				var k_ticks: int = int(buffer.get_u32())
+				if ships_by_id.has(k_id):
+					ships_by_id[k_id].crown_on = k_on
+					ships_by_id[k_id].crown_ticks_left = k_ticks
 
 	return {
 		"type": pkt_type,

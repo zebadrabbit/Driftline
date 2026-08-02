@@ -136,18 +136,95 @@ This project didn’t previously have a formal changelog. The entries below were
 - Ruleset bullet tuning is now authoritative by default (non-versioned `server.cfg` ship weapon fields no longer override bullet speed/delay unless explicitly enabled).
 - Baseline bullet firing cadence no longer defaults to every tick (cooldown now enforced via ruleset `cooldown_ticks`).
 
-## Unreleased
+## 0.7.0 - 2026-08-01
+
+### Added
+
+- **Chat commands and `%` macros** (`client/scripts/ui/chat_commands.gd`): `?help`,
+  `?ping`, `?packetloss`, `?status`, `?flags`, `?team`, `?kill`, `?lines=N`,
+  `?ignore <name>`, and `=NNNN` frequency change. Messages expand `%coord %area
+  %selfname %freq %bounty %flags %energy %shield %super %killer %killed %red
+  %redname %redflags %redbounty`, with `%%` as the literal-percent escape. Unknown
+  `?` commands fall through to public chat, as in SubSpace.
+- **Multifire toggle key.** The 3-shot spread logic already existed but could only be
+  switched on by the prize. New `multi_fire_capable` state separates owning the
+  upgrade from having it switched on, so the key cannot conjure it from nothing.
+- **King of the Hill** from the `[King]` config block: per-ship crown state with all
+  six keys (`ExpireTime`, `DeathCount`, `NonCrownAdjustTime`, `NonCrownMinimumBounty`,
+  `CrownRecoverKills`, `RewardFactor`), an append-only snapshot section, server round
+  flow with arena announcements, and a HUD `KING m:ss` countdown.
+- **Game-mode profiles**: `[Game] Mode` in `server.cfg` selects `res://modes/<mode>.cfg`,
+  a third config layer between `res://` and `user://`. Profiles for `war`, `chaos`,
+  `king`, `rabbit`, `soccer`, `speed`, `jackpot` and `alpha`, generated from the
+  original per-arena `SERVER.CFG` files.
+- **Player stat box** with the six SubSpace F2 modes (names / points / sorted by
+  points / grouped by team / win-loss / frequency statistics), replacing the single
+  hardcoded F9 scoreboard.
+- `F11` spectator toggle and `F12` ship cycle.
+- Ability ownership: `*Status` values now distinguish `1` (must be prized) from `2`
+  (start with it). Only the Spider starts with stealth; only the Spider and Shark can
+  ever receive cloak.
+- `Glue` wired as the Engine Shutdown prize with a severe ~40 s variant; negative
+  QuickCharge now empties the energy bar ("Energy Depleted").
+- 26 original sounds wired: per-level bomb/mine/EMP fire, EMP detonation, ability
+  toggles, multifire on/off, decoy, rocket, victory cues.
+- Previously-dead art wired: EMP burst, super-shield bubble, rocket exhaust plume, the
+  expiring-crown sheet, and per-ship wreckage on death.
+- Cloak now hides enemy ships in the world view (XRadar counters it); stealth stays
+  radar-only, matching `Screen Items.pdf`.
+- **Map editor**: undo/redo (`Ctrl+Z` / `Ctrl+Y`) with rect and flood fills as single
+  steps, line (`L`), bucket fill (`G`) and eyedropper (`I`) tools, an `F1` hotkey
+  overlay replacing the permanent 3-line label, and `F10` switching between the map
+  and tileset editors.
+- Smoke tests for chat commands, macros, multifire, negative prizes, King of the Hill,
+  ball gating, per-ship starting loadouts, ability ownership and item caps, the map
+  editor's undo stack and tools, and the music library.
+
+### Changed
+
+- **Default keybindings now follow the original SubSpace 1.34 layout**: arrow keys to
+  fly, `Ctrl` guns, `Tab` bombs, `Shift`+`Tab` mines, `Home`/`Shift`+`Home` for
+  stealth/cloak, `End`/`Shift`+`End` for XRadar/AntiWarp, `Del`/`Shift`+`Del` for
+  multifire/burst, `Ins`/`Shift`+`Ins` for warp/portal, and `F3`-`F6` for
+  rocket/brick/decoy/thor. Saved rebinds in `user://settings.json` are unaffected.
+- Powerball is gated on the map containing goal entities, derived independently by
+  both sides from the same map file.
+- Per-ship item capacities (`DecoyMax`, `ThorMax`, `BrickMax`, `RocketMax`) are
+  honoured instead of a hardcoded cap of 10.
+- Shrapnel prizes add `ShrapnelRate` up to `ShrapnelMax`; the Weasel's max of 0 means
+  its EMP bombs never throw shrapnel.
+- Help ticker text rewritten for the new bindings and chat commands.
+- Smoke suite restored to green after six weeks red; six stale test expectations
+  re-baselined and the determinism golden hash regenerated (again for ball gating).
 
 ### Fixed
 
+- **Portal never worked in multiplayer**: the server built its `DriftInputCmd` without
+  `portal_btn`, so the beacon appeared only in client prediction and was then
+  reconciled away.
+- Reconciliation dropped the new capability flags (`multi_fire_capable`, the four
+  ability-ownership bits, crown state), which would have desynced prediction.
+- `_is_spectating` was set on spectate but never cleared on re-entry, leaving the
+  camera locked to the spectate target.
+- `_king_on_kill` stripped the victim's crown before deciding the attacker's reward, so
+  `CrownRecoverKills` could never fire.
+- The client accepted only `goal` entities where the server also accepted `base`, so
+  the two sides could disagree about whether a map has a ball.
+- `drift_open_map_editor` defaulted to the Down arrow, which is now thrust-reverse.
+- **Music**: the jukebox's directory scan matched only raw audio files, so an exported
+  build (which ships `Track.ogg.import`) would have had an empty playlist and run
+  silent. It now also handles the `.import` form. A single unloadable track no longer
+  stops music for the session, `Ctrl+M` crossfades to the other player instead of
+  cutting the current one, and an empty playlist no longer divides by zero.
+- Deleted `client/scenes/editor/map_editor.gd`, an unused Godot template stub.
 - Clean checkouts could not load the client at all: `tools/tilemap_editor/` was never committed despite being `preload()`ed by `client/client_main.gd`.
 - Arena bounds (`ARENA_MIN`/`MAX`/`CENTER`, `HILL_CENTER`) were process-global `static var`s, so every `DriftWorld` in a process shared one arena and construction order changed simulation results. They are now per-world instance state; the `DriftConstants` statics remain only as a mirror for client presentation code.
 - Player usernames arrived empty: `unpack_hello()` did not index `get_data()`'s `[error, PackedByteArray]` return.
 - `set_map_dimensions()` now recenters the powerball, matching what the server already does on match start and after each goal.
 
-### Changed
+### Removed
 
-- Smoke suite restored to green (87 checks) after six weeks red; six stale test expectations re-baselined and the determinism golden hash regenerated.
+- Duplicate `(1)`-suffixed music files; the library is now 20 distinct tracks.
 
 ## 0.6.0 - 2026-07-20
 

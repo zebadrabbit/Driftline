@@ -33,6 +33,8 @@ class DriftInputCmd:
 	var decoy_btn: bool
 	var brick_btn: bool
 	var portal_btn: bool
+	# Multifire toggle button (edge-detected; flips multi_fire_enabled when the ship is capable).
+	var multifire_btn: bool
 
 	func _init(
 		thrust_value: float = 0.0,
@@ -52,7 +54,8 @@ class DriftInputCmd:
 		rocket_btn_value: bool = false,
 		decoy_btn_value: bool = false,
 		brick_btn_value: bool = false,
-		portal_btn_value: bool = false
+		portal_btn_value: bool = false,
+		multifire_btn_value: bool = false
 	) -> void:
 		thrust = clampf(float(thrust_value), -1.0, 1.0)
 		rotation = clampf(float(rotation_value), -1.0, 1.0)
@@ -72,6 +75,7 @@ class DriftInputCmd:
 		decoy_btn = bool(decoy_btn_value)
 		brick_btn = bool(brick_btn_value)
 		portal_btn = bool(portal_btn_value)
+		multifire_btn = bool(multifire_btn_value)
 
 
 
@@ -110,6 +114,23 @@ class DriftShipState:
 	var gun_level: int = 1
 	var bomb_level: int = 1
 	var multi_fire_enabled: bool = false
+	# Whether the ship owns the MultiFire upgrade at all. The prize grants the capability
+	# (and switches it on); the toggle key only flips multi_fire_enabled while capable.
+	var multi_fire_capable: bool = false
+	# Ability ownership, from the per-ship *Status keys (0=no, 1=receivable via prize,
+	# 2=start with it). Separate from the *_on toggles: owning an ability is what lets
+	# you switch it on at all.
+	var has_stealth: bool = false
+	var has_cloak: bool = false
+	var has_xradar: bool = false
+	var has_antiwarp: bool = false
+	# King of the Hill ([King] in server.cfg). Every player starts a round crowned with
+	# ExpireTime on the clock; the last crown standing wins.
+	var crown_on: bool = false
+	var crown_ticks_left: int = 0
+	var crown_deaths: int = 0
+	# Crowned players killed since losing your own crown (CrownRecoverKills).
+	var crown_kills: int = 0
 	var bullet_bounce_bonus: int = 0
 	var shrapnel_bonus: int = 0
 	var rotation_bonus: int = 0

@@ -116,6 +116,13 @@ var _spectator_ship_ids: Dictionary = {}  # ship_id -> true
 
 # Each entry: {pos: Vector2, radius: float, team: int}  (team = owner of this goal)
 var _goal_zones: Array = []
+
+# King of the Hill round state (server-only; crown state itself lives in the sim).
+var _king_reward_factor: int = 0
+var _king_round_active: bool = false
+var _king_restart_tick: int = -1
+const KING_MIN_PLAYERS: int = 2
+const KING_RESTART_DELAY_TICKS: int = 600  # 10 s between rounds
 var _wormholes: Array = []  # Array[Vector2] px centers
 var _turf_flags: Array = []  # Array[DriftFlagState]; team = owning freq, 0 = neutral
 # CTF flags: Array[DriftFlagState] (at most 2 entries, one per team).
@@ -172,6 +179,16 @@ func _initialize() -> void:
 			" hide_count=", world.prize_hide_count,
 			" next_spawn_tick=", world.next_prize_spawn_tick)
 		print("[PRIZE] loaded from ", str(prize_res.get("path", "")))
+		var king_cfg: Dictionary = prize_res.get("king", {}) as Dictionary
+		world.configure_king(king_cfg)
+		_king_reward_factor = int(king_cfg.get("reward_factor", 0))
+		if world.king_enabled:
+			print("[KING] enabled expire_ticks=", world.king_expire_ticks,
+				" death_count=", world.king_death_count,
+				" recover_kills=", world.king_crown_recover_kills)
+		var mode_name: String = String(prize_res.get("mode", ""))
+		if mode_name != "":
+			print("[GAME] mode=", mode_name, (" (profile applied)" if bool(prize_res.get("mode_applied", false)) else " (no res://modes/%s.cfg found)" % mode_name.to_lower()))
 	else:
 		print("[PRIZE] disabled: ", str(prize_res.get("error", "failed to load server.cfg")))
 
@@ -487,7 +504,9 @@ func _load_selected_map_from_config() -> bool:
 		elif etype == "wormhole":
 			_wormholes.append(epos)
 	world.set_wormholes(_wormholes)
-	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ", goals=", _goal_zones.size(), ", flags=", _flags.size(), ", wormholes=", _wormholes.size(), ")")
+	# Goal entities are what make a map a soccer map; no goals, no ball.
+	world.set_ball_enabled(not _goal_zones.is_empty())
+	print("Map entities: ", map_entities.size(), " (spawns=", spawn_count, ", goals=", _goal_zones.size(), ", flags=", _flags.size(), ", wormholes=", _wormholes.size(), ", ball=", world.ball_enabled, ")")
 
 	# Static map hash for replay headers (computed once).
 	_replay_map_hash = 0
@@ -579,6 +598,48 @@ func _respawn_ship(ship_id: int) -> void:
 	world.respawn_ship(ship_id)
 	_remove_buffered_inputs_for_ship(ship_id)
 	last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
+
+
+func _check_king() -> void:
+	## King of the Hill round flow. Crown state and its countdown live in the sim
+	## (deterministic, replicated); only round start/win lives here.
+	if world == null or not world.king_enabled:
+		return
+	var players: int = world.ships.size()
+
+	if not _king_round_active:
+		if players < KING_MIN_PLAYERS:
+			return
+		if _king_restart_tick >= 0 and world.tick < _king_restart_tick:
+			return
+		world.start_king_round()
+		_king_round_active = true
+		_king_restart_tick = -1
+		_broadcast_arena_message("King of the Hill: round start! Last crown standing wins.")
+		print("[KING] round start with ", players, " players")
+		return
+
+	var holders: Array = world.king_crown_holders()
+	if holders.size() > 1:
+		return
+	# Round over: either one crown left, or every clock ran out.
+	if holders.size() == 1:
+		var winner: DriftTypes.DriftShipState = world.ships.get(int(holders[0]))
+		if winner != null:
+			# RewardFactor "uses FlagReward formula": players^2 * factor / 1000.
+			var reward: int = int(players * players * _king_reward_factor / 1000)
+			winner.points = int(winner.points) + reward
+			_broadcast_arena_message("%s is the KING! (+%d)" % [String(winner.username), reward])
+			print("[KING] round won by ", String(winner.username), " (+", reward, ")")
+	else:
+		_broadcast_arena_message("King of the Hill: no crowns left, round void.")
+		print("[KING] round void, no crowns left")
+	_king_round_active = false
+	_king_restart_tick = world.tick + KING_RESTART_DELAY_TICKS
+
+
+func _broadcast_arena_message(text: String) -> void:
+	_broadcast_reliable(DriftNet.pack_chat_broadcast("*", DriftNet.CHAT_TYPE_ARENA, text))
 
 
 func _check_ball_goals() -> void:
@@ -813,7 +874,9 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 			bool(input_dict.get("thor_btn", false)),
 			bool(input_dict.get("rocket_btn", false)),
 			bool(input_dict.get("decoy_btn", false)),
-			bool(input_dict.get("brick_btn", false))
+			bool(input_dict.get("brick_btn", false)),
+			bool(input_dict.get("portal_btn", false)),
+			bool(input_dict.get("multifire_btn", false))
 		)
 		return
 
@@ -1052,6 +1115,7 @@ func _step_authoritative_tick() -> void:
 	# CTF flag pickup / capture / auto-return.
 	_check_ctf()
 	_check_turf()
+	_check_king()
 
 	if world.tick % DriftConstants.TICK_RATE == 0 and world.tick != last_printed_tick:
 		last_printed_tick = world.tick
@@ -1064,15 +1128,22 @@ func _step_authoritative_tick() -> void:
 		print("[NET] tick mismatch after step: intended=", intended_tick, " actual=", world.tick)
 
 	if (latest_snapshot.tick % SNAPSHOT_INTERVAL_TICKS) == 0:
-		# Compute king: alive ship with highest bounty.
+		# Crown marker. In a King of the Hill round it is the crown holder with the most
+		# time left; otherwise it falls back to the alive ship with the highest bounty.
 		var king_id: int = -1
-		var king_bounty: int = 0
+		var king_score: int = 0
 		for sid_k in latest_snapshot.ships.keys():
 			var sk = latest_snapshot.ships[sid_k]
 			if sk == null or world._ship_is_dead(sk, latest_snapshot.tick):
 				continue
-			if int(sk.bounty) > king_bounty:
-				king_bounty = int(sk.bounty)
+			if world.king_enabled:
+				if not bool(sk.crown_on):
+					continue
+				if int(sk.crown_ticks_left) > king_score:
+					king_score = int(sk.crown_ticks_left)
+					king_id = int(sid_k)
+			elif int(sk.bounty) > king_score:
+				king_score = int(sk.bounty)
 				king_id = int(sid_k)
 		latest_snapshot.king_ship_id = king_id
 		_send_snapshot(latest_snapshot)

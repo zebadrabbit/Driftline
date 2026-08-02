@@ -10,6 +10,12 @@ A small Godot 4 project with an authoritative server tick, a client with predict
 - `shared/`: deterministic shared simulation + network packet types
 - `tools/`: one-off utility scripts
 - `assets/tilesets/`: runtime tileset packages (image + defs + manifest)
+- `rulesets/`: ship/weapon tuning (`base.json` + `classic/` + `extreme/`)
+- `modes/`: game-mode config profiles, layered over `server.cfg` (see **Game Modes**)
+- `maps/`: map JSON, including `maps/imported/` converted from original `.lvl` files
+- `data/`: runtime text data (help ticker pages)
+- `tests/`: smoke and contract suites
+- `docs/formats/`: normative schema docs for the versioned JSON contracts
 - `original_content/`: **not distributed** — a local-only scratch directory holding original SubSpace reference material (server.cfg, TEMPLATE.SSS, main.c). Supply your own copy to work on parity; see `plans/subspace-parity.md`
 
 ## Versioning
@@ -132,22 +138,89 @@ Help / training ticker:
 - `Esc` + `F6`: toggle the help ticker
 - `F1`: cycle help pages
 
-Abilities (default bindings):
+### Controls (default bindings)
 
-- `Shift` (hold) + thrust: afterburner (drains energy)
-- `Z`: toggle stealth
-- `X`: toggle cloak
-- `C`: toggle XRadar
-- `V`: toggle AntiWarp
+Defaults follow the original SubSpace 1.34 layout (`original_content/controls.txt`).
+Everything here is rebindable from the Options menu.
+
+Flying and weapons:
+
+| Key | Action |
+| --- | --- |
+| Arrow keys | Rotate / thrust forward / thrust reverse |
+| `Shift` + thrust | Afterburner (drains energy) |
+| `Ctrl` | Fire guns |
+| `Tab` | Fire bomb |
+| `Shift`+`Tab` | Lay mine |
+| `Del` | Toggle multifire (requires the MultiFire prize) |
+
+Abilities. Each must be won as a prize unless the ship's `*Status` in `server.cfg`
+is `2` — only the Spider starts with stealth, and only the Spider and Shark can
+ever cloak:
+
+| Key | Ability |
+| --- | --- |
+| `Home` | Stealth (hides you from radar) |
+| `Shift`+`Home` | Cloak (hides you on screen; XRadar counters it) |
+| `End` | XRadar |
+| `Shift`+`End` | AntiWarp |
+
+Items (limited charges, shown on the left HUD edge):
+
+| Key | Item |
+| --- | --- |
+| `Shift`+`Ctrl` | Repel |
+| `Shift`+`Del` | Burst |
+| `Ins` | Warp |
+| `Shift`+`Ins` | Portal (drop a 60 s return beacon; press again to warp back) |
+| `F3` | Rocket |
+| `F4` | Brick |
+| `F5` | Decoy |
+| `F6` | Thor's Hammer |
+
+Screen and session:
+
+| Key | Action |
+| --- | --- |
+| `F2` | Cycle the player stat box (off, names, points, sorted, by team, W/L, freq stats) |
+| `F11` | Toggle spectator mode |
+| `F12` | Cycle ship type (loses powerups) |
+| `Esc` + `F1`-`F8` | Change ship |
+| `Enter` or `T` | Open chat |
+| `Ctrl`+`M` | Skip music track |
+
+### Chat commands
+
+Type in chat. Unknown `?` commands are sent as normal chat, as in SubSpace.
+Reference: `original_content/old assets/.../HELP/sshelpge41.html`.
+
+- `=NNNN` — change frequency (team)
+- `?help` — list commands
+- `?ping`, `?packetloss`, `?status` — connection and ship diagnostics
+- `?flags`, `?team` — who holds flags, who is on your freq
+- `?kill` — toggle kill messages
+- `?lines=N` — number of chat lines shown
+- `?ignore <name>` — toggle ignoring a player
+- `/t <msg>` team, `/priv <name> <msg>` private, `/arena <msg>` arena
+
+Messages expand `%` macros as they send: `%coord %area %selfname %freq %bounty
+%flags %energy %shield %super %killer %killed %red %redname %redflags
+%redbounty`. Use `%%` for a literal `%`.
 
 ## Map Editor
 
-Open the in-project map editor with `M` from the client.
+Open the in-project map editor with `F10` from the connection screen. `F10` again
+inside either editor switches between the map editor and the tileset editor.
 
 Controls (editor):
 
+- `F1`: full hotkey overlay (the status bar stays compact)
 - Mouse: move cursor (tile under mouse)
-- `LMB` drag: rectangle fill
+- `Ctrl+Z` / `Ctrl+Y`: undo / redo. A rect or flood fill is a single undo step;
+  `Ctrl+Shift+Z` also redoes. New/load/paste replace the document and clear history.
+- `B` / `L` / `G`: rect, line and bucket-fill tools
+- `I`: eyedropper (adopt the tile under the cursor)
+- `LMB` drag: apply the active tool
 - `Shift` + `LMB` drag: rectangle outline
 - `Space`: place tile at cursor
 - `RMB` or `Backspace`: erase tile at cursor
@@ -171,6 +244,29 @@ Tile metadata (editor):
 - `T`: toggle test puck mode. In test mode: click to shoot; right click resets.
 
 Map sizes in the editor UI are in pixels (multiples of 16). Internally the map is stored in tiles.
+
+## Game Modes
+
+`server.cfg` `[Game] Mode` selects a profile from `res://modes/<mode>.cfg`, layered
+between `res://server.cfg` (defaults) and `user://server.cfg` (local overrides). Each
+profile holds only the keys that differ, generated from the original per-arena
+`SERVER.CFG` files that shipped with the SubSpace subgame server.
+
+Available: `war` `chaos` `king` `rabbit` `soccer` `speed` `jackpot` `alpha`.
+Leave `Mode=""` for the plain defaults.
+
+Two behaviours are map-driven rather than mode-driven, so client and server agree
+without extra replication:
+
+- **Powerball** exists only on maps that contain `goal` (or `base`) entities.
+- **Flags** come from `flag` entities; team `0` means a claim-by-touch turf flag.
+
+**King of the Hill** is configured by `[King]` in `server.cfg` and is off unless a
+profile enables it (`modes/king.cfg` does). Every player starts a round crowned with
+`ExpireTime` on the clock; the clock only runs while alive, killing an uncrowned
+player worth at least `NonCrownMinimumBounty` adds `NonCrownAdjustTime`, losing more
+than `DeathCount` deaths strips your crown, and `CrownRecoverKills` crown kills win it
+back. Last crown standing takes `RewardFactor` points via the FlagReward formula.
 
 ## Networking / Simulation Notes
 
@@ -215,7 +311,12 @@ Config lives in `server.cfg`:
 - `[Prize]`: spawn timing and limits (seconds; converted to ticks on load)
 - `[PrizeWeight]`: relative probability weights per prize kind
 
-Config precedence is layered (defaults then overrides): `res://server.cfg` then `user://server.cfg`.
+Config precedence is layered, lowest to highest: `res://server.cfg`, then the
+`res://modes/<mode>.cfg` profile selected by `[Game] Mode`, then `user://server.cfg`.
+
+Negative prizes mirror the original: `Glue` is the Engine Shutdown prize
+(`[Prize] EngineShutdownTime`, with a ~40 s severe variant), and a negative
+QuickCharge empties the energy bar.
 
 On pickup, the client plays `res://client/audio/prize.wav`.
 
