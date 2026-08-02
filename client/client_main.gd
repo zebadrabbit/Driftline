@@ -383,6 +383,9 @@ var is_connected: bool = false
 var last_connection_status: int = MultiplayerPeer.CONNECTION_DISCONNECTED
 
 var authoritative_tick: int = -1
+# Newest snapshot tick applied, for out-of-order rejection. Unlike authoritative_tick
+# this advances even when the local ship is absent (spectating, or out of its own AOI).
+var _last_applied_snap_tick: int = -1
 var authoritative_ship_state: DriftTypes.DriftShipState
 
 var connected: bool = false
@@ -1280,8 +1283,13 @@ func _send_input_for_tick(next_tick: int, cmd: DriftTypes.DriftInputCmd) -> void
 	var packet: PackedByteArray = DriftNet.pack_input_packet(next_tick, local_ship_id, cmd)
 
 	# In Godot, the server's peer ID is always 1.
+	# Unreliable: a retransmitted input is worth nothing (the server only ever uses the
+	# newest one), while sending it reliably head-of-line blocks every other reliable
+	# packet on this channel — chat, kills, welcome — behind the retransmit.
+	# ponytail: one command per packet. If lost single-tick taps (fire, ability toggles)
+	# show up on lossy links, resend the last 2-3 commands per packet instead.
 	enet_peer.set_transfer_channel(NET_CHANNEL)
-	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
 	enet_peer.set_target_peer(1)
 	enet_peer.put_packet(packet)
 
@@ -3933,6 +3941,7 @@ func _poll_network_packets() -> void:
 				world.add_ship(local_ship_id, SPAWN_POSITION)
 				input_history.clear()
 				authoritative_tick = -1
+				_last_applied_snap_tick = -1
 				authoritative_ship_state = null
 				has_authoritative = false
 				# Apply ship selection or spectate request made on the connect screen.
@@ -4336,8 +4345,13 @@ func _handle_packet(bytes: PackedByteArray) -> void:
 
 func _apply_snapshot_dict(snap_dict: Dictionary) -> void:
 	var snap_tick: int = snap_dict["tick"]
-	if snap_tick <= authoritative_tick:
+	# Snapshots are unreliable and unsequenced, so a reordered packet can land after a
+	# newer one. authoritative_tick only advances when the local ship is in the snapshot,
+	# which never happens while spectating — so track the applied tick separately or the
+	# spectator view interpolates backwards.
+	if snap_tick <= _last_applied_snap_tick:
 		return
+	_last_applied_snap_tick = snap_tick
 	if local_ship_id < 0:
 		return
 

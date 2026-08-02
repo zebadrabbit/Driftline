@@ -84,7 +84,11 @@ static func unpack_hello(bytes: PackedByteArray) -> String:
 	var pkt_type: int = buffer.get_u8()
 	if pkt_type != PKT_HELLO:
 		return ""
+	if buffer.get_available_bytes() < 2:
+		return ""
 	var length = buffer.get_u16()
+	if length <= 0 or buffer.get_available_bytes() < length:
+		return ""
 	# get_data() returns [error, PackedByteArray] — index [1] for the bytes.
 	var data = buffer.get_data(length)
 	return (data[1] as PackedByteArray).get_string_from_utf8()
@@ -280,6 +284,11 @@ static func unpack_input_packet(bytes: PackedByteArray) -> Dictionary:
 
 	var pkt_type: int = buffer.get_u8()
 	if pkt_type != PKT_INPUT:
+		return {}
+	# The core layout below is fixed size (tick 4 + ship_id 4 + fwd 1 + rev 1 +
+	# rotation 4 + fire 1). The server parses these bytes straight off the wire, so a
+	# short packet must be rejected rather than read as zeros.
+	if buffer.get_available_bytes() < 15:
 		return {}
 
 	# Input packet tick refers to the simulation tick that will be stepped next using this input.
@@ -1143,6 +1152,10 @@ static func unpack_snapshot_packet(bytes: PackedByteArray) -> Dictionary:
 
 	var tick: int = buffer.get_32()
 	var ship_count: int = buffer.get_u16()
+	# Ships (24 bytes each) and the ball block (20) are fixed size and always present.
+	# Every trailing section already length-checks itself; this covers the header.
+	if buffer.get_available_bytes() < (ship_count * 24 + 20):
+		return {}
 	var ships: Array = []
 	ships.resize(ship_count)
 

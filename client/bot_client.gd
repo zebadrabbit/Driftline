@@ -1329,9 +1329,11 @@ func _compute_decision(self_ship: DriftTypes.DriftShipState) -> Dictionary:
 
 func _send_input(tick: int, cmd: DriftTypes.DriftInputCmd) -> void:
 	var packet: PackedByteArray = DriftNet.pack_input_packet(tick, local_ship_id, cmd)
-	# Server peer id is always 1.
+	# Server peer id is always 1. Unreliable for the same reason as the real client:
+	# a late input is superseded, not useful, and reliable delivery would head-of-line
+	# block the rest of the channel behind the retransmit.
 	enet_peer.set_transfer_channel(NET_CHANNEL)
-	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_RELIABLE)
+	enet_peer.set_transfer_mode(MultiplayerPeer.TRANSFER_MODE_UNRELIABLE)
 	enet_peer.set_target_peer(1)
 	enet_peer.put_packet(packet)
 

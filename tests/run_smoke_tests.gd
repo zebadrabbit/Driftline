@@ -126,6 +126,7 @@ func _initialize() -> void:
 	_test_two_worlds_do_not_share_arena()
 	_test_multifire_toggle_requires_capability()
 	_test_multifire_input_roundtrip()
+	_test_truncated_packets_rejected()
 	_test_chat_commands()
 	_test_chat_macros()
 	_test_special_negative_prizes()
@@ -5076,6 +5077,42 @@ func _test_multifire_input_roundtrip() -> void:
 		_fail("multifire_input_roundtrip (capability/enabled flags lost in snapshot)")
 		return
 	_pass("multifire_input_roundtrip")
+
+
+func _test_truncated_packets_rejected() -> void:
+	# The server parses input packets straight off the wire from untrusted clients, so a
+	# short packet has to be rejected rather than read back as a wall of zeros (which
+	# unpacks as a valid-looking input for tick 0, ship 0).
+	_ran += 1
+	var cmd := DriftTypes.DriftInputCmd.new(1.0, 0.5, true)
+	var good: PackedByteArray = DriftNet.pack_input_packet(9, 4, cmd)
+	if DriftNet.unpack_input_packet(good).is_empty():
+		_fail("truncated_packets_rejected (well-formed input packet was rejected)")
+		return
+	for cut in [1, 5, 10, 15]:
+		if not DriftNet.unpack_input_packet(good.slice(0, cut)).is_empty():
+			_fail("truncated_packets_rejected (input packet of %d bytes accepted)" % cut)
+			return
+
+	var s := DriftTypes.DriftShipState.new(1, Vector2(10, 20))
+	var snap: PackedByteArray = DriftNet.pack_snapshot_packet(1, [s])
+	if DriftNet.unpack_snapshot_packet(snap).is_empty():
+		_fail("truncated_packets_rejected (well-formed snapshot was rejected)")
+		return
+	# 1 type + 4 tick + 2 count = 7 header bytes, then 24 ship + 20 ball must be present.
+	for cut2 in [7, 20, 40, 50]:
+		if not DriftNet.unpack_snapshot_packet(snap.slice(0, cut2)).is_empty():
+			_fail("truncated_packets_rejected (snapshot of %d bytes accepted)" % cut2)
+			return
+
+	var hello: PackedByteArray = DriftNet.pack_hello("driftpilot")
+	if DriftNet.unpack_hello(hello) != "driftpilot":
+		_fail("truncated_packets_rejected (hello did not round-trip)")
+		return
+	if DriftNet.unpack_hello(hello.slice(0, 7)) != "":
+		_fail("truncated_packets_rejected (truncated hello returned a name)")
+		return
+	_pass("truncated_packets_rejected")
 
 
 func _test_chat_commands() -> void:

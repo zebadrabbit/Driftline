@@ -97,6 +97,12 @@ var ship_id_by_peer: Dictionary = {} # Dictionary[int, int]
 # ship_id -> last known input (fallback when packets are missing)
 var last_cmd_by_ship: Dictionary = {} # Dictionary[int, DriftTypes.DriftInputCmd]
 
+# ship_id -> newest input tick accepted, so unordered packets can't regress the ship.
+var last_input_tick_by_ship: Dictionary = {} # Dictionary[int, int]
+
+# How far ahead of the server a client is allowed to buffer input (1 second).
+const MAX_INPUT_LEAD_TICKS: int = 60
+
 # Chat rate limiting: peer_id -> Array[int] of recent chat tick timestamps.
 var _chat_ticks_by_peer: Dictionary = {} # Dictionary[int, Array]
 const CHAT_RATE_LIMIT_MSGS: int = 3
@@ -585,10 +591,12 @@ func _on_peer_disconnected(peer_id: int) -> void:
 
 		# Clear buffers for that ship.
 		last_cmd_by_ship.erase(ship_id)
+		last_input_tick_by_ship.erase(ship_id)
 		last_freq_change_tick_by_ship.erase(ship_id)
 		_remove_buffered_inputs_for_ship(ship_id)
 		_spectator_ship_ids.erase(ship_id)
 
+	_chat_ticks_by_peer.erase(peer_id)
 	print("Client disconnected: ", peer_id)
 
 
@@ -853,13 +861,28 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 		if ship_id_by_peer[sender_id] != ship_id:
 			return
 
-		# Ignore stale inputs.
-		if tick <= world.tick:
+		# Inputs travel unreliable, so they can arrive out of order. Keep only the
+		# newest per ship; anything older has already been superseded.
+		if tick <= int(last_input_tick_by_ship.get(ship_id, -1)):
+			return
+		last_input_tick_by_ship[ship_id] = tick
+
+		# Bound how far ahead a client may buffer. Without this, one client sending
+		# absurd tick numbers grows inputs_by_tick for as long as it stays connected.
+		if tick > world.tick + MAX_INPUT_LEAD_TICKS:
 			return
 
-		if not inputs_by_tick.has(tick):
-			inputs_by_tick[tick] = {}
-		var tick_inputs: Dictionary = inputs_by_tick[tick]
+		# Apply a late input on the next tick instead of discarding it. Nothing manages
+		# how far the client's tick leads the server's — it is whatever the client's
+		# startup hitch happened to leave it at (measured at +4, +5 and +8 for three
+		# clients on one machine). Discarding late inputs means any client whose lead is
+		# smaller than the latency has *every* input dropped, and the server just keeps
+		# replaying last_cmd_by_ship, so the ship flies on with the throttle stuck on.
+		var apply_tick: int = maxi(tick, world.tick + 1)
+
+		if not inputs_by_tick.has(apply_tick):
+			inputs_by_tick[apply_tick] = {}
+		var tick_inputs: Dictionary = inputs_by_tick[apply_tick]
 		tick_inputs[ship_id] = DriftTypes.DriftInputCmd.new(
 			float(input_dict.get("thrust", 0.0)),
 			float(input_dict.get("rotation", 0.0)),
@@ -922,8 +945,14 @@ func _handle_packet(sender_id: int, bytes: PackedByteArray) -> void:
 		if desired_type < 0 or desired_type >= DriftShipRegistry.SHIP_COUNT:
 			reason = DriftNet.SHIP_CHANGE_REASON_INVALID_TYPE
 		else:
+			# Going to spectate erases the ship from the world, and change_ship_type
+			# refuses to act on a ship that no longer exists — so leaving spectate
+			# always failed. Recreate the ship first.
+			if not world.ships.has(ship_id):
+				world.respawn_ship(ship_id)
 			ok = world.change_ship_type(ship_id, desired_type)
 			if ok:
+				_spectator_ship_ids.erase(ship_id)
 				_remove_buffered_inputs_for_ship(ship_id)
 				last_cmd_by_ship[ship_id] = DriftTypes.DriftInputCmd.new(0.0, 0.0, false, false, false)
 			else:
